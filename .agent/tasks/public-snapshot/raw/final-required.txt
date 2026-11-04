@@ -1,0 +1,16 @@
+Command:
+  export VITEST_MAX_WORKERS=4
+  npm ci
+  npx tsc --noEmit
+  npm test
+  npm run build
+
+Result:
+  npm ci: exit 0; 202 packages installed; 2 moderate npm audit vulnerabilities reported.
+  Test Files  89 passed | 21 skipped (110)
+  Tests       1702 passed | 57 skipped (1759)
+  npm run build: exit 0.
+  Build emitted only the existing import.meta/CJS warnings.
+  FINAL_REQUIRED_EXIT=0
+
+The complete output is retained at /tmp/agent-tabs-public-evidence/final-required.log.

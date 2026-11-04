@@ -1,0 +1,772 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import type { Block, ChatState } from "../../src/chat/model";
+import { addOutgoing, applyEntries, applyFrame, applyTaskList, dropOutgoing, initialState, resolveDialog, reviseQueued, TOOL_OUTPUT_LIMIT } from "../../src/chat/reducer";
+
+function loadFrames(name: string): any[] {
+  return readFileSync(join(__dirname, "..", "fixtures", `${name}.jsonl`), "utf8")
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line));
+}
+
+function replay(frames: any[], from: ChatState = initialState()): ChatState {
+  return frames.reduce((state, frame) => applyFrame(state, frame), from);
+}
+
+const tools = (state: ChatState) => state.blocks.filter((b): b is Extract<Block, { kind: "tool" }> => b.kind === "tool");
+
+describe("chat reducer", () => {
+  it("a_todo_call_carries_its_op_and_no_input_box", () => {
+    const todo = tools(replay(loadFrames("abort"))).filter((block) => block.name === "todo");
+    expect(todo.map((block) => block.todo)).toEqual([
+      { op: "init", list: [{ phase: "Execution", items: ["Run echo permission-test into perm.txt via bash"] }] },
+      { op: "drop", task: "Run echo permission-test into perm.txt via bash" },
+    ]);
+    expect(todo.map((block) => block.input)).toEqual([undefined, undefined]);
+  });
+
+  it("tool_turn_produces_text_thinking_and_tool_blocks", () => {
+    const frames = loadFrames("tool_turn");
+    const mid = replay(frames.slice(0, frames.findIndex((f) => f.type === "agent_settled")));
+    expect(mid.running).toBe(true);
+
+    const state = replay(frames);
+    expect(state.running).toBe(false);
+    const assistants = state.blocks.filter((b) => b.kind === "assistant");
+    expect(assistants.length).toBeGreaterThan(0);
+    const last = assistants[assistants.length - 1];
+    expect(last?.kind === "assistant" && last.text.length).toBeGreaterThan(0);
+    expect(last?.kind === "assistant" && last.streaming).toBe(false);
+    expect(assistants.every((b) => b.kind === "assistant" && b.text + b.thinking !== "")).toBe(true);
+    expect(tools(state).find((t) => t.name === "eval")).toMatchObject({ state: "ok" });
+    expect(tools(state).find((t) => t.name === "read")).toMatchObject({ state: "error" });
+    expect(tools(state).find((t) => t.name === "eval")?.summary).toContain("Listing files");
+    // the user prompt is shown, internal custom messages are not
+    expect(state.blocks.filter((b) => b.kind === "user")).toHaveLength(1);
+    expect(JSON.stringify(state)).not.toContain("environment_context");
+  });
+
+  it("caps_tool_output_and_ignores_partial", () => {
+    const sessionId = "rpc-1";
+    let state = applyFrame(initialState(), { type: "message_start", message: { role: "assistant", content: [], timestamp: 1 }, sessionId });
+    const huge = "x".repeat(1_000_000);
+    state = applyFrame(state, {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hi", partial: { blob: huge } },
+      message: { blob: huge },
+      sessionId,
+    });
+    state = applyFrame(state, { type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "hm" } });
+    expect(state.blocks[0]).toMatchObject({ kind: "assistant", text: "Hi", thinking: "hm" });
+    expect(JSON.stringify(state).length).toBeLessThan(1000);
+
+    state = applyFrame(state, { type: "tool_execution_start", toolCallId: "t1", toolName: "eval", args: { code: "1" } });
+    state = applyFrame(state, {
+      type: "tool_execution_end",
+      toolCallId: "t1",
+      toolName: "eval",
+      isError: false,
+      result: { content: [{ type: "text", text: "y".repeat(50_000) }] },
+    });
+    const tool = tools(state)[0];
+    expect(tool?.output).toHaveLength(TOOL_OUTPUT_LIMIT);
+    expect(tool?.truncated).toBe(true);
+    expect(TOOL_OUTPUT_LIMIT).toBe(20_000);
+  });
+
+  it("steer_and_follow_up_show_queued_then_merge", () => {
+    const frames = loadFrames("steer_follow_up");
+    const queuedAt = frames.findIndex((f) => f.type === "queue_update" && f.ordered?.length > 0);
+    const queuedState = replay(frames.slice(0, queuedAt + 1));
+    const queued = queuedState.blocks.filter((b) => b.kind === "user" && b.delivery !== undefined);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ id: "x-steer", delivery: { state: "queued", queuedId: "q_1", revision: 1 }, text: expect.stringContaining("STEERED") });
+
+    const state = replay(frames);
+    expect(state.blocks.some((b) => b.kind === "user" && b.delivery !== undefined)).toBe(false);
+    const users = state.blocks.filter((b) => b.kind === "user");
+    expect(users.map((b) => b.kind === "user" && b.text).join("|")).toContain("STEERED");
+    expect(users.map((b) => b.kind === "user" && b.text).join("|")).toContain("FOLLOWED");
+    expect(users.map((b) => b.id).filter((id) => id === "x-steer" || id === "x-follow")).toEqual(["x-steer", "x-follow"]); // never twice
+
+    const followUp = applyFrame(initialState(), {
+      type: "queue_update",
+      ordered: [{ text: "later", mode: "followUp", queuedId: "q_2", clientMessageId: "x-follow" }],
+    });
+    expect(followUp.blocks[0]).toMatchObject({ kind: "user", id: "x-follow", delivery: { state: "queued", queuedId: "q_2" }, text: "later" });
+  });
+
+  describe("a sent message before it is in the conversation", () => {
+    const sending = (id: string, text: string): ChatState => addOutgoing(initialState(), { id, text });
+    const userStart = (id: string, text: string, extra: Record<string, unknown> = {}) => ({
+      type: "message_start",
+      message: { role: "user", content: [{ type: "text", text }], timestamp: 5, clientMessageId: id, ...extra },
+    });
+
+    it("appears_at_once_as_sending_and_is_replaced_in_place_by_the_real_message", () => {
+      let state = sending("m1", "hello");
+      expect(state.blocks).toEqual([{ kind: "user", id: "m1", text: "hello", delivery: { state: "sending" } }]);
+      state = applyFrame(state, userStart("m1", "hello"));
+      expect(state.blocks).toEqual([{ kind: "user", id: "m1", text: "hello", timestamp: 5 }]);
+    });
+
+    it("an_outgoing_message_shows_its_images_under_the_ids_the_real_one_uses", () => {
+      const state = addOutgoing(initialState(), { id: "m1", text: "", images: [{ id: "m1:0", mimeType: "image/png" }] });
+      expect(state.blocks[0]).toMatchObject({ images: [{ id: "m1:0", mimeType: "image/png" }], delivery: { state: "sending" } });
+    });
+
+    it("turns_queued_in_place_and_follows_edits_from_queue_updates", () => {
+      let state = applyFrame(sending("m1", "steer me"), { type: "assistant_placeholder" });
+      state = applyFrame(state, { type: "queue_update", ordered: [{ text: "steer me", mode: "steer", queuedId: "q_3", revision: 1, clientMessageId: "m1" }] });
+      expect(state.blocks).toEqual([{ kind: "user", id: "m1", text: "steer me", delivery: { state: "queued", queuedId: "q_3", revision: 1 } }]);
+      state = applyFrame(state, { type: "queue_update", ordered: [{ text: "steer you", mode: "steer", queuedId: "q_3", revision: 2, clientMessageId: "m1" }] });
+      expect(state.blocks).toEqual([{ kind: "user", id: "m1", text: "steer you", delivery: { state: "queued", queuedId: "q_3", revision: 2 } }]);
+    });
+
+    it("a_message_that_left_the_queue_waits_as_sending_and_lands_after_what_the_agent_did_meanwhile", () => {
+      let state = sending("m1", "steer me");
+      state = applyFrame(state, { type: "queue_update", ordered: [{ text: "steer me", mode: "steer", queuedId: "q_3", clientMessageId: "m1" }] });
+      state = applyFrame(state, { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } });
+      state = applyFrame(state, { type: "queue_update", ordered: [] });
+      expect(state.blocks[0]).toMatchObject({ id: "m1", delivery: { state: "sending" } });
+      state = applyFrame(state, userStart("m1", "steer me"));
+      expect(state.blocks.map((block) => block.id)).toEqual(["t1", "m1"]);
+      expect(state.blocks[1]).not.toHaveProperty("delivery");
+    });
+
+    it("another_clients_queued_message_is_keyed_by_its_queued_id_and_goes_when_it_leaves_the_queue", () => {
+      let state = applyFrame(initialState(), { type: "queue_update", ordered: [{ text: "theirs", mode: "followUp", queuedId: "q_9" }] });
+      expect(state.blocks).toEqual([{ kind: "user", id: "queued:q_9", text: "theirs", delivery: { state: "queued", queuedId: "q_9" } }]);
+      state = applyFrame(state, { type: "queue_update", ordered: [] });
+      expect(state.blocks).toEqual([]);
+    });
+
+    it("agent_settled_drops_messages_still_sending_but_keeps_queued_ones", () => {
+      let state = addOutgoing(sending("m1", "lost"), { id: "m2", text: "waiting" });
+      state = applyFrame(state, { type: "queue_update", ordered: [{ text: "waiting", mode: "steer", queuedId: "q_1", clientMessageId: "m2" }] });
+      state = applyFrame(state, { type: "agent_settled" });
+      expect(state.blocks.map((block) => block.id)).toEqual(["m2"]);
+    });
+
+    it("dropping_an_outgoing_message_removes_only_an_undelivered_block", () => {
+      const state = applyFrame(addOutgoing(sending("m1", "a"), { id: "m2", text: "b" }), userStart("m2", "b"));
+      expect(dropOutgoing(state, "m1").blocks.map((block) => block.id)).toEqual(["m2"]);
+      expect(dropOutgoing(state, "m2")).toBe(state);
+    });
+
+    it("a_resent_message_replaces_its_old_outgoing_block", () => {
+      const state = addOutgoing(addOutgoing(sending("m1", "a"), { id: "m2", text: "b" }), { id: "m1", text: "a" });
+      expect(state.blocks.map((block) => block.id)).toEqual(["m2", "m1"]);
+    });
+
+    it("the_journal_catch_up_turns_an_outgoing_block_into_the_real_message", () => {
+      const state = applyEntries(sending("m1", "hello"), [{ type: "message", id: "e1", message: { role: "user", content: "hello", timestamp: 5, clientMessageId: "m1" } }]);
+      expect(state.blocks).toEqual([{ kind: "user", id: "m1", text: "hello", timestamp: 5 }]);
+    });
+
+    it("an_edit_answer_updates_the_queued_text_at_once", () => {
+      let state = applyFrame(sending("m1", "old"), { type: "queue_update", ordered: [{ text: "old", mode: "steer", queuedId: "q_1", revision: 1, clientMessageId: "m1" }] });
+      state = reviseQueued(state, "m1", "new", 2);
+      expect(state.blocks[0]).toEqual({ kind: "user", id: "m1", text: "new", delivery: { state: "queued", queuedId: "q_1", revision: 2 } });
+    });
+  });
+
+  it("abort_ends_the_turn_with_a_notice", () => {
+    const state = replay(loadFrames("abort"));
+    expect(state.running).toBe(false);
+    expect(state.blocks.some((b) => b.kind === "notice" && b.text === "Ход остановлен")).toBe(true);
+  });
+
+  it("permission_select_becomes_dialog_and_resolves", () => {
+    const frames = loadFrames("permission");
+    const state = replay(frames);
+    expect(state.dialogs.length).toBeGreaterThan(0);
+    const dialog = state.dialogs[0]!;
+    expect(dialog).toMatchObject({ method: "select", options: ["Allow once", "Allow always", "Deny", "Deny with feedback"] });
+    expect(dialog.title).toContain("Permission required");
+    const resolved = resolveDialog(state, dialog.id);
+    expect(resolved.dialogs.find((d) => d.id === dialog.id)).toBeUndefined();
+    expect(resolveDialog(resolved, "nope")).toBe(resolved);
+  });
+
+  it("question_frame_becomes_dialog", () => {
+    const frames = loadFrames("question");
+    const resolvedAt = frames.findIndex((f) => f.type === "question_resolved");
+    const open = replay(frames.slice(0, resolvedAt));
+    expect(open.dialogs).toHaveLength(1);
+    expect(open.dialogs[0]).toMatchObject({ method: "question", title: "Which color do you pick?" });
+    expect(open.dialogs[0]?.questions).toHaveLength(1);
+    expect(replay(frames).dialogs).toHaveLength(0);
+  });
+
+  it("a_dialog_keeps_its_details_and_its_deadline", () => {
+    const confirm = applyFrame(initialState(), { type: "extension_ui_request", id: "c", method: "confirm", title: "Clear?", message: "All messages will be lost.", deadlineAtMs: 1_900_000 });
+    expect(confirm.dialogs[0]).toEqual({ id: "c", method: "confirm", title: "Clear?", message: "All messages will be lost.", deadlineAt: 1_900_000 });
+    const input = applyFrame(initialState(), { type: "extension_ui_request", id: "i", method: "input", title: "Name", placeholder: "type something..." });
+    expect(input.dialogs[0]).toMatchObject({ placeholder: "type something..." });
+    const editor = applyFrame(initialState(), { type: "extension_ui_request", id: "e", method: "editor", title: "Edit", prefill: "Line 1\nLine 2" });
+    expect(editor.dialogs[0]).toMatchObject({ prefill: "Line 1\nLine 2" });
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const timed = applyFrame(initialState(), { type: "extension_ui_request", id: "s", method: "select", title: "Pick", options: ["a"], timeout: 10_000 });
+    expect(timed.dialogs[0]?.deadlineAt).toBe(11_000);
+    vi.restoreAllMocks();
+    const updated = applyFrame({ ...initialState(), dialogs: [{ id: "q", method: "question", title: "Q", deadlineAt: 5 }] }, { type: "question_updated", id: "q", deadlineAtMs: 99 });
+    expect(updated.dialogs[0]?.deadlineAt).toBe(99);
+  });
+
+  it("notify_becomes_notice_and_status_widgets_are_ignored", () => {
+    const state = applyFrame(initialState(), { type: "extension_ui_request", id: "n1", method: "notify", message: "Привет", notifyType: "warning" });
+    expect(state.blocks[0]).toMatchObject({ kind: "notice", level: "warn", text: "Привет" });
+    const widget = { type: "extension_ui_request", id: "w", method: "setWidget", widgetKey: "todo" };
+    expect(applyFrame(state, widget)).toBe(state);
+  });
+
+  it("model_profile_sets_auto_model", () => {
+    const frames = loadFrames("model_profile");
+    const state = replay(frames);
+    expect(state.model).toEqual({ provider: "gw-anthropic", id: "claude-haiku-5-5" });
+    expect(state.autoModel).toEqual({ provider: "gw-anthropic", id: "claude-haiku-5-5" });
+    expect(state.cursor).toBe("e2");
+
+    const manual = applyFrame(state, {
+      type: "model_changed",
+      model: { provider: "gw-anthropic", id: "claude-gateway/gpt-6-astra" },
+      origin: { source: "rpc" },
+    });
+    expect(manual.model?.id).toBe("claude-gateway/gpt-6-astra");
+    expect(manual.autoModel?.id).toBe("claude-haiku-5-5");
+
+    const entry = {
+      type: "entry_appended",
+      entry: { type: "custom", customType: "omo-model-profile:applied", id: "p1", data: { details: { model: "gw-anthropic/claude-gateway/gpt-6-astra" } } },
+    };
+    expect(applyFrame(initialState(), entry).autoModel).toEqual({ provider: "gw-anthropic", id: "claude-gateway/gpt-6-astra" });
+  });
+
+  it("title_and_agents_follow_frames", () => {
+    let state = applyFrame(initialState(), { type: "session_info_changed", name: "probe-one" });
+    expect(state.title).toBe("probe-one");
+    state = applyFrame(state, {
+      type: "extension_event",
+      name: "omo.task.updated",
+      data: { parent_session_id: "p", tasks: [{ task_id: "t1", name: "explore", status: "running", model: "gw/haiku" }] },
+    });
+    state = applyFrame(state, {
+      type: "extension_event",
+      name: "omo.dag.updated",
+      data: { runs: [{ run_id: "r1", nodes: [{ id: "n1", label: "build", state: "completed" }] }] },
+    });
+    expect(state.agents).toEqual([
+      { id: "task:t1", taskId: "t1", label: "explore", status: "running", model: "gw/haiku" },
+      { id: "dag:r1:n1", label: "build", status: "done" },
+    ]);
+    // An update that no longer mentions a task keeps its row; a task OmO stopped tracking while it ran was lost.
+    state = applyFrame(state, { type: "extension_event", name: "omo.task.updated", data: { tasks: [] } });
+    expect(state.agents.map((a) => [a.id, a.status])).toEqual([
+      ["task:t1", "error"],
+      ["dag:r1:n1", "done"],
+    ]);
+  });
+
+  it("entries_rebuild_history_and_cursor", () => {
+    const entries = [
+      { type: "model_change", id: "e0", provider: "gw-anthropic", modelId: "claude-haiku-5-5" },
+      { type: "custom_message", id: "e1", customType: "environment-context", content: "<environment_context/>", display: false },
+      { type: "custom_message", id: "e2", customType: "senpi-task.usage", content: "<omo-senpi-task>" },
+      { type: "custom", id: "e3", customType: "omo-memory:projection-pin", data: {} },
+      { type: "message", id: "e4", message: { role: "user", content: [{ type: "text", text: "list files" }], timestamp: 10, clientMessageId: "m1" } },
+      {
+        type: "message",
+        id: "e5",
+        message: {
+          role: "assistant",
+          timestamp: 11,
+          content: [
+            { type: "thinking", thinking: "hmm" },
+            { type: "text", text: "ok" },
+            { type: "toolCall", id: "tc1", name: "eval", arguments: { summary: "ls" } },
+          ],
+        },
+      },
+      { type: "message", id: "e6", message: { role: "toolResult", toolCallId: "tc1", toolName: "eval", isError: false, content: [{ type: "text", text: "a\nb" }] } },
+      { type: "message", id: "e7", message: { role: "assistant", timestamp: 12, content: [{ type: "text", text: "a b" }] } },
+      { type: "session_info", id: "e8", name: "named" },
+    ];
+    const state = applyEntries(initialState(), entries);
+    expect(state.blocks.map((b) => b.kind)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(state.blocks[0]).toMatchObject({ id: "m1", text: "list files" });
+    expect(state.blocks[1]).toMatchObject({ thinking: "hmm", text: "ok", streaming: false });
+    expect(state.blocks[2]).toMatchObject({ name: "eval", summary: "ls", output: "a\nb", state: "ok" });
+    expect(state.cursor).toBe("e8");
+    expect(state.title).toBe("named");
+    expect(state.model).toEqual({ provider: "gw-anthropic", id: "claude-haiku-5-5" });
+
+    // replaying the same journal over live-built state does not duplicate blocks
+    expect(applyEntries(state, entries).blocks).toHaveLength(4);
+    expect(applyEntries(state, [])).toBe(state);
+  });
+
+  it("displayed_custom_message_becomes_notice", () => {
+    const state = applyEntries(initialState(), [{ type: "custom_message", id: "c1", customType: "my-ext", content: "hello", display: true }]);
+    expect(state.blocks).toEqual([{ kind: "notice", id: "entry:c1", level: "info", text: "hello" }]);
+  });
+
+  it("unknown_frame_returns_same_state", () => {
+    const state = initialState();
+    for (const frame of [
+      { type: "tool_hook_status", hookName: "PreToolUse" },
+      { type: "loaded_surfaces_changed" },
+      { type: "extension_ui_request", id: "s", method: "setStatus" },
+      { type: "extension_event", name: "senpi.eval.execution", data: {} },
+      { type: "something_new" },
+      null,
+    ]) {
+      expect(applyFrame(state, frame)).toBe(state);
+    }
+  });
+  it("replayed_message_over_loaded_entry_has_its_text_exactly_once", () => {
+    const content = [{ type: "text", text: "Hello" }];
+    const entry = { type: "message", id: "e1", message: { role: "assistant", timestamp: 7, content } };
+    let state = applyEntries(initialState(), [entry]);
+    state = applyFrame(state, { type: "message_start", message: { role: "assistant", content: [], timestamp: 7 } });
+    expect(state.blocks[0]).toMatchObject({ id: "a:7", streaming: true, text: "" });
+    state = applyFrame(state, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Hel" } });
+    state = applyFrame(state, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "lo" } });
+    state = applyFrame(state, { type: "message_end", message: { role: "assistant", timestamp: 7, content } });
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({ text: "Hello", streaming: false });
+  });
+
+  it("delta_without_streaming_target_never_duplicates_a_block_id", () => {
+    const entry = { type: "message", id: "e1", message: { role: "assistant", timestamp: 7, content: [{ type: "text", text: "A" }] } };
+    // one block with id a:1 exists, so the synthesized id for a new block (a:<blocks.length>) would collide
+    const loaded = applyEntries(initialState(), [{ ...entry, message: { ...entry.message, timestamp: 1 } }]);
+    const state = applyFrame(loaded, { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x" } });
+    const ids = state.blocks.map((block) => block.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("tool_update_without_text_parts_keeps_previous_output", () => {
+    let state = applyFrame(initialState(), { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: {} });
+    state = applyFrame(state, { type: "tool_execution_update", toolCallId: "t1", partialResult: { content: [{ type: "text", text: "tick 1" }] } });
+    state = applyFrame(state, { type: "tool_execution_update", toolCallId: "t1", partialResult: { details: {} } });
+    expect(tools(state)[0]).toMatchObject({ output: "tick 1", state: "running" });
+    state = applyFrame(state, { type: "tool_execution_end", toolCallId: "t1", result: {}, isError: false });
+    expect(tools(state)[0]).toMatchObject({ output: "tick 1", state: "ok" });
+  });
+});
+
+describe("chat reducer: redesigned-UI model", () => {
+  const IMAGE_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ";
+
+  it("user_block_carries_timestamp_and_image_refs", () => {
+    const sink = vi.fn();
+    const frame = {
+      type: "message_start",
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "look" }, { type: "image", data: IMAGE_B64, mimeType: "image/png" }],
+        timestamp: 77,
+        clientMessageId: "m1",
+      },
+    };
+    const state = applyFrame(initialState(), frame, sink);
+    expect(state.blocks[0]).toMatchObject({ kind: "user", id: "m1", text: "look", timestamp: 77, images: [{ id: "m1:0", mimeType: "image/png" }] });
+    expect(sink).toHaveBeenCalledTimes(1);
+    expect(sink).toHaveBeenCalledWith({ id: "m1:0", mimeType: "image/png" }, IMAGE_B64);
+    expect(JSON.stringify(state)).not.toContain(IMAGE_B64);
+    // a replayed start for the same id must not hand the bytes over again
+    applyFrame(state, frame, sink);
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it("journal_user_images_go_to_the_sink", () => {
+    const sink = vi.fn();
+    const state = applyEntries(
+      initialState(),
+      [{ type: "message", id: "e1", message: { role: "user", content: [{ type: "image", data: IMAGE_B64, mimeType: "image/jpeg" }, { type: "text", text: "x" }], timestamp: 5, clientMessageId: "m2" } }],
+      sink,
+    );
+    expect(state.blocks[0]).toMatchObject({ kind: "user", timestamp: 5, images: [{ id: "m2:0", mimeType: "image/jpeg" }] });
+    expect(sink).toHaveBeenCalledWith({ id: "m2:0", mimeType: "image/jpeg" }, IMAGE_B64);
+    expect(JSON.stringify(state)).not.toContain(IMAGE_B64);
+  });
+
+  it("thinking_duration_measured", () => {
+    const clock = vi.fn<() => number>();
+    let state = applyFrame(initialState(), { type: "message_start", message: { role: "assistant", content: [], timestamp: 9 } }, undefined, clock);
+    clock.mockReturnValue(1000);
+    state = applyFrame(state, { type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } }, undefined, clock);
+    clock.mockReturnValue(5000);
+    state = applyFrame(state, { type: "message_update", assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "" } }, undefined, clock);
+    expect(state.blocks[0]).toMatchObject({ kind: "assistant", timestamp: 9, thinkingMs: 4000 });
+  });
+
+  it("task_tool_row_has_role_description_model", () => {
+    const clock = vi.fn<() => number>().mockReturnValue(100);
+    let state = applyFrame(
+      initialState(),
+      { type: "tool_execution_start", toolCallId: "t1", toolName: "task", args: { category: "quick", subagent_type: "explore", description: "Find usages\nsecond line" } },
+      undefined,
+      clock,
+    );
+    expect(tools(state)[0]).toMatchObject({ role: "quick", description: "Find usages", timestamp: 100 });
+    expect(tools(state)[0]?.model).toBeUndefined();
+    clock.mockReturnValue(350);
+    state = applyFrame(
+      state,
+      { type: "tool_execution_end", toolCallId: "t1", toolName: "task", result: { content: [{ type: "text", text: "ok" }], details: { resolved_model: "gw/haiku" } }, isError: false },
+      undefined,
+      clock,
+    );
+    expect(tools(state)[0]).toMatchObject({ state: "ok", model: "gw/haiku", durationMs: 250 });
+    const other = applyFrame(initialState(), { type: "tool_execution_start", toolCallId: "t2", toolName: "read", args: { description: "d" } }, undefined, clock);
+    expect(tools(other)[0]?.role).toBeUndefined();
+    expect(tools(other)[0]?.description).toBeUndefined();
+  });
+
+  it("agents_rows_from_task_updated", () => {
+    const task = (id: string, status: string, extra: object = {}) => ({ task_id: id, name: id, status, ...extra });
+    const state = applyFrame(initialState(), {
+      type: "extension_event",
+      name: "omo.task.updated",
+      data: {
+        tasks: [
+          task("a", "running", { category: "deep", agent_type: "oracle", effective_model: "gw/x", created_at: "2026-11-03T10:00:00.000Z", live_progress: { activity: "reading", started_at: 1793700000000 } }),
+          task("b", "completed", { created_at: "2026-11-03T10:00:00.000Z", updated_at: "2026-11-03T10:00:09.000Z" }),
+          task("c", "interrupted"),
+          task("d", "pending"),
+          task("e", "paused"),
+        ],
+      },
+    });
+    expect(state.agents.map((row) => row.status)).toEqual(["running", "done", "error", "waiting", "waiting"]);
+    expect(state.agents[0]).toMatchObject({ role: "deep", activity: "reading", model: "gw/x", startedAt: 1793700000000 });
+    expect(state.agents[0]?.endedAt).toBeUndefined();
+    expect(state.agents[1]).toMatchObject({ endedAt: Date.parse("2026-11-03T10:00:09.000Z") });
+  });
+
+  describe("agents history", () => {
+    const updated = (tasks: object[], extra: object = {}) => ({ type: "extension_event", name: "omo.task.updated", data: { parent_session_id: "p", tasks, ...extra } });
+    const rows = (state: ChatState) => state.agents.map((row) => [row.id, row.status]);
+
+    it("finished_agents_stay_when_later_updates_no_longer_mention_them", () => {
+      let state = applyFrame(initialState(), updated([{ task_id: "a", status: "completed", name: "alpha" }, { task_id: "b", status: "running" }]));
+      state = applyFrame(state, updated([{ task_id: "b", status: "completed" }, { task_id: "c", status: "pending" }]));
+      expect(rows(state)).toEqual([
+        ["task:a", "done"],
+        ["task:b", "done"],
+        ["task:c", "waiting"],
+      ]);
+      expect(state.agents[0]?.label).toBe("alpha");
+      state = applyFrame(state, updated([]));
+      expect(rows(state)).toEqual([
+        ["task:a", "done"],
+        ["task:b", "done"],
+        ["task:c", "error"],
+      ]);
+    });
+
+    it("a_truncated_update_does_not_call_unmentioned_tasks_lost", () => {
+      let state = applyFrame(initialState(), updated([{ task_id: "a", status: "paused" }]));
+      state = applyFrame(state, updated([{ task_id: "b", status: "running" }], { truncated_tasks: 3 }));
+      expect(rows(state)).toEqual([
+        ["task:a", "waiting"],
+        ["task:b", "running"],
+      ]);
+    });
+
+    it("an_update_without_a_tasks_list_changes_nothing", () => {
+      const state = applyFrame(initialState(), updated([{ task_id: "a", status: "running" }]));
+      expect(applyFrame(state, { type: "extension_event", name: "omo.task.updated", data: { parent_session_id: "p" } })).toBe(state);
+      expect(applyFrame(state, updated([{ task_id: "a", status: "running" }]))).toEqual(state);
+    });
+
+    it("omo_task_list_rows_are_the_update_rows_and_a_failure_kind_changes_nothing", () => {
+      const frame = JSON.parse(readFileSync(join(__dirname, "..", "fixtures", "task_updated.json"), "utf8"));
+      const fromList = applyTaskList(initialState(), frame.data);
+      expect(fromList.agents).toEqual(applyFrame(initialState(), frame).agents);
+      expect(fromList.agents.map((row) => [row.id, row.status, row.label, row.role, row.model, row.tokens])).toEqual([
+        ["task:st_01a1a284", "done", "test-explore", "explore", "gw-anthropic/claude-opus-5-5", 55152],
+        ["task:st_01a1a285", "done", "test-quick", "quick", "gw-openai/gpt-6-astra", 68708],
+      ]);
+      // merged into what the tab already shows, never replacing it
+      const shown = applyFrame(initialState(), updated([{ task_id: "older", status: "completed" }]));
+      expect(applyTaskList(shown, frame.data).agents.map((row) => row.id)).toEqual(["task:older", "task:st_01a1a284", "task:st_01a1a285"]);
+      for (const failure of [{ kind: "unavailable", reason: "No active parent session." }, { kind: "not_found" }, undefined, null]) {
+        expect(applyTaskList(shown, failure)).toBe(shown);
+      }
+    });
+
+    it("the_journal_restores_spawned_and_finished_tasks", () => {
+      const entries = JSON.parse(readFileSync(join(__dirname, "..", "fixtures", "task_journal.json"), "utf8"));
+      const state = applyEntries(initialState(), entries);
+      expect(state.agents.map((row) => [row.id, row.taskId, row.label, row.status, row.role, row.model, row.tokens])).toEqual([
+        ["task:st_01a1a65e", "st_01a1a65e", "alpha", "done", "quick", "gw-anthropic/claude-haiku-5-5", 120559],
+        ["task:st_01a1a65f", "st_01a1a65f", "beta", "done", "quick", "gw-anthropic/claude-haiku-5-5", 120477],
+      ]);
+      expect(state.agents[0]?.startedAt).toBe(1793792591755);
+      expect(state.agents[0]?.endedAt).toBe(Date.parse("2026-11-04T11:43:20.641Z"));
+
+      // Only the spawn results so far: the tasks show as OmO reported them then.
+      const spawned = applyEntries(initialState(), entries.slice(0, 3));
+      expect(spawned.agents.map((row) => [row.id, row.status])).toEqual([
+        ["task:st_01a1a65e", "running"],
+        ["task:st_01a1a65f", "running"],
+      ]);
+    });
+
+    it("a_batch_spawn_result_restores_each_item", () => {
+      const resolved = { source: "category", provider: "gw-anthropic", model_id: "claude-haiku-5-5", display: "Claude Haiku 5.5" };
+      const details = {
+        task_id: "st_1",
+        status: "running",
+        mode: "spawn",
+        run_in_background: true,
+        items: [
+          { task_id: "st_1", name: "alpha", category: "quick", resolved_model: resolved, status: "running" },
+          { task_id: "st_2", name: "beta", category: "quick", resolved_model: resolved, status: "running" },
+        ],
+      };
+      const entry = { type: "message", id: "r1", message: { role: "toolResult", toolCallId: "c1", toolName: "task", content: [], details, isError: false, timestamp: 7 } };
+      const state = applyEntries(initialState(), [entry]);
+      expect(state.agents.map((row) => [row.id, row.label, row.status, row.role, row.model, row.startedAt])).toEqual([
+        ["task:st_1", "alpha", "running", "quick", "gw-anthropic/claude-haiku-5-5", 7],
+        ["task:st_2", "beta", "running", "quick", "gw-anthropic/claude-haiku-5-5", 7],
+      ]);
+    });
+
+    it("a_catch_up_never_turns_a_row_back_to_what_the_spawn_result_said", () => {
+      const entries = JSON.parse(readFileSync(join(__dirname, "..", "fixtures", "task_journal.json"), "utf8"));
+      const live = applyFrame(initialState(), updated([{ task_id: "st_01a1a65e", status: "completed", name: "alpha", run_stats: { total_tokens: 5 } }]));
+      const caught = applyEntries(live, entries.slice(0, 3));
+      expect(caught.agents.find((row) => row.id === "task:st_01a1a65e")).toEqual(live.agents[0]);
+      expect(caught.agents.map((row) => [row.id, row.status])).toEqual([
+        ["task:st_01a1a65e", "done"],
+        ["task:st_01a1a65f", "running"],
+      ]);
+    });
+
+    it("dag_rows_still_follow_each_dag_update", () => {
+      let state = applyFrame(initialState(), updated([{ task_id: "a", status: "completed" }]));
+      state = applyFrame(state, { type: "extension_event", name: "omo.dag.updated", data: { runs: [{ run_id: "r", nodes: [{ id: "n1", state: "running" }, { id: "n2", state: "running" }] }] } });
+      state = applyFrame(state, { type: "extension_event", name: "omo.dag.updated", data: { runs: [{ run_id: "r", nodes: [{ id: "n1", state: "completed" }] }] } });
+      expect(rows(state)).toEqual([
+        ["task:a", "done"],
+        ["dag:r:n1", "done"],
+      ]);
+    });
+  });
+
+  it("an_agent_row_takes_the_model_the_task_actually_ran_on_from_omos_model_record", () => {
+    const frame = JSON.parse(readFileSync(join(__dirname, "..", "fixtures", "task_updated.json"), "utf8"));
+    expect(applyFrame(initialState(), frame).agents.map((row) => row.model)).toEqual(["gw-anthropic/claude-opus-5-5", "gw-openai/gpt-6-astra"]);
+    // A fallback: OmO planned one model (`model`) and the child ran on another (`effective_model`, an object).
+    const quick = { ...frame.data.tasks[1], model: "gw-anthropic/claude-opus-5-5" };
+    const fallback = applyFrame(initialState(), { ...frame, data: { tasks: [quick] } });
+    expect(fallback.agents[0]?.model).toBe("gw-openai/gpt-6-astra");
+
+    // A task tool's result details carry the same record objects.
+    let state = applyFrame(initialState(), { type: "tool_execution_start", toolCallId: "t1", toolName: "task", args: {} });
+    const resolved = { provider: "gw-openai", model_id: "gpt-6-astra", display: "GPT 6 Astra", variant: "low", source: "category" };
+    state = applyFrame(state, { type: "tool_execution_end", toolCallId: "t1", toolName: "task", result: { content: [], details: { model: "gw-openai/gpt-6-astra", resolved_model: resolved } }, isError: false });
+    expect(tools(state)[0]?.model).toBe("gw-openai/gpt-6-astra");
+
+    // Other spellings: `id` for `model_id`. A display (or name) only when no record or `model` is qualified anywhere.
+    const rowModel = (task: object) => applyFrame(initialState(), { ...frame, data: { tasks: [{ task_id: "st_x", status: "running", ...task }] } }).agents[0]?.model;
+    expect(rowModel({ effective_model: { provider: "gw-openai", id: "gpt-6-astra" } })).toBe("gw-openai/gpt-6-astra");
+    expect(rowModel({ effective_model: { display: "GPT 6 Astra" }, model: "gw-openai/gpt-6-astra" })).toBe("gw-openai/gpt-6-astra");
+    expect(rowModel({ effective_model: { display: "GPT 6 Astra" }, resolved_model: { provider: "gw-openai", model_id: "gpt-6-astra" } })).toBe("gw-openai/gpt-6-astra");
+    expect(rowModel({ effective_model: { display: "GPT 6 Astra", name: "astra" } })).toBe("GPT 6 Astra");
+    expect(rowModel({ resolved_model: { name: "astra" } })).toBe("astra");
+  });
+
+  it("agent_tokens_come_from_run_stats_and_context_tokens_from_assistant_usage", () => {
+    let state = applyFrame(initialState(), {
+      type: "extension_event",
+      name: "omo.task.updated",
+      data: { tasks: [{ task_id: "a", status: "completed", run_stats: { total_tokens: 58_100 } }, { task_id: "b", status: "running", run_stats: { total_tokens: -1 } }, { task_id: "c", status: "running" }] },
+    });
+    expect(state.agents.map((row) => row.tokens)).toEqual([58_100, undefined, undefined]);
+
+    const usage = { input: 1000, output: 200, cacheRead: 50_000, cacheWrite: 300, totalTokens: 51_500 };
+    state = applyFrame(state, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ok" }], usage } });
+    expect(state.contextTokens).toBe(51_500);
+    state = applyFrame(state, { type: "message_end", message: { role: "assistant", content: [], usage: { input: 10, output: 5, cacheRead: 100, cacheWrite: 0 } } });
+    expect(state.contextTokens).toBe(115); // no total: the parts
+    const same = applyFrame(state, { type: "message_end", message: { role: "user", content: "x", usage } });
+    expect(same.contextTokens).toBe(115); // only the assistant's usage counts
+  });
+
+  it("activity_from_lifecycle", () => {
+    const life = (lifecycle: object) => ({ type: "session_lifecycle", lifecycle });
+    let state = applyFrame(initialState(), life({ state: "running", activity: { kind: "tool", toolName: "bash", toolCallId: "c" } }));
+    expect(state).toMatchObject({ running: true, activity: "tool", activityTool: "bash" });
+    state = applyFrame(state, life({ state: "running", activity: { kind: "model", since: 1 } }));
+    expect(state.activity).toBe("thinking");
+    expect(state.activityTool).toBeUndefined();
+    state = applyFrame(state, life({ state: "waiting_human" }));
+    expect(state.activity).toBe("waiting_human");
+    state = applyFrame(state, life({ state: "done" }));
+    expect(state).toMatchObject({ running: false, activity: "idle" });
+  });
+
+  it("thinking_level_tracked", () => {
+    let state = applyFrame(initialState(), { type: "model_changed", model: { provider: "p", id: "m" }, thinkingLevel: "xhigh" });
+    expect(state).toMatchObject({ thinkingLevel: "xhigh", model: { provider: "p", id: "m" } });
+    state = applyFrame(state, { type: "entry_appended", entry: { type: "thinking_level_change", id: "t1", thinkingLevel: "low" } });
+    expect(state).toMatchObject({ thinkingLevel: "low", cursor: "t1" });
+    state = applyEntries(state, [{ type: "thinking_level_change", id: "t2", thinkingLevel: "off" }]);
+    expect(state.thinkingLevel).toBe("off");
+  });
+
+  it("same_lifecycle_frame_returns_same_object", () => {
+    const frame = { type: "session_lifecycle", lifecycle: { state: "running", activity: { kind: "tool", toolName: "bash" } } };
+    const once = applyFrame(initialState(), frame);
+    expect(applyFrame(once, { ...frame })).toBe(once);
+    const done = applyFrame(once, { type: "session_lifecycle", lifecycle: { state: "done" } });
+    expect(applyFrame(done, { type: "session_lifecycle", lifecycle: { state: "done" } })).toBe(done);
+  });
+});
+
+describe("chat reducer: image sink on catch-up", () => {
+  it("redelivered_journal_user_message_does_not_resend_bytes", () => {
+    const sink = vi.fn();
+    const entries = [{ type: "message", id: "e1", message: { role: "user", content: [{ type: "image", data: "AAAA", mimeType: "image/png" }], timestamp: 5, clientMessageId: "m3" } }];
+    const once = applyEntries(initialState(), entries, sink);
+    applyEntries(once, entries, sink);
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("chat reducer: user id stability", () => {
+  const image = { type: "image", data: "AAAA", mimeType: "image/png" };
+
+  it("live_and_journal_ids_match_with_timestamp_only", () => {
+    const sink = vi.fn();
+    const message = { role: "user", content: [{ type: "text", text: "hi" }, image], timestamp: 42 };
+    const live = applyFrame(initialState(), { type: "message_start", message }, sink);
+    const both = applyEntries(live, [{ type: "message", id: "e1", message }], sink);
+    expect(both.blocks).toHaveLength(1);
+    expect(both.blocks[0]?.id).toBe("u:42");
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+
+  it("unstable_id_never_sinks_images", () => {
+    const sink = vi.fn();
+    const message = { role: "user", content: [{ type: "text", text: "hi" }, image] };
+    const state = applyFrame(initialState(), { type: "message_start", message }, sink);
+    expect(state.blocks[0]).toMatchObject({ kind: "user", text: "hi" });
+    expect(state.blocks[0]).not.toHaveProperty("images");
+    applyEntries(initialState(), [{ type: "message", id: "e1", message }], sink);
+    expect(sink).not.toHaveBeenCalled();
+  });
+
+  it("journal_merges_images_into_existing_imageless_block", () => {
+    const sink = vi.fn();
+    const live = applyFrame(initialState(), { type: "message_start", message: { role: "user", content: "hi", timestamp: 7, clientMessageId: "m9" } });
+    const merged = applyEntries(live, [{ type: "message", id: "e1", message: { role: "user", content: [{ type: "text", text: "hi" }, image], timestamp: 7, clientMessageId: "m9" } }], sink);
+    expect(merged.blocks).toHaveLength(1);
+    expect(merged.blocks[0]).toMatchObject({ images: [{ id: "m9:0" }] });
+    expect(sink).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("chat reducer: a tool step's input", () => {
+  const start = (toolName: string, args: unknown) => tools(applyFrame(initialState(), { type: "tool_execution_start", toolCallId: "t1", toolName, args }))[0];
+
+  it("bash_and_monitor_show_the_command", () => {
+    expect(start("bash", { command: "ls -la\npwd", description: "list" })).toMatchObject({ input: "ls -la\npwd" });
+    expect(start("monitor", { command: "tail -f log", timeout: 5 })).toMatchObject({ input: "tail -f log" });
+  });
+
+  it("eval_shows_the_code_and_its_language", () => {
+    expect(start("eval", { language: "python", summary: "s", code: "print(1)" })).toMatchObject({ input: "print(1)", inputLang: "python" });
+  });
+
+  it("write_shows_the_whole_content_as_added", () => {
+    expect(start("write", { path: "/a/x.ts", content: "one\ntwo\n" })).toMatchObject({ file: "/a/x.ts", input: "+one\n+two", added: 2, removed: 0 });
+  });
+
+  it("edit_shows_a_line_diff_of_each_change_with_its_context", () => {
+    const edits = [
+      { oldText: "keep\nold 1\nold 2\ntail", newText: "keep\nnew\ntail" },
+      { old_string: "x", new_string: "y" },
+    ];
+    expect(start("edit", { path: "/a/x.ts", edits })).toMatchObject({ file: "/a/x.ts", input: " keep\n-old 1\n-old 2\n+new\n tail\n@@\n-x\n+y", added: 2, removed: 3 });
+    expect(start("edit", { file_path: "/a/y.ts", old_string: "a", new_string: "b" })).toMatchObject({ file: "/a/y.ts", input: "-a\n+b", added: 1, removed: 1 });
+  });
+
+  it("apply_patch_shows_its_hunks_and_names_the_first_file", () => {
+    const input = "*** Begin Patch\n*** Update File: /a/x.ts\n@@ fn\n ctx\n-a\n+b\n+c\n*** Add File: /a/new.ts\n+n\n*** End Patch";
+    expect(start("apply_patch", { input })).toMatchObject({
+      file: "/a/x.ts",
+      input: "*** Update File: /a/x.ts\n@@ fn\n ctx\n-a\n+b\n+c\n*** Add File: /a/new.ts\n+n",
+      added: 3,
+      removed: 1,
+    });
+  });
+
+  it("read_names_the_file_and_the_lines_it_asked_for", () => {
+    expect(start("read", { path: "/a/x.ts", offset: 10, limit: 40 })).toMatchObject({ file: "/a/x.ts", fromLine: 10, toLine: 49 });
+    const whole = start("read", { path: "/a/x.ts" });
+    expect(whole).toMatchObject({ file: "/a/x.ts" });
+    expect(whole).not.toHaveProperty("fromLine");
+    expect(whole).not.toHaveProperty("input");
+  });
+
+  it("task_shows_the_prompt_or_description", () => {
+    expect(start("task", { category: "quick", description: "Find", prompt: "Find all usages" })?.input).toBe("Find all usages");
+    expect(start("task", { tasks: [{ description: "one", prompt: "do one" }, { description: "two" }] })?.input).toBe("do one\n\ntwo");
+  });
+
+  it("other_tools_show_compact_json_of_their_args", () => {
+    expect(start("grep", { pattern: "x", path: "/a" })?.input).toBe('{"pattern":"x","path":"/a"}');
+    expect(start("ls", undefined)?.input).toBeUndefined();
+  });
+
+  it("a_huge_input_is_capped", () => {
+    expect(start("bash", { command: "y".repeat(50_000) })?.input).toHaveLength(TOOL_OUTPUT_LIMIT);
+  });
+
+  it("the_input_survives_output_updates_and_the_end", () => {
+    let state = applyFrame(initialState(), { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "make" } });
+    state = applyFrame(state, { type: "tool_execution_update", toolCallId: "t1", partialResult: { content: [{ type: "text", text: "tick" }] } });
+    state = applyFrame(state, { type: "tool_execution_end", toolCallId: "t1", result: { content: [{ type: "text", text: "done" }] }, isError: false });
+    expect(tools(state)[0]).toMatchObject({ input: "make", output: "done", state: "ok" });
+  });
+
+  it("compaction_frames_toggle_compacting_and_a_finished_one_forgets_the_token_count", () => {
+    let state = applyFrame({ ...initialState(), contextTokens: 90_000 }, { type: "compaction_start", reason: "manual" });
+    expect(state.compacting).toBe(true);
+    expect(state.contextTokens).toBe(90_000);
+    state = applyFrame(state, { type: "compaction_end", reason: "manual", aborted: false });
+    expect(state.compacting).toBe(false);
+    expect(state.contextTokens).toBeUndefined();
+    const kept = applyFrame({ ...initialState(), contextTokens: 90_000, compacting: true }, { type: "compaction_end", reason: "manual", aborted: true });
+    expect(kept.compacting).toBe(false);
+    expect(kept.contextTokens).toBe(90_000);
+  });
+});
+
+describe("housekeeping notices", () => {
+  const notify = (message: string, notifyType?: string) =>
+    applyFrame(initialState(), { type: "extension_ui_request", method: "notify", id: `n:${message}`, message, ...(notifyType === undefined ? {} : { notifyType }) });
+
+  it("hot_reload_chatter_never_reaches_the_feed", () => {
+    for (const text of ["Hot-reloading: /a/models.json", "Hot-reloaded: /a/models.json", "Reloading settings"]) {
+      expect(notify(text).blocks).toEqual([]);
+    }
+  });
+
+  it("a_warning_or_error_about_the_same_file_still_shows", () => {
+    expect(notify("Hot-reload failed: /a/models.json", "error").blocks).toHaveLength(1);
+    expect(notify("Reloading stopped", "warning").blocks).toHaveLength(1);
+  });
+
+  it("an_ordinary_notice_still_shows", () => {
+    expect(notify("Сервер вернул 500").blocks).toHaveLength(1);
+  });
+});

@@ -1,0 +1,679 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Block } from "../../src/chat/model";
+import type { WebviewMessage } from "../../src/panel/protocol";
+import { DataUrlCache, Feed, type FeedImage } from "../../webview/feed";
+
+let root: HTMLElement;
+let posted: WebviewMessage[];
+let opened: { images: FeedImage[]; index: number }[];
+let feed: Feed;
+
+function at(hours: number, minutes: number, seconds = 0): number {
+  return new Date(2026, 10, 3, hours, minutes, seconds).getTime();
+}
+
+function entry(id: string): HTMLElement {
+  return root.querySelector(`[data-block="${id}"]`) as HTMLElement;
+}
+
+/** jsdom has no layout: give the feed a fixed geometry and a writable scrollTop. */
+function layout(scrollTop: number, scrollHeight = 1000, clientHeight = 200): void {
+  Object.defineProperty(root, "scrollHeight", { configurable: true, value: scrollHeight });
+  Object.defineProperty(root, "clientHeight", { configurable: true, value: clientHeight });
+  Object.defineProperty(root, "scrollTop", { configurable: true, writable: true, value: scrollTop });
+}
+
+beforeEach(() => {
+  document.body.innerHTML = '<main id="feed"></main>';
+  root = document.getElementById("feed") as HTMLElement;
+  posted = [];
+  opened = [];
+  feed = new Feed(root, (message) => posted.push(message), { onOpenImage: (images, index) => opened.push({ images, index }) });
+});
+
+describe("Feed", () => {
+  it("timestamps_grouped_by_minute", () => {
+    feed.update(
+      [
+        { kind: "user", id: "u1", text: "hi", timestamp: at(20, 10) },
+        { kind: "assistant", id: "a1", text: "a", thinking: "", streaming: false, timestamp: at(20, 10, 40) },
+        { kind: "tool", id: "t1", name: "read", summary: "x", args: {}, output: "", truncated: false, state: "ok", timestamp: at(20, 11, 5) },
+        { kind: "notice", id: "n1", level: "info", text: "note" },
+        { kind: "assistant", id: "a2", text: "b", thinking: "", streaming: false, timestamp: at(20, 11, 30) },
+      ],
+      false,
+    );
+    const stamp = (id: string): string | undefined => entry(id).querySelector(".ts")?.textContent ?? undefined;
+    expect(stamp("u1")).toBe("20:10");
+    expect(stamp("a1")).toBeUndefined();
+    expect(stamp("t1")).toBe("20:11");
+    expect(stamp("n1")).toBeUndefined();
+    expect(stamp("a2")).toBeUndefined();
+  });
+
+  it("a_pending_assistant_does_not_swallow_the_minute", () => {
+    feed.update(
+      [
+        { kind: "user", id: "u1", text: "hi", timestamp: at(20, 10) },
+        { kind: "assistant", id: "a1", text: "", thinking: "", streaming: true, timestamp: at(20, 11) },
+        { kind: "tool", id: "t1", name: "read", summary: "x", args: {}, output: "", truncated: false, state: "running", timestamp: at(20, 11, 10) },
+      ],
+      true,
+    );
+    expect(entry("a1").querySelector(".ts")).toBeNull();
+    expect(entry("t1").querySelector(".ts")?.textContent).toBe("20:11");
+  });
+
+  it("steps_have_state_classes", () => {
+    const tool = (id: string, state: "running" | "ok" | "error", name = "bash"): Block => ({ kind: "tool", id, name, summary: "ls", args: {}, output: "", truncated: false, state });
+    feed.update([tool("t1", "ok"), tool("t2", "running"), tool("t3", "error"), { kind: "notice", id: "n1", level: "info", text: "служебное" }], true);
+    const step = (id: string): Element => entry(id).querySelector(".step") as Element;
+    expect(step("t1").classList.contains("ok")).toBe(true);
+    expect(step("t2").classList.contains("running")).toBe(true);
+    expect(step("t3").classList.contains("error")).toBe(true);
+    expect(step("n1").classList.contains("muted")).toBe(true);
+    expect(entry("t1").querySelector(".tool-name")?.textContent).toBe("Bash");
+    expect(entry("t1").querySelector(".mono")?.textContent).toBe("ls");
+    feed.update([tool("t4", "ok", "ast_grep_search")], false);
+    expect(entry("t4").querySelector(".tool-name")?.textContent).toBe("ast_grep_search");
+  });
+
+  it("task_row_shows_role_and_model", () => {
+    feed.update(
+      [
+        {
+          kind: "tool",
+          id: "t1",
+          name: "task",
+          summary: "Найти, где пустой ответ ноды перезаписывает кэш",
+          args: {},
+          output: "",
+          truncated: false,
+          state: "ok",
+          role: "explore",
+          model: "Opus 5.5",
+          description: "Найти, где пустой ответ ноды перезаписывает кэш",
+          durationMs: 125_000,
+        },
+      ],
+      false,
+    );
+    const row = entry("t1");
+    expect(row.querySelector(".tool-name")?.textContent).toBe("Agent:");
+    expect(row.querySelector(".agent-desc")?.textContent).toBe("Найти, где пустой ответ ноды перезаписывает кэш");
+    expect(row.querySelector(".agent-tag")?.textContent).toBe("Opus 5.5");
+    expect(row.querySelector(".sub")?.textContent).toBe("explore · готово за 2 мин");
+  });
+
+  it("thinking_row_collapsed_with_duration", () => {
+    feed.update([{ kind: "assistant", id: "a1", text: "ответ", thinking: "долгая мысль", streaming: false, thinkingMs: 4_200 }], false);
+    const thinking = entry("a1").querySelector("details.thinking") as HTMLDetailsElement;
+    expect(thinking.open).toBe(false);
+    expect(thinking.closest(".step")?.classList.contains("muted")).toBe(true);
+    expect(thinking.querySelector("summary")?.textContent).toBe("Размышлял 4 с");
+    expect(thinking.textContent).toContain("долгая мысль");
+  });
+
+  it("indicator_verb_follows_activity", () => {
+    const indicator = (): HTMLElement => root.querySelector('[data-role="indicator"]') as HTMLElement;
+    feed.update([], true, { activity: "thinking" });
+    expect(indicator().hidden).toBe(false);
+    expect(indicator().textContent).toBe("Думаю…");
+    feed.update([], true, { activity: "tool", tool: "Bash" });
+    expect(indicator().textContent).toBe("Выполняю Bash…");
+    feed.update([], true, { activity: "tool", tool: "task" });
+    expect(indicator().textContent).toBe("Выполняю задачу…");
+    feed.update([], true, { activity: "tool", tool: "Task" });
+    expect(indicator().textContent).toBe("Выполняю задачу…");
+    feed.update([], true, { activity: "waiting_human" });
+    expect(indicator().textContent).toBe("Жду ответа…");
+    feed.update([], false, { activity: "idle" });
+    expect(indicator().hidden).toBe(true);
+  });
+
+  it("keeps_scroll_when_user_scrolled_up", () => {
+    const first: Block = { kind: "assistant", id: "a1", text: "one", thinking: "", streaming: true };
+    layout(300);
+    feed.update([first], true);
+    expect(root.scrollTop).toBe(300);
+
+    layout(800); // at the bottom: the feed follows new content
+    feed.update([{ ...first, text: "one two" }], true);
+    expect(root.scrollTop).toBe(1000);
+  });
+
+  it("user_images_are_requested_once_and_open_on_click", () => {
+    const user: Block = { kind: "user", id: "u1", text: "смотри", images: [{ id: "u1:0", mimeType: "image/png" }, { id: "u1:1", mimeType: "image/png" }] };
+    feed.update([user], false);
+    feed.update([user, { kind: "assistant", id: "a1", text: "ок", thinking: "", streaming: false }], false);
+    expect(posted).toEqual([
+      { type: "getImage", id: "u1:0" },
+      { type: "getImage", id: "u1:1" },
+    ]);
+    feed.image("u1:0", "data:image/png;base64,AAAA");
+    feed.image("u1:1", "");
+    const tiles = [...entry("u1").querySelectorAll<HTMLElement>(".uimg")];
+    expect(tiles[0]?.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,AAAA");
+    expect(tiles[1]?.classList.contains("missing")).toBe(true);
+    tiles[1]?.click();
+    expect(opened).toEqual([{ images: [{ id: "u1:0", dataUrl: "data:image/png;base64,AAAA" }, { id: "u1:1" }], index: 1 }]);
+  });
+
+  it("sent_images_show_as_chips_with_name_and_size_above_the_text", () => {
+    const user: Block = { kind: "user", id: "u1", text: "вот", images: [{ id: "u1:0", mimeType: "image/png", name: "shot.png" }, { id: "u1:1", mimeType: "image/png" }] };
+    feed.update([user], false);
+    const bubble = entry("u1").querySelector(".user-bubble") as HTMLElement;
+    expect([...bubble.children].filter((child) => !child.matches('[data-role="message-actions"]')).map((child) => child.className)).toEqual(["uimgs", "user-text"]);
+    const names = (): (string | null | undefined)[] => [...entry("u1").querySelectorAll(".uimg")].map((tile) => tile.querySelector('[data-role="image-name"]')?.textContent);
+    expect(names()).toEqual(["shot.png", "image.png"]);
+    expect(entry("u1").querySelector('[data-role="image-size"]')?.textContent).toBe(""); // known once the picture loads
+
+    feed.image("u1:0", "data:image/png;base64,AAAA");
+    const tile = entry("u1").querySelector(".uimg") as HTMLElement;
+    const img = tile.querySelector("img") as HTMLImageElement;
+    Object.defineProperty(img, "naturalWidth", { value: 1464 });
+    Object.defineProperty(img, "naturalHeight", { value: 838 });
+    img.dispatchEvent(new Event("load"));
+    expect(tile.querySelector('[data-role="image-size"]')?.textContent).toBe("1464×838");
+    expect(names()).toEqual(["shot.png", "image.png"]);
+  });
+
+  it("the_data_url_cache_keeps_60_images_and_an_evicted_one_is_fetched_again_on_open", () => {
+    const blocks: Block[] = Array.from({ length: 13 }, (_, blockIndex) => ({
+      kind: "user",
+      id: `u${blockIndex}`,
+      text: "x",
+      images: Array.from({ length: 5 }, (_, index) => ({ id: `u${blockIndex}:${index}`, mimeType: "image/png" })),
+    }));
+    feed.update(blocks, false);
+    expect(posted).toHaveLength(65);
+    for (const block of blocks) for (const image of block.kind === "user" ? (block.images ?? []) : []) feed.image(image.id, `data:image/png;base64,${image.id}`);
+    posted.length = 0;
+
+    (entry("u0").querySelector(".uimg") as HTMLElement).click(); // the oldest five were evicted
+    expect(opened.at(-1)?.images.every((image) => image.dataUrl === undefined)).toBe(true);
+    expect(posted).toEqual(Array.from({ length: 5 }, (_, index) => ({ type: "getImage", id: `u0:${index}` })));
+    (entry("u12").querySelector(".uimg") as HTMLElement).click();
+    expect(opened.at(-1)?.images[0]).toEqual({ id: "u12:0", dataUrl: "data:image/png;base64,u12:0" });
+    expect(posted).toHaveLength(5); // nothing to fetch for cached ones
+  });
+});
+
+describe("DataUrlCache", () => {
+  it("evicts_the_least_recently_used_by_count_and_by_characters", () => {
+    const cache = new DataUrlCache(3, 10);
+    expect(cache.set("a", "1234")).toEqual([]);
+    expect(cache.set("b", "1234")).toEqual([]);
+    expect(cache.get("a")).toBe("1234"); // touch: b is the oldest now
+    expect(cache.set("c", "1234")).toEqual(["b"]); // 12 characters > 10
+    expect(cache.set("d", "")).toEqual([]);
+    expect(cache.set("e", "")).toEqual(["a"]); // 4 entries > 3
+    expect(cache.has("c") && cache.has("d") && cache.has("e")).toBe(true);
+  });
+});
+
+describe("long sent messages", () => {
+  /** jsdom has no layout: a message's text is 20 px per line, times `wrap` (a narrower tab wraps more). */
+  let wrap = 1;
+  /** Layout reads of a message's height, and a hook to see when they happen. */
+  let reads = 0;
+  let onRead: (() => void) | undefined;
+  const lines = (count: number): string => Array.from({ length: count }, (_, index) => `строка ${index + 1}`).join("\n");
+  const bubble = (id: string): HTMLElement => entry(id).querySelector(".user-bubble") as HTMLElement;
+  const toggle = (id: string): HTMLElement | null => bubble(id).querySelector('[data-role="message-toggle"]');
+
+  beforeEach(() => {
+    wrap = 1;
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLElement): number {
+        if (!this.classList.contains("user-text")) return 0;
+        if (this.isConnected) reads++; // earlier tests' feeds still listen to resize, on detached elements
+        onRead?.();
+        return (this.textContent ?? "").split("\n").length * 20 * wrap;
+      },
+    });
+  });
+
+  afterEach(() => {
+    delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+  });
+
+  it("a_long_message_collapses_and_toggles_with_the_control_in_the_corner_a_short_one_has_none", () => {
+    feed.update([{ kind: "user", id: "u1", text: lines(30) }, { kind: "user", id: "u2", text: lines(3) }], false);
+    expect(bubble("u1").classList.contains("collapsed")).toBe(true);
+    const control = toggle("u1") as HTMLElement;
+    expect(control.textContent).toBe("Показать полностью");
+    expect(control.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle("u2")).toBeNull();
+    expect(bubble("u2").classList.contains("collapsed")).toBe(false);
+
+    control.click();
+    expect(bubble("u1").classList.contains("collapsed")).toBe(false);
+    expect(toggle("u1")?.textContent).toBe("Свернуть");
+    expect(toggle("u1")?.getAttribute("aria-expanded")).toBe("true");
+    expect(bubble("u1").lastElementChild).toBe(toggle("u1")); // the bubble's bottom corner (placed by .message-toggle)
+
+    toggle("u1")?.click();
+    expect(bubble("u1").classList.contains("collapsed")).toBe(true);
+    expect(toggle("u1")?.textContent).toBe("Показать полностью");
+  });
+
+  it("the_choice_is_kept_per_message_across_feed_updates", () => {
+    const long: Block = { kind: "user", id: "u1", text: lines(30), delivery: { state: "queued", queuedId: "q_1" } };
+    const other: Block = { kind: "user", id: "u2", text: lines(30) };
+    feed.update([long, other], true);
+    toggle("u1")?.click();
+    feed.update([long, other, { kind: "assistant", id: "a1", text: "ок", thinking: "", streaming: true }], true); // streaming goes on
+    expect(bubble("u1").classList.contains("collapsed")).toBe(false);
+    expect(bubble("u2").classList.contains("collapsed")).toBe(true);
+    feed.update([{ kind: "user", id: "u1", text: lines(30) }, other], false); // the queued message was sent: its element is rebuilt
+    expect(bubble("u1").classList.contains("collapsed")).toBe(false);
+    expect(toggle("u1")?.textContent).toBe("Свернуть");
+  });
+
+  const frame = (): Promise<void> => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+  it("a_resize_measures_again_once_per_frame", async () => {
+    feed.update([{ kind: "user", id: "u1", text: lines(10) }], false);
+    expect(toggle("u1")).toBeNull();
+    wrap = 2; // the tab got narrower: twice the lines
+    reads = 0;
+    for (let count = 0; count < 5; count++) window.dispatchEvent(new Event("resize"));
+    expect(bubble("u1").classList.contains("collapsed")).toBe(false); // not before the next frame
+    await frame();
+    expect(reads).toBe(1); // five resize events, one measure
+    expect(bubble("u1").classList.contains("collapsed")).toBe(true);
+    expect(toggle("u1")?.hidden).toBe(false);
+    wrap = 1;
+    window.dispatchEvent(new Event("resize"));
+    await frame();
+    expect(bubble("u1").classList.contains("collapsed")).toBe(false);
+    expect(toggle("u1") === null || toggle("u1")?.hidden === true).toBe(true);
+  });
+
+  it("all_bubbles_are_measured_before_any_is_changed", () => {
+    const order: string[] = [];
+    const toggleClass = DOMTokenList.prototype.toggle;
+    onRead = (): void => void order.push("read");
+    DOMTokenList.prototype.toggle = function (this: DOMTokenList, ...args: Parameters<DOMTokenList["toggle"]>): boolean {
+      order.push("write");
+      return toggleClass.apply(this, args);
+    };
+    try {
+      feed.update([1, 2, 3].map((index) => ({ kind: "user" as const, id: `u${index}`, text: lines(30) })), false);
+    } finally {
+      DOMTokenList.prototype.toggle = toggleClass;
+      onRead = undefined;
+    }
+    const firstWrite = order.indexOf("write");
+    expect(order.filter((step) => step === "read")).toHaveLength(3);
+    expect(order.lastIndexOf("read")).toBeLessThan(firstWrite); // no layout read after a class change
+  });
+
+  it("a_hidden_feed_measures_nothing_and_tries_again_on_the_next_update", () => {
+    const user: Block = { kind: "user", id: "u1", text: lines(30) };
+    wrap = 0; // display:none: no layout, scrollHeight 0
+    feed.update([user], false);
+    expect(bubble("u1").classList.contains("collapsed")).toBe(false);
+    wrap = 1;
+    feed.update([user], false);
+    expect(bubble("u1").classList.contains("collapsed")).toBe(true);
+  });
+
+  it("user_messages_get_an_actions_button_queued_ones_do_not", () => {
+    const actions: [string, HTMLElement][] = [];
+    feed = new Feed(root, (message) => posted.push(message), { onMessageActions: (blockId, anchor) => actions.push([blockId, anchor]) });
+    feed.update(
+      [
+        { kind: "user", id: "c1", text: "hi" },
+        { kind: "user", id: "q1", text: "later", delivery: { state: "queued", queuedId: "q_1" } },
+        { kind: "assistant", id: "a1", text: "ok", thinking: "", streaming: false },
+      ],
+      false,
+    );
+    const actionsButton = entry("c1").querySelector('[data-role="message-actions"]') as HTMLButtonElement;
+    expect(actionsButton).not.toBeNull();
+    expect(actionsButton.getAttribute("title")).toBe("Ответвить или откатить");
+    expect(actionsButton.getAttribute("aria-label")).toBe("Ответвить или откатить");
+    expect(entry("q1").querySelector('[data-role="message-actions"]')).toBeNull();
+    expect(entry("a1").querySelector('[data-role="message-actions"]')).toBeNull();
+    actionsButton.click();
+    expect(actions).toEqual([["c1", actionsButton]]);
+  });
+
+  describe("a message on its way", () => {
+    const label = (id: string): string | undefined => entry(id)?.querySelector(".queued-label")?.textContent ?? undefined;
+    const action = (id: string, role: string): HTMLButtonElement | null => entry(id)?.querySelector(`[data-role="${role}"]`) ?? null;
+    const reply: Block = { kind: "assistant", id: "a1", text: "ok", thinking: "", streaming: true };
+
+    it("sending_shows_muted_after_everything_the_agent_did_without_actions", () => {
+      feed.update([{ kind: "user", id: "m1", text: "hi", delivery: { state: "sending" } }, reply], true);
+      expect([...root.querySelectorAll("[data-block]")].map((element) => element.getAttribute("data-block"))).toEqual(["a1", "m1"]);
+      expect(label("m1")).toBe("отправляется…");
+      expect(entry("m1").querySelector(".user-bubble")?.classList.contains("sending")).toBe(true);
+      expect(action("m1", "message-actions")).toBeNull();
+      expect(action("m1", "dequeue")).toBeNull();
+    });
+
+    it("the_real_message_takes_the_same_place_once", () => {
+      feed.update([{ kind: "user", id: "m1", text: "hi", delivery: { state: "sending" } }], false);
+      feed.update([{ kind: "user", id: "m1", text: "hi" }, reply], true);
+      expect(root.querySelectorAll('[data-block="m1"]')).toHaveLength(1);
+      expect(label("m1")).toBeUndefined();
+      expect(action("m1", "message-actions")).not.toBeNull();
+    });
+
+    it("queued_offers_take_back_which_asks_the_host_once", () => {
+      feed.update([{ kind: "user", id: "m1", text: "later", delivery: { state: "queued", queuedId: "q_1" } }], true);
+      expect(label("m1")).toBe("в очереди — ждёт агента");
+      action("m1", "dequeue")?.click();
+      expect(posted).toEqual([{ type: "dequeue", blockId: "m1" }]);
+      expect(action("m1", "dequeue")?.disabled).toBe(true);
+      expect(action("m1", "edit-queued")?.disabled).toBe(true);
+      feed.queueResult("m1", "failed");
+      expect(action("m1", "dequeue")?.disabled).toBe(false);
+    });
+
+    it("one_already_handed_to_the_agent_says_so_briefly_and_becomes_the_normal_message", () => {
+      vi.useFakeTimers();
+      try {
+        feed.update([{ kind: "user", id: "m1", text: "later", delivery: { state: "queued", queuedId: "q_1" } }], true);
+        action("m1", "dequeue")?.click();
+        feed.queueResult("m1", "delivered");
+        expect(label("m1")).toBe("уже передано агенту");
+        expect(action("m1", "dequeue")).toBeNull();
+        feed.update([{ kind: "user", id: "m1", text: "later" }], true);
+        expect(label("m1")).toBe("уже передано агенту");
+        vi.advanceTimersByTime(3_000);
+        expect(label("m1")).toBeUndefined();
+        expect(action("m1", "message-actions")).not.toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("edit_opens_an_inline_editor_enter_saves_and_escape_cancels", () => {
+      const queued: Block = { kind: "user", id: "m1", text: "old", delivery: { state: "queued", queuedId: "q_1" } };
+      feed.update([queued, reply], true);
+      action("m1", "edit-queued")?.click();
+      const field = (): HTMLTextAreaElement => entry("m1").querySelector('[data-role="queued-edit"]') as HTMLTextAreaElement;
+      expect(field().value).toBe("old");
+      expect(document.activeElement).toBe(field());
+      field().value = "new";
+      field().dispatchEvent(new Event("input"));
+      feed.update([queued, { ...reply, text: "ok, more" } as Block], true); // the agent streams on: the edit survives
+      expect(field().value).toBe("new");
+      field().dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      expect(field()).toBeNull();
+      expect(posted).toEqual([]);
+
+      action("m1", "edit-queued")?.click();
+      field().value = "   ";
+      field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      expect(posted).toEqual([]); // an empty text is not an edit
+      field().value = "newer";
+      field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      expect(posted).toEqual([{ type: "editQueued", blockId: "m1", text: "newer" }]);
+      expect(field()).toBeNull();
+    });
+
+    it("no_rewind_button_while_queued_or_not_sent", () => {
+      feed.update(
+        [
+          { kind: "user", id: "m1", text: "later", delivery: { state: "queued", queuedId: "q_1" } },
+          { kind: "user", id: "m2", text: "hi", delivery: { state: "failed" } },
+        ],
+        true,
+      );
+      expect(action("m1", "message-actions")).toBeNull();
+      expect(action("m2", "message-actions")).toBeNull();
+    });
+
+    it("a_guard_row_meanwhile_lands_after_the_agents_work_not_after_a_waiting_message", () => {
+      feed.update([{ kind: "user", id: "c1", text: "go" }, reply, { kind: "user", id: "m1", text: "later", delivery: { state: "queued", queuedId: "q_1" } }], true);
+      const step = document.createElement("div");
+      step.dataset["step"] = "g1";
+      feed.addGuardRow("g1", step);
+      const order = [...root.querySelectorAll(".entry")].map((element) => element.getAttribute("data-block") ?? element.querySelector<HTMLElement>("[data-step]")?.dataset["step"]);
+      expect(order).toEqual(["c1", "a1", "g1", "m1"]);
+      feed.update([{ kind: "user", id: "c1", text: "go" }, reply, { kind: "user", id: "m1", text: "later" }], false); // the queued one is delivered
+      const after = [...root.querySelectorAll(".entry")].map((element) => element.getAttribute("data-block") ?? element.querySelector<HTMLElement>("[data-step]")?.dataset["step"]);
+      expect(after).toEqual(["c1", "a1", "g1", "m1"]);
+    });
+
+    it("failed_shows_an_error_row_with_retry_and_remove", () => {
+      const retried: string[] = [];
+      const discarded: string[] = [];
+      feed = new Feed(root, (message) => posted.push(message), { onRetry: (id) => retried.push(id), onDiscard: (id) => discarded.push(id) });
+      feed.update([{ kind: "user", id: "m1", text: "hi", delivery: { state: "failed" } }], true);
+      expect(label("m1")).toBe("Не отправлено");
+      expect(entry("m1").querySelector(".user-bubble")?.classList.contains("failed")).toBe(true);
+      action("m1", "retry")?.click();
+      action("m1", "discard")?.click();
+      expect([retried, discarded]).toEqual([["m1"], ["m1"]]);
+    });
+  });
+});
+
+describe("Feed · todo steps", () => {
+  const todo = (id: string, call: Record<string, unknown>, state: "running" | "ok" | "error" = "ok", output = "Ask: x\nNow: y\nNext: none"): Block =>
+    ({ kind: "tool", id, name: "todo", summary: "", args: {}, todo: call, output, truncated: false, state }) as Block;
+  const items = (id: string): string[] => [...entry(id).querySelectorAll<HTMLElement>("[data-todo-item]")].map((item) => `${item.dataset["status"]}:${item.textContent}`);
+
+  it("init_is_a_plan_checklist_without_a_box_or_its_output", () => {
+    feed.update([todo("t1", { op: "init", list: [{ phase: "P", items: ["Собрать", "Проверить"] }] })], false);
+    const step = entry("t1");
+    expect(step.querySelector('[data-role="tool-io"]')).toBeNull();
+    expect(step.textContent).not.toContain("Now:");
+    expect(step.querySelector(".todo-head")?.textContent).toBe("План");
+    expect(items("t1")).toEqual(["in_progress:☐Собрать", "pending:☐Проверить"]);
+    expect(step.querySelector('[data-status="in_progress"]')?.classList.contains("current")).toBe(true);
+  });
+
+  it("a_long_plan_shows_five_and_the_rest_behind_ещё_N", () => {
+    feed.update([todo("t1", { op: "init", items: ["1", "2", "3", "4", "5", "6", "7"] })], false);
+    expect(items("t1")).toHaveLength(7);
+    const more = entry("t1").querySelector<HTMLDetailsElement>("details.todo-more");
+    expect(more?.querySelector("summary")?.textContent).toBe("ещё 2");
+    expect(more?.querySelectorAll("[data-todo-item]")).toHaveLength(2);
+  });
+
+  it("updates_are_one_muted_line_each", () => {
+    feed.update(
+      [
+        todo("t1", { op: "init", items: ["Собрать", "Проверить", "Лишнее"] }),
+        todo("t2", { op: "done", task: "Собрать" }),
+        todo("t3", { op: "start", task: "Проверить" }),
+        todo("t4", { op: "drop", task: "Лишнее" }),
+        todo("t5", { op: "done", phase: "Сборка" }),
+        todo("t6", { op: "append", items: ["Ещё", "И ещё"] }),
+        todo("t7", { op: "rm", task: "Ещё" }),
+      ],
+      false,
+    );
+    const line = (id: string): string => entry(id).querySelector(".todo-mark")?.textContent ?? "";
+    expect(["t2", "t3", "t4", "t5", "t6", "t7"].map(line)).toEqual(["✓ Собрать", "→ Проверить", "✕ Лишнее", "✓ Сборка", "+ Ещё, И ещё", "− Ещё"]);
+    expect(entry("t2").querySelector(".todo-mark")?.classList.contains("muted")).toBe(true);
+    for (const id of ["t2", "t3", "t4"]) expect(entry(id).querySelector('[data-role="tool-io"]')).toBeNull();
+  });
+
+  it("view_shows_the_list_as_it_stands_then", () => {
+    feed.update([todo("t1", { op: "init", items: ["A", "B"] }), todo("t2", { op: "done", task: "A" }), todo("t3", { op: "view" })], false);
+    expect(items("t3")).toEqual(["completed:☑A", "in_progress:☐B"]);
+    expect(items("t1")).toEqual(["in_progress:☐A", "pending:☐B"]); // the plan as it was made
+  });
+
+  it("a_failed_todo_call_keeps_the_ordinary_step_with_its_error", () => {
+    feed.update([todo("t1", { op: "done", task: "nope" }, "error", 'Task "nope" not found')], false);
+    expect(entry("t1").querySelector(".todo-mark")).toBeNull();
+    expect(entry("t1").textContent).toContain('Task "nope" not found');
+  });
+});
+
+describe("selecting text in the feed", () => {
+  /** Selects `text` inside the first node of `element` that holds it, as a person's drag would. */
+  function select(element: Element, text: string): void {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node !== null && !(node.textContent ?? "").includes(text)) node = walker.nextNode();
+    if (node === null) throw new Error(`no node holds ${text}`);
+    const start = (node.textContent as string).indexOf(text);
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, start + text.length);
+    const selection = window.getSelection() as Selection;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function clear(): void {
+    window.getSelection()?.removeAllRanges();
+    document.dispatchEvent(new Event("selectionchange")); // jsdom never fires it itself
+  }
+
+  const streaming = (text: string): Block => ({ kind: "assistant", id: "a1", text, thinking: "", streaming: true });
+
+  it("a_block_whose_text_is_being_selected_keeps_its_nodes_until_the_selection_lets_go", () => {
+    feed.update([streaming("Смотри https://example.com/a")], true);
+    const before = entry("a1");
+    const link = before.querySelector("a") as HTMLAnchorElement;
+    select(link, "https://example.com/a");
+
+    feed.update([streaming("Смотри https://example.com/a и ещё")], true); // the next streaming delta
+    expect(entry("a1")).toBe(before); // the very same element: the selection is still there
+    expect(window.getSelection()?.toString()).toBe("https://example.com/a");
+
+    clear(); // the person let go
+    expect(entry("a1")).not.toBe(before);
+    expect(entry("a1").textContent).toContain("и ещё");
+  });
+
+  it("a_selection_across_several_blocks_holds_every_block_it_runs_through", () => {
+    const answer: Block = { kind: "assistant", id: "a0", text: "начало", thinking: "", streaming: false };
+    const step: Block = { kind: "tool", id: "t1", name: "bash", summary: "ls", args: {}, output: "итог", truncated: false, state: "ok" };
+    feed.update([answer, step, streaming("конец")], true);
+    const held = [entry("a0"), entry("t1"), entry("a1")];
+    const range = document.createRange();
+    range.setStart(entry("a0"), 0);
+    range.setEnd(entry("a1"), entry("a1").childNodes.length);
+    const selection = window.getSelection() as Selection;
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    feed.update([answer, { ...step, output: "итог 2" }, streaming("конец и ещё")], true);
+    expect([entry("a0"), entry("t1"), entry("a1")]).toEqual(held); // the step in the middle stays put too
+    expect(window.getSelection()?.toString()).toContain("итог");
+  });
+
+  it("an_untouched_block_still_follows_its_own_changes", () => {
+    feed.update([{ kind: "assistant", id: "a0", text: "раньше", thinking: "", streaming: false }, streaming("один")], true);
+    select(entry("a0"), "раньше");
+    feed.update([{ kind: "assistant", id: "a0", text: "раньше", thinking: "", streaming: false }, streaming("один два")], true);
+    expect(entry("a1").textContent).toContain("один два"); // only the selected block waits
+    expect(window.getSelection()?.toString()).toBe("раньше");
+  });
+
+  it("the_secondary_button_opens_the_menu_and_acts_on_nothing", () => {
+    feed.update([{ kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false }], false);
+    const link = entry("a1").querySelector("a") as HTMLAnchorElement;
+    select(link, "https://example.com/a");
+    let prevented: boolean | undefined;
+    document.addEventListener(
+      "click",
+      (event) => {
+        prevented = event.defaultPrevented;
+        event.preventDefault(); // jsdom would follow the href; no browser dispatches a click for the right button
+      },
+      { once: true },
+    );
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 2 }));
+    expect(prevented).toBe(false); // the editor's own copy needs the event's default
+    expect(posted).toEqual([]);
+  });
+
+  it("a_click_that_ends_a_selection_in_a_link_does_not_open_it", () => {
+    feed.update([{ kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false }], false);
+    const link = entry("a1").querySelector("a") as HTMLAnchorElement;
+    select(link, "example.com");
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(posted).toEqual([]);
+
+    clear(); // a plain click still opens it
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(posted).toEqual([{ type: "openLink", url: "https://example.com/a" }]);
+  });
+
+  it("a_link_click_is_not_blocked_by_a_selection_somewhere_else", () => {
+    feed.update(
+      [
+        { kind: "assistant", id: "a0", text: "раньше", thinking: "", streaming: false },
+        { kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false },
+      ],
+      false,
+    );
+    select(entry("a0"), "раньше"); // Chrome keeps such a selection across a click on a link
+    (entry("a1").querySelector("a") as HTMLAnchorElement).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(posted).toEqual([{ type: "openLink", url: "https://example.com/a" }]);
+  });
+
+  it("a_box_opens_on_a_click_unless_the_selection_is_in_it", () => {
+    feed.update([{ kind: "tool", id: "t1", name: "bash", summary: "ls", args: {}, output: "итог", truncated: false, state: "ok" }], false);
+    const box = entry("t1").querySelector('[data-role="tool-io"]') as HTMLElement;
+    select(box, "итог");
+    box.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(box.classList.contains("open")).toBe(false);
+
+    select(entry("t1").querySelector(".tool-name") as Element, "Bash"); // a selection outside the box is not its business
+    box.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(box.classList.contains("open")).toBe(true);
+  });
+});
+
+describe("copy buttons", () => {
+  let written: string[];
+
+  beforeEach(() => {
+    written = [];
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => void written.push(text) } });
+  });
+
+  function copy(id: string, index = 0): HTMLButtonElement {
+    return [...entry(id).querySelectorAll<HTMLButtonElement>('[data-role="copy"]')][index] as HTMLButtonElement;
+  }
+
+  it("a_code_block_gets_one_that_copies_the_code_alone", async () => {
+    feed.update([{ kind: "assistant", id: "a1", text: "Вот:\n\n```sh\nls -la\ncd /tmp\n```\n", thinking: "", streaming: false }], false);
+    const button = copy("a1");
+    expect(button.title).toBe("Копировать");
+    button.click();
+    await Promise.resolve();
+    expect(written).toEqual(["ls -la\ncd /tmp\n"]);
+  });
+
+  it("an_output_box_gets_one_that_copies_the_whole_text_not_the_shown_part", async () => {
+    const output = Array.from({ length: 300 }, (_, index) => `строка ${index + 1}`).join("\n");
+    feed.update([{ kind: "tool", id: "t1", name: "bash", summary: "ls", args: {}, input: "ls -la", output, truncated: false, state: "ok" }], false);
+    expect(copy("t1", 0).closest('[data-io="in"]')).not.toBeNull();
+    copy("t1", 1).click();
+    await Promise.resolve();
+    expect(written).toEqual([output]);
+    expect((entry("t1").querySelector(".io-text") as HTMLElement).textContent).not.toContain("строка 300"); // the box still shows its first lines
+  });
+
+  it("a_click_on_one_neither_opens_the_box_nor_leaves_the_tick_behind", async () => {
+    vi.useFakeTimers();
+    feed.update([{ kind: "tool", id: "t1", name: "bash", summary: "ls", args: {}, output: "итог", truncated: false, state: "ok" }], false);
+    const box = entry("t1").querySelector('[data-role="tool-io"]') as HTMLElement;
+    const button = copy("t1");
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    expect(box.classList.contains("open")).toBe(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button.classList.contains("copied")).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(button.classList.contains("copied")).toBe(false);
+    expect(written).toEqual(["итог"]);
+    vi.useRealTimers();
+  });
+});

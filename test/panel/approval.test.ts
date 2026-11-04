@@ -1,0 +1,494 @@
+import { mkdir, symlink } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as vscode from "vscode";
+import { DaemonManager, hostSocketPath } from "../../src/daemon";
+import type { GuardEvent, PendingView, RulesV2 } from "../../src/guard/admin";
+import { GuardApprovals, type GuardAdminPort } from "../../src/guard/approvals";
+import { ChatPanel, type PanelHost } from "../../src/panel/ChatPanel";
+import { PanelRegistry } from "../../src/panel/registry";
+import { FakeDaemon, type Frame } from "../helpers/fakeDaemon";
+
+vi.mock("vscode", () => ({
+  Uri: { joinPath: (...parts: unknown[]) => ({ toString: () => parts.slice(1).join("/") }), parse: (value: string) => value },
+  ViewColumn: { Active: -1 },
+  window: { showWarningMessage: vi.fn(), createWebviewPanel: vi.fn(), showTextDocument: vi.fn() },
+  workspace: { openTextDocument: vi.fn() },
+  commands: { executeCommand: vi.fn() },
+  env: { openExternal: vi.fn() },
+}));
+
+const SECRET = "sekret-key-123";
+const LATE_SECRET = "late-added-token-77";
+const S1_FILE = "/tmp/agent/sessions/--proj--/s1.jsonl";
+const S2_FILE = "/tmp/agent/sessions/--proj--/s2.jsonl";
+/** session file -> [rpc handle, durable session id] */
+const SESSIONS: Record<string, [string, string]> = { [S1_FILE]: ["rpc-1", "s1"], [S2_FILE]: ["rpc-2", "s2"] };
+
+let daemon: FakeDaemon;
+let manager: DaemonManager;
+
+/** The admin socket as the window sees it: events are emitted by hand, answers recorded. */
+class FakeAdmin implements GuardAdminPort {
+  listener: ((event: GuardEvent) => void) | undefined;
+  giveUp: (() => void) | undefined;
+  /** Called by the real client each time the service confirms a (re)subscription. */
+  confirmed: (() => void) | undefined;
+  /** What the service replays right after confirming: its open requests. */
+  replay: GuardEvent[] = [];
+  /** What `pending()` reports. */
+  open: PendingView[] = [];
+  readonly answers: Array<{ id: string; decision: "allow-once" | "deny"; message?: string }> = [];
+  subscriptions = 0;
+  stops = 0;
+  closed = 0;
+  card = true;
+  answerError: string | undefined;
+  /** Held answers: resolved by the test (a double click lands while the first is in flight). */
+  hold: Array<() => void> | undefined;
+
+  async rulesGet(): Promise<RulesV2> {
+    return { human: { waitSeconds: 300, card: this.card, telegram: false } } as RulesV2;
+  }
+
+  async pending(): Promise<PendingView[]> {
+    return this.open;
+  }
+
+  subscribe(listener: (event: GuardEvent) => void, onGiveUp?: () => void, onSubscribed?: () => void): () => void {
+    this.listener = listener;
+    this.giveUp = onGiveUp;
+    this.confirmed = onSubscribed;
+    this.subscriptions += 1;
+    onSubscribed?.();
+    for (const event of this.replay) listener(event);
+    return () => {
+      this.stops += 1;
+      this.listener = undefined;
+    };
+  }
+
+  async answer(id: string, decision: "allow-once" | "deny", message?: string): Promise<void> {
+    this.answers.push({ id, decision, ...(message !== undefined ? { message } : {}) });
+    if (this.hold !== undefined) await new Promise<void>((resolve) => this.hold?.push(resolve));
+    if (this.answerError !== undefined) throw new Error(this.answerError);
+  }
+
+  close(): void {
+    this.closed += 1;
+  }
+
+  emit(event: GuardEvent): void {
+    this.listener?.(event);
+  }
+}
+
+type Tab = { chat: ChatPanel; posted: Array<Record<string, unknown>>; json: string[]; receive(raw: unknown): void };
+
+function fakePanel(): { panel: vscode.WebviewPanel; posted: Array<Record<string, unknown>>; json: string[]; receive(raw: unknown): void } {
+  const listeners: ((raw: unknown) => void)[] = [];
+  const posted: Array<Record<string, unknown>> = [];
+  const json: string[] = [];
+  const panel = {
+    title: "",
+    iconPath: undefined,
+    webview: {
+      options: {},
+      html: "",
+      cspSource: "vscode-resource:",
+      asWebviewUri: (uri: unknown) => uri,
+      onDidReceiveMessage: (listener: (raw: unknown) => void) => {
+        listeners.push(listener);
+        return { dispose: () => undefined };
+      },
+      postMessage: async (text: string) => {
+        json.push(text);
+        const message = JSON.parse(text) as Record<string, unknown>;
+        if (message["type"] !== "state" && message["type"] !== "delta") posted.push(message);
+        return true;
+      },
+    },
+    onDidDispose: () => ({ dispose: () => undefined }),
+    reveal: () => undefined,
+    viewColumn: 2,
+  };
+  return { panel: panel as unknown as vscode.WebviewPanel, posted, json, receive: (raw) => listeners.forEach((listener) => listener(raw)) };
+}
+
+function windowHost(secrets: string[]): PanelHost {
+  return {
+    extensionUri: {} as vscode.Uri,
+    registry: new PanelRegistry<ChatPanel>(),
+    panels: new Set<ChatPanel>(),
+    catalog: {},
+    updateCatalog: () => undefined,
+    onCatalogChange: () => () => undefined,
+    secrets,
+    log: () => undefined,
+    daemon: () => ({ ok: true, value: manager }),
+    listSessions: async () => [],
+    setPinned: async () => undefined,
+    setArchived: async () => undefined,
+    openSession: async () => undefined,
+    newSession: () => undefined,
+    restartHost: () => undefined,
+    isProjectSession: async () => false,
+    showOutput: async () => undefined,
+    isPinned: () => false,
+    openFork: () => undefined,
+  };
+}
+
+async function settle(done: () => boolean): Promise<void> {
+  for (let tick = 0; tick < 400 && !done(); tick++) await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(done()).toBe(true);
+}
+
+function pending(overrides: Partial<PendingView> = {}): PendingView {
+  return {
+    id: "abc123abc123",
+    session: "s1",
+    cwd: "/work/proj",
+    tool: "bash",
+    command: "git push origin main",
+    reasons: ["git-push"],
+    createdAt: "2026-11-04T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function guardMessages(tab: Tab): Array<Record<string, unknown>> {
+  return tab.posted.filter((message) => String(message["type"]).startsWith("guard"));
+}
+
+let host: PanelHost;
+let secrets: string[];
+let admin: FakeAdmin;
+let protectionOn: boolean;
+let approvals: GuardApprovals;
+let tabS1: Tab;
+let tabS2: Tab;
+
+async function attach(sessionPath: string): Promise<Tab> {
+  const fake = fakePanel();
+  const chat = ChatPanel.restore(host, fake.panel, { kind: "attach", sessionPath, saved: { sessionPath, modelMode: "auto" } });
+  await settle(() => chat.durableId === SESSIONS[sessionPath]?.[1]);
+  return { chat, ...fake };
+}
+
+beforeEach(async () => {
+  daemon = await FakeDaemon.start();
+  await mkdir(join(daemon.agentDir, "rpc"), { recursive: true });
+  await symlink(daemon.socketPath, hostSocketPath(daemon.agentDir));
+  manager = new DaemonManager({ env: { OMO_CODING_AGENT_DIR: daemon.agentDir }, agentDir: daemon.agentDir, omoPath: "/fake/omo", secrets: [SECRET] });
+  daemon.on("open_session", (frame: Frame) => {
+    const [handle, durable] = SESSIONS[String(frame["sessionPath"])] ?? ["rpc-9", "s9"];
+    return { data: { sessionId: handle, state: { sessionFile: frame["sessionPath"], sessionId: durable, isStreaming: false, pendingDialogs: [] } } };
+  });
+  daemon.on("get_entries", () => ({ data: { entries: [], hasMore: false } }));
+  daemon.on("get_available_models", () => ({ data: { models: [] } }));
+  daemon.on("release_attachment", () => ({}));
+  secrets = [SECRET];
+  host = windowHost(secrets);
+  admin = new FakeAdmin();
+  protectionOn = true;
+  approvals = new GuardApprovals({
+    protectionOn: async () => protectionOn,
+    connect: async () => admin,
+    panels: () => host.panels,
+    log: () => undefined,
+    retryDelaysMs: [],
+  });
+  host.guard = approvals;
+  tabS1 = await attach(S1_FILE);
+  tabS2 = await attach(S2_FILE);
+  await approvals.sync();
+});
+
+afterEach(async () => {
+  approvals.dispose();
+  manager.dispose();
+  await daemon.stop();
+});
+
+describe("guard approvals in the chat", () => {
+  it("a_request_reaches_the_panel_of_its_session", () => {
+    admin.emit({ event: "pending", item: pending({ session: "s1" }) });
+    expect(guardMessages(tabS1)).toContainEqual({ type: "guardRequest", request: expect.objectContaining({ id: "abc123abc123", command: "git push origin main" }) });
+    expect(guardMessages(tabS2)).toEqual([]);
+  });
+
+  it("a_request_of_an_unknown_session_goes_to_every_panel_labelled_with_its_cwd", () => {
+    admin.emit({ event: "pending", item: pending({ session: "terminal-session" }) });
+    for (const tab of [tabS1, tabS2]) {
+      expect(guardMessages(tab)).toEqual([{ type: "guardRequest", request: expect.objectContaining({ id: "abc123abc123", cwd: "/work/proj" }), elsewhere: true }]);
+    }
+  });
+
+  it("a_subagents_request_goes_to_the_panel_whose_agents_run_that_child_session", async () => {
+    daemon.push({
+      sessionId: "rpc-2",
+      type: "extension_event",
+      name: "omo.task.updated",
+      data: { tasks: [{ task_id: "st_1", status: "running", name: "explore", child_session_id: "child-of-s2" }] },
+    });
+    await settle(() => tabS2.chat.runsChild("child-of-s2"));
+    admin.emit({ event: "pending", item: pending({ session: "child-of-s2" }) });
+    expect(guardMessages(tabS2)).toEqual([{ type: "guardRequest", request: expect.objectContaining({ id: "abc123abc123" }) }]);
+    expect(guardMessages(tabS1)).toEqual([]);
+  });
+
+  it("allow_once_answers_over_the_admin_socket_once_however_often_it_is_clicked", async () => {
+    admin.emit({ event: "pending", item: pending() });
+    admin.hold = [];
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "allow-once" });
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "allow-once" });
+    tabS2.receive({ type: "guardAnswer", id: "abc123abc123", decision: "deny" });
+    await settle(() => admin.answers.length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(admin.answers).toEqual([{ id: "abc123abc123", decision: "allow-once" }]);
+    for (const release of admin.hold) release();
+  });
+
+  it("an_answer_to_a_request_that_is_not_open_is_never_sent", async () => {
+    tabS1.receive({ type: "guardAnswer", id: "never-opened", decision: "allow-once" });
+    admin.emit({ event: "pending", item: pending() });
+    admin.emit({ event: "resolved", id: "abc123abc123", decision: "deny", by: "timeout", session: "s1" });
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "allow-once" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(admin.answers).toEqual([]);
+  });
+
+  it("a_failed_answer_comes_back_to_the_card_and_can_be_given_again", async () => {
+    admin.emit({ event: "pending", item: pending() });
+    admin.answerError = "служба защиты не приняла ответ";
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "deny" });
+    await settle(() => guardMessages(tabS1).some((message) => message["type"] === "guardAnswerFailed"));
+    expect(guardMessages(tabS1).at(-1)).toEqual({ type: "guardAnswerFailed", id: "abc123abc123", error: "служба защиты не приняла ответ" });
+    admin.answerError = undefined;
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "deny" });
+    await settle(() => admin.answers.length === 2);
+  });
+
+  it("a_deny_with_words_for_the_agent_reaches_the_admin_socket_and_comes_back_redacted", async () => {
+    const logged: string[] = [];
+    host.log = (text) => logged.push(text);
+    admin.emit({ event: "pending", item: pending() });
+    admin.answerError = "служба защиты не приняла ответ";
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "deny", message: `прогони тесты ${SECRET}` });
+    await settle(() => guardMessages(tabS1).some((message) => message["type"] === "guardAnswerFailed"));
+    expect(admin.answers).toEqual([{ id: "abc123abc123", decision: "deny", message: `прогони тесты ${SECRET}` }]);
+    expect(logged.join("\n")).not.toContain("прогони тесты"); // the person's words are never logged
+    admin.emit({ event: "resolved", id: "abc123abc123", decision: "deny", by: "agent-tabs", session: "s1", message: `прогони тесты ${SECRET}` });
+    expect(guardMessages(tabS1).at(-1)).toEqual({ type: "guardResolved", id: "abc123abc123", decision: "deny", by: "agent-tabs", message: "прогони тесты ‹redacted›" });
+  });
+
+  it("a_deny_message_too_long_or_on_an_allow_is_dropped_by_the_protocol", async () => {
+    admin.emit({ event: "pending", item: pending() });
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "deny", message: "x".repeat(2001) });
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "allow-once", message: "ok" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(admin.answers).toEqual([]);
+  });
+
+  it("the_editor_tab_title_is_marked_while_the_tab_waits_for_the_person", () => {
+    const title = (): string => (tabS1.chat as unknown as { panel: vscode.WebviewPanel }).panel.title;
+    const plain = title();
+    expect(plain.startsWith("● ")).toBe(false);
+    admin.emit({ event: "pending", item: pending() });
+    expect(title()).toBe(`● ${plain}`);
+    expect((tabS2.chat as unknown as { panel: vscode.WebviewPanel }).panel.title.startsWith("● ")).toBe(false);
+    admin.emit({ event: "resolved", id: "abc123abc123", decision: "allow", by: "telegram", session: "s1" });
+    expect(title()).toBe(plain);
+  });
+
+  it("every_dialog_answer_gets_its_outcome_back", async () => {
+    daemon.on("extension_ui_response", () => ({ error: "gone", errorCode: "unknown_extension_ui_request" }));
+    daemon.push({ sessionId: "rpc-1", type: "extension_ui_request", id: "d1", method: "confirm", title: "Удалить?" });
+    await settle(() => tabS1.json.some((text) => text.includes('"d1"')));
+    tabS1.receive({ type: "answer", dialogId: "d1", answer: { confirmed: true } });
+    await settle(() => tabS1.posted.some((message) => message["type"] === "answerResult"));
+    expect(tabS1.posted.find((message) => message["type"] === "answerResult")).toEqual({ type: "answerResult", dialogId: "d1", outcome: "closed" });
+  });
+
+  it("the_editor_tab_title_is_marked_while_an_omo_dialog_waits", async () => {
+    const title = (): string => (tabS1.chat as unknown as { panel: vscode.WebviewPanel }).panel.title;
+    daemon.push({ sessionId: "rpc-1", type: "extension_ui_request", id: "d1", method: "confirm", title: "Удалить?" });
+    await settle(() => title().startsWith("● "));
+    daemon.push({ sessionId: "rpc-1", type: "question_resolved", id: "d1" });
+    await settle(() => !title().startsWith("● "));
+  });
+
+  it("a_card_answered_elsewhere_collapses_with_who_answered", () => {
+    admin.emit({ event: "pending", item: pending() });
+    admin.emit({ event: "resolved", id: "abc123abc123", decision: "allow", by: "telegram", session: "s1" });
+    expect(guardMessages(tabS1).at(-1)).toEqual({ type: "guardResolved", id: "abc123abc123", decision: "allow", by: "telegram" });
+  });
+
+  it("a_decider_final_verdict_shows_as_a_step_in_its_sessions_feed_only", () => {
+    const decider = { model: "gw-anthropic/claude-haiku", decision: "allow", reason: "read-only push --dry-run", ms: 1200 };
+    admin.emit({ event: "resolved", id: "d1", decision: "allow", by: "decider", session: "s2", decider, item: pending({ id: "d1", session: "s2", decider }) });
+    expect(guardMessages(tabS2)).toEqual([{ type: "guardStep", id: "d1", tool: "bash", command: "git push origin main", decider, at: "2026-11-04T10:00:00.000Z" }]);
+    expect(guardMessages(tabS1)).toEqual([]);
+  });
+
+  it("with_the_card_off_no_card_is_shown_but_the_decider_step_still_is", async () => {
+    admin.card = false;
+    await approvals.sync();
+    const decider = { model: "gw/m", decision: "ask", reason: "unclear", ms: 900 };
+    admin.emit({ event: "pending", item: pending({ decider }) });
+    expect(guardMessages(tabS1).map((message) => message["type"])).toEqual(["guardStep"]);
+
+    admin.card = true;
+    await approvals.sync(); // the setting turned on: the open request's card appears
+    expect(guardMessages(tabS1).map((message) => message["type"])).toEqual(["guardStep", "guardRequest"]);
+  });
+
+  it("an_answer_from_a_tab_the_request_was_not_routed_to_is_refused", async () => {
+    admin.emit({ event: "pending", item: pending({ session: "s1" }) });
+    tabS2.receive({ type: "guardAnswer", id: "abc123abc123", decision: "allow-once" }); // forged: S2 never had this card
+    await settle(() => guardMessages(tabS2).length > 0);
+    expect(guardMessages(tabS2)).toEqual([{ type: "guardAnswerFailed", id: "abc123abc123", error: "этот запрос относится к другой вкладке" }]);
+    expect(admin.answers).toEqual([]);
+  });
+
+  it("a_click_while_another_tabs_answer_is_in_flight_says_so", async () => {
+    admin.emit({ event: "pending", item: pending({ session: "terminal-session" }) }); // both tabs have the card
+    admin.hold = [];
+    tabS1.receive({ type: "guardAnswer", id: "abc123abc123", decision: "allow-once" });
+    await settle(() => admin.answers.length === 1);
+    tabS2.receive({ type: "guardAnswer", id: "abc123abc123", decision: "deny" });
+    await settle(() => guardMessages(tabS2).some((message) => message["type"] === "guardAnswerFailed"));
+    expect(guardMessages(tabS2).at(-1)).toEqual({ type: "guardAnswerFailed", id: "abc123abc123", error: "ответ уже отправляется" });
+    expect(admin.answers).toHaveLength(1);
+    for (const release of admin.hold) release();
+  });
+
+  it("with_the_card_off_the_open_requests_replayed_at_subscribe_show_no_card", async () => {
+    approvals.dispose();
+    const quiet = new FakeAdmin();
+    quiet.card = false;
+    quiet.replay = [{ event: "pending", item: pending() }];
+    const fresh = new GuardApprovals({ protectionOn: async () => true, connect: async () => quiet, panels: () => host.panels, log: () => undefined, retryDelaysMs: [] });
+    await fresh.sync();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(guardMessages(tabS1)).toEqual([]);
+    fresh.dispose();
+  });
+
+  it("a_decider_step_of_a_session_no_tab_shows_goes_to_every_tab_labelled_with_its_cwd", () => {
+    const decider = { model: "gw/m", decision: "deny", reason: "force push", ms: 300 };
+    admin.emit({ event: "resolved", id: "d2", decision: "deny", by: "decider", session: "terminal-session", decider, item: pending({ id: "d2", session: "terminal-session", decider }) });
+    for (const tab of [tabS1, tabS2]) {
+      expect(guardMessages(tab)).toEqual([
+        { type: "guardStep", id: "d2", tool: "bash", command: "git push origin main", decider, at: "2026-11-04T10:00:00.000Z", cwd: "/work/proj" },
+      ]);
+    }
+  });
+
+  it("after_a_resubscription_requests_the_service_no_longer_has_are_closed", async () => {
+    admin.emit({ event: "pending", item: pending({ id: "gone00000000" }) });
+    admin.emit({ event: "pending", item: pending({ id: "kept00000000" }) });
+    admin.open = [pending({ id: "kept00000000" })]; // the service restarted and lost one
+    admin.confirmed?.();
+    await settle(() => guardMessages(tabS1).some((message) => message["type"] === "guardClosed"));
+    expect(guardMessages(tabS1).filter((message) => message["type"] === "guardClosed")).toEqual([{ type: "guardClosed", id: "gone00000000" }]);
+    tabS1.receive({ type: "guardAnswer", id: "gone00000000", decision: "allow-once" });
+    tabS1.receive({ type: "guardAnswer", id: "kept00000000", decision: "allow-once" });
+    await settle(() => admin.answers.length === 1);
+    expect(admin.answers).toEqual([{ id: "kept00000000", decision: "allow-once" }]);
+  });
+
+  it("a_secret_in_the_command_or_reasons_is_redacted_with_the_windows_live_secrets", () => {
+    secrets.push(LATE_SECRET); // added after the panels were made (a key saved in the settings)
+    admin.emit({
+      event: "pending",
+      item: pending({
+        command: `curl -H "x-api-key: ${SECRET}" https://h/${LATE_SECRET}`,
+        code: `const key = "${SECRET}"; await tool.bash("curl https://h/${LATE_SECRET}");`, // B2: an eval's code goes out too
+        reasons: [`external ${LATE_SECRET}`],
+        decider: { decision: "ask", reason: SECRET, ms: 1 },
+      }),
+    });
+    const sent = tabS1.json.filter((text) => text.includes("guard"));
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.some((text) => text.includes('"code":"const key = '))).toBe(true);
+    for (const text of sent) {
+      expect(text).not.toContain(SECRET);
+      expect(text).not.toContain(LATE_SECRET);
+    }
+    // the ids still round-trip
+    expect(guardMessages(tabS1)).toEqual([expect.objectContaining({ type: "guardStep", id: "abc123abc123" }), expect.objectContaining({ request: expect.objectContaining({ id: "abc123abc123" }) })]);
+  });
+
+  it("a_reloaded_webview_gets_the_open_cards_again", async () => {
+    admin.emit({ event: "pending", item: pending() });
+    tabS1.posted.length = 0;
+    tabS1.receive({ type: "ready" });
+    await settle(() => guardMessages(tabS1).length > 0);
+    expect(guardMessages(tabS1)).toEqual([{ type: "guardRequest", request: expect.objectContaining({ id: "abc123abc123" }) }]);
+  });
+
+  it("one_subscription_per_window_started_with_protection_and_stopped_without_it", async () => {
+    await approvals.sync();
+    expect(admin.subscriptions).toBe(1);
+    protectionOn = false;
+    await approvals.sync();
+    expect(admin.stops).toBe(1);
+    expect(admin.closed).toBe(1);
+    admin.emit({ event: "pending", item: pending() });
+    expect(guardMessages(tabS1)).toEqual([]);
+    protectionOn = true;
+    await approvals.sync();
+    expect(admin.subscriptions).toBe(2);
+  });
+
+  it("a_silent_service_shows_a_quiet_banner_only_in_panels_with_open_cards", () => {
+    admin.emit({ event: "pending", item: pending({ session: "s1" }) });
+    admin.giveUp?.();
+    expect(guardMessages(tabS1).at(-1)).toEqual({ type: "guardSilent", silent: true });
+    expect(guardMessages(tabS2)).toEqual([]);
+  });
+
+  it("a_given_up_or_stopped_subscription_closes_the_open_requests_and_the_title_mark", async () => {
+    const title = (tab: Tab): string => (tab.chat as unknown as { panel: vscode.WebviewPanel }).panel.title;
+    admin.emit({ event: "pending", item: pending({ session: "s1" }) });
+    expect(title(tabS1).startsWith("● ")).toBe(true);
+    admin.giveUp?.();
+    expect(guardMessages(tabS1)).toContainEqual({ type: "guardClosed", id: "abc123abc123" });
+    expect(title(tabS1).startsWith("● ")).toBe(false);
+    await approvals.sync(); // a settings change subscribes again
+    admin.emit({ event: "pending", item: pending({ id: "two000000000", session: "s2" }) });
+    protectionOn = false;
+    await approvals.sync();
+    expect(guardMessages(tabS2)).toContainEqual({ type: "guardClosed", id: "two000000000" });
+  });
+
+  it("an_answer_to_a_request_that_is_gone_closes_it_in_that_tab", async () => {
+    tabS1.receive({ type: "guardAnswer", id: "gone00000000", decision: "allow-once" });
+    await settle(() => guardMessages(tabS1).length > 0);
+    expect(guardMessages(tabS1)).toEqual([{ type: "guardClosed", id: "gone00000000" }]);
+  });
+
+  it("a_service_that_never_answers_is_given_up_after_the_bounded_retries", async () => {
+    approvals.dispose();
+    let attempts = 0;
+    const logged: string[] = [];
+    const retrying = new GuardApprovals({
+      protectionOn: async () => true,
+      connect: async () => {
+        attempts += 1;
+        throw new Error("connect ENOENT");
+      },
+      panels: () => host.panels,
+      log: (text) => logged.push(text),
+      retryDelaysMs: [1, 1],
+    });
+    await retrying.sync();
+    await settle(() => attempts === 3);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(attempts).toBe(3);
+    expect(logged.some((line) => line.includes("connect ENOENT"))).toBe(true);
+    retrying.dispose();
+  });
+});

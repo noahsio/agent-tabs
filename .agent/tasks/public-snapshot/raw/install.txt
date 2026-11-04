@@ -1,0 +1,12 @@
+Isolated real VS Code verification:
+  INSTALLED_SYSTEM_AND_PORTABLE=PASS
+  DEFAULT_SETUP_AND_INSTALLED_GUARD=PASS
+  REAL_SETTINGS_UNCHANGED=PASS
+  REAL_INSTALL_EXIT=0
+
+The three real settings hashes before and after were identical:
+  omo.jsonc: 762376c47b51bc43d20996383247bdfce340a75a9efd9a521cec859309b34347
+  Claude settings: c05e65c0c75691972cf93226d98386bc72afe74c9bc6eab22ed13d72362f1c8e
+  VS Code settings: 44b0650863497b83aa5da0f12705f7d27382af88c6bbe9a9afd124cfe1743375
+
+The complete output is retained at /tmp/agent-tabs-public-evidence/real-install.log.

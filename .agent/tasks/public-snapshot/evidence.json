@@ -1,0 +1,32 @@
+{
+  "task": "public-snapshot",
+  "status": "PASS",
+  "workspace": "/tmp/agent-tabs-public",
+  "freshVerification": {
+    "separateVerifierAvailable": false,
+    "commandLog": "/tmp/agent-tabs-public-evidence/final-required.log",
+    "result": "PASS",
+    "testFiles": "89 passed, 21 skipped",
+    "tests": "1702 passed, 57 skipped",
+    "buildExit": 0
+  },
+  "acceptanceCriteria": [
+    { "id": "AC1", "status": "PASS", "evidence": ["raw/tree-cleanup.txt", "raw/scans.txt"] },
+    { "id": "AC2", "status": "PASS", "evidence": ["kit/guard/", "raw/scans.txt"] },
+    { "id": "AC3", "status": "PASS", "evidence": ["LICENSE", "package.json", "package-lock.json"] },
+    { "id": "AC4", "status": "PASS", "evidence": ["kit/lib/envs.mjs", "vitest.config.mts", "test/kit/"] },
+    { "id": "AC5", "status": "PASS", "evidence": ["vitest.config.mts", "test/live/config.ts"] },
+    { "id": "AC6", "status": "PASS", "evidence": ["scripts/install.sh", "test/kit/install.test.ts"] },
+    { "id": "AC7", "status": "PASS", "evidence": ["raw/install.txt"] },
+    { "id": "AC8", "status": "PASS", "evidence": ["setup/setup-omo.mjs", "test/kit/setup.test.ts"] },
+    { "id": "AC9", "status": "PASS", "evidence": ["setup/setup-omo.mjs", "test/kit/setup.test.ts"] },
+    { "id": "AC10", "status": "PASS", "evidence": ["setup/env.system.example.json", "setup/env.second.example.json", "setup/omo.roles.example.jsonc"] },
+    { "id": "AC11", "status": "PASS", "evidence": ["README.md"] },
+    { "id": "AC12", "status": "PASS", "evidence": ["raw/final-required.txt"] },
+    { "id": "AC13", "status": "PASS", "evidence": ["raw/scans.txt", "post-commit verification output"] }
+  ],
+  "warnings": [
+    "npm ci reports two moderate audit vulnerabilities",
+    "build reports existing import.meta/CJS warnings"
+  ]
+}

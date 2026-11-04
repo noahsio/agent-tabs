@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Tabs — harness</title>
+<style>/*CSS*/</style>
+</head>
+<body>
+<div id="app"></div>
+<script>/*SAMPLE*/</script>
+<script>
+// Stands in for VS Code: answers the webview's requests with sample data and records what it posted.
+(function () {
+  var sample = agentTabsSample.createSample(Date.now());
+  window.__posted = [];
+  function reply(message) {
+    setTimeout(function () { window.postMessage(JSON.stringify(message), "*"); }, 10);
+  }
+  window.acquireVsCodeApi = function () {
+    return {
+      getState: function () { return undefined; },
+      setState: function () {},
+      postMessage: function (message) {
+        window.__posted.push(message);
+        if (message.type === "ready") reply(sample.message);
+        if (message.type === "listSessions") reply({ type: "sessions", items: sample.sessions });
+        if (message.type === "getImage") reply({ type: "image", id: message.id, dataUrl: agentTabsSample.placeholderImage("#3a4a5a", "#24303c") });
+        if (message.type === "send") reply({ type: "sent", id: message.id, ok: true });
+        if (message.type === "rename") reply({ type: "renamed", ok: true });
+      },
+    };
+  };
+})();
+</script>
+<script>/*APP*/</script>
+</body>
+</html>

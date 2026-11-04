@@ -1,0 +1,23 @@
+{
+  "model_profile": "gw-anthropic/claude-opus-5-5:high",
+  "agents": {
+    "explore": { "model": "gw-anthropic/claude-opus-5-5", "reasoning": "xhigh" },
+    "librarian": { "model": "gw-anthropic/claude-opus-5-5", "reasoning": "xhigh" },
+    "plan-consultant": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" },
+    "plan-reviewer": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" }
+  },
+  "categories": {
+    "deep-low": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" },
+    "deep-high": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" },
+    "quick": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" },
+    "ultrabrain": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" },
+    "unspecified-low": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" },
+    "unspecified-high": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" },
+    "artistry": { "model": "gw-openai/gpt-6-astra", "reasoning": "xhigh" },
+    "architect": { "model": "gw-anthropic/claude-opus-5-5", "reasoning": "xhigh" },
+    "visual-engineering": { "model": "gw-anthropic/claude-opus-5-5", "reasoning": "xhigh" },
+    "writing": { "model": "gw-anthropic/claude-opus-5-5", "reasoning": "xhigh" }
+  },
+  "memory": { "reflection": { "category": "quick" } },
+  "telemetry": { "enabled": false }
+}

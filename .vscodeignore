@@ -1,0 +1,12 @@
+**
+!dist/extension.js
+!dist/webview.js
+!dist/webview.css
+!kit/guard/*
+!kit/lib/envs.mjs
+!media/icon.png
+!media/mark-light.svg
+!media/mark-dark.svg
+!package.json
+!README.md
+!LICENSE

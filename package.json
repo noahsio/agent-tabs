@@ -1,0 +1,108 @@
+{
+  "name": "agent-tabs",
+  "displayName": "Agent Tabs",
+  "description": "Сессии агента в виде вкладок редактора",
+  "version": "0.4.5",
+  "publisher": "local",
+  "icon": "media/icon.png",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:agentTabs.newSession",
+    "onCommand:agentTabs.openSession",
+    "onCommand:agentTabs.restartHost",
+    "onWebviewPanel:agentTabs.chat"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentTabs.newSession",
+        "title": "Agent Tabs: Новая сессия",
+        "icon": {
+          "light": "media/mark-light.svg",
+          "dark": "media/mark-dark.svg"
+        }
+      },
+      {
+        "command": "agentTabs.openSession",
+        "title": "Agent Tabs: Открыть сессию…"
+      },
+      {
+        "command": "agentTabs.restartHost",
+        "title": "Agent Tabs: Перезапустить OmO"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "agentTabs.newSession",
+          "group": "navigation@-100"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Agent Tabs",
+      "properties": {
+        "agentTabs.environmentVariables": {
+          "type": "array",
+          "scope": "application",
+          "default": [],
+          "description": "Переменные окружения для omo (обязательна OMO_CODING_AGENT_DIR; ключи шлюзов хранятся в файлах ключей, а не здесь).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ]
+          }
+        },
+        "agentTabs.omoPath": {
+          "type": "string",
+          "scope": "application",
+          "default": "~/.local/bin/omo",
+          "description": "Путь к исполняемому файлу omo."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "test": "vitest run",
+    "test:chrome": "AGENT_TABS_CHROME=1 vitest run test/webview/*.chrome.test.ts",
+    "package": "vsce package --no-dependencies --allow-missing-repository"
+  },
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "keywords": [],
+  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noahsio/agent-tabs.git"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
+    "@types/node": "^22.20.5",
+    "@types/vscode": "1.100",
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.28.2",
+    "jsdom": "^29.1.1",
+    "markdown-it": "^15.0.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}

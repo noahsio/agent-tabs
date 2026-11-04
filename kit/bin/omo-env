@@ -1,0 +1,12 @@
+#!/bin/sh
+# omo wrapper for the "@ENV@" environment (installed by kit/setup-omo.mjs; values escaped for double quotes).
+export OMO_CODING_AGENT_DIR="@AGENT_DIR@"
+export OMO_MEMORY_HOME="@MEMORY_HOME@"
+export CLAUDE_CONFIG_DIR="@CLAUDE_DIR@"
+# Protection on (Agent Tabs → Безопасность): omo runs under the environment's generated Seatbelt profile.
+if [ -f "@AGENT_DIR@/guard/sandbox.sb" ]; then
+  mkdir -p "@AGENT_DIR@/rpc" || exit 1 # the profile closes rpc/ itself; omo keeps its key files there
+  export OMO_LSP_DAEMON_DIR="@LSP_DAEMON_DIR@"
+  exec /usr/bin/sandbox-exec -f "@AGENT_DIR@/guard/sandbox.sb" "@OMO_BIN@" "$@"
+fi
+exec "@OMO_BIN@" "$@"

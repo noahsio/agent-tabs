@@ -1,0 +1,3 @@
+{"type":"model_changed","model":{"id":"claude-haiku-5-5","provider":"gw-anthropic"},"source":"set","origin":{"source":"extension","actor":"plugin/extensions/omo.js"},"sessionId":"rpc-2"}
+{"type":"entry_appended","entry":{"type":"custom","customType":"omo-model-profile:applied","data":{"content":"OmO Native: model profile selected gw-anthropic/claude-haiku-5-5","details":{"profile":"gw-anthropic/claude-haiku-5-5","model":"gw-anthropic/claude-haiku-5-5","skipped":[]}},"id":"e1","parentId":"e0","timestamp":"2026-11-03T10:31:00.000Z"},"sessionId":"rpc-2"}
+{"type":"entry_appended","entry":{"type":"custom","customType":"session-lifecycle","id":"e2","parentId":"e1","timestamp":"2026-11-03T10:31:01.000Z"},"sessionId":"rpc-2"}

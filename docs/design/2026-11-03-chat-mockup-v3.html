@@ -1,0 +1,271 @@
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Agent Tabs — макет v3</title><style>
+  :root {
+    --bg: #1f1f1f; --bg-2: #252526; --bg-3: #2b2b2b; --bg-4: #333; --line: #3c3c3c; --line-2: #454545;
+    --fg: #d4d4d4; --fg-strong: #ececec; --muted: #9d9d9d; --dim: #6e6e6e;
+    --code-bg: #2d2d2d; --code-fg: #d7ba7d; --ok: #73c991; --run: #e0af68; --err: #f48771;
+    --sel: #04395e; --accent: #3794ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #111; color: var(--fg); font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  .page { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+  .note { color: #8a8a8a; font-size: 12px; margin: 0 0 10px; }
+  .window { background: var(--bg); border: 1px solid #2a2a2a; border-radius: 10px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,.5); position: relative; }
+
+  /* editor tabs */
+  .tabs { display: flex; background: #181818; border-bottom: 1px solid #2a2a2a; height: 36px; }
+  .tab { display: flex; align-items: center; gap: 8px; padding: 0 14px; color: #8f8f8f; border-right: 1px solid #2a2a2a; white-space: nowrap; }
+  .tab.active { background: var(--bg); color: var(--fg-strong); border-top: 1px solid var(--accent); }
+  .tab .x { opacity: .6; margin-left: 6px; }
+  .glyph { width: 14px; height: 14px; color: #c586c0; }
+
+  /* header */
+  .header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border-bottom: 1px solid #2c2c2c; }
+  .header .title { font-weight: 600; color: var(--fg-strong); font-size: 14px; }
+  .icons { display: flex; gap: 14px; color: #b8b8b8; }
+  .icon-btn { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 5px; cursor: pointer; }
+  .icon-btn:hover, .icon-btn.on { background: #333; }
+  svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* timeline */
+  .feed { padding: 8px 24px 20px; height: 560px; overflow: auto; }
+  .ts { text-align: right; color: var(--muted); font-size: 12px; margin: 18px 0 6px; }
+  .user { background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 7px; padding: 9px 12px; color: var(--fg-strong); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; background: #303030; border: 1px solid var(--line-2); border-radius: 6px; padding: 3px 8px; font-size: 12px; margin-bottom: 8px; }
+  .chip .sq { width: 14px; height: 14px; background: #111; border-radius: 2px; }
+  .chip .dim { color: var(--muted); }
+  .steps { position: relative; margin-top: 10px; }
+  .step { position: relative; padding-left: 28px; margin: 0 0 12px; }
+  .step::before { content: ""; position: absolute; left: 6px; top: 7px; width: 7px; height: 7px; border-radius: 50%; background: #8b8b8b; }
+  .step:not(:last-child)::after { content: ""; position: absolute; left: 9px; top: 18px; bottom: -14px; width: 1px; background: #3a3a3a; }
+  .step.ok::before { background: var(--ok); }
+  .step.run::before { background: var(--run); animation: pulse 1.2s infinite; }
+  .step.err::before { background: var(--err); }
+  .step.muted { color: var(--muted); }
+  .step .name { font-weight: 600; color: var(--fg-strong); }
+  .step .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); margin-left: 6px; }
+  .step .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .step .out { margin-top: 6px; background: #1a1a1a; border: 1px solid #2f2f2f; border-radius: 6px; padding: 8px 10px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #bdbdbd; white-space: pre; overflow: hidden; }
+  .step p { margin: 0 0 8px; }
+  code { background: var(--code-bg); color: var(--code-fg); border-radius: 4px; padding: 1px 6px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+  .agent-tag { display: inline-block; font-size: 11px; border: 1px solid #4a4a4a; border-radius: 10px; padding: 0 7px; margin-left: 6px; color: #c9c9c9; }
+  .spinner { display: flex; align-items: center; gap: 10px; padding-left: 4px; color: var(--fg-strong); margin-top: 6px; }
+  .spinner .star { color: #c586c0; animation: spin 2.4s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  /* composer */
+  .composer { margin: 0 auto 16px; width: calc(100% - 120px); background: var(--bg-3); border: 1px solid var(--line-2); border-radius: 12px; }
+  .composer .input { padding: 13px 16px; color: #8a8a8a; min-height: 46px; }
+  .composer .bar { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-top: 1px solid #353535; color: #cfcfcf; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; background: #3a3a3a; border-radius: 12px; padding: 2px 10px; font-size: 12.5px; cursor: pointer; }
+  .pill .d { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .pill .w { color: var(--muted); }
+  .bar .spacer { flex: 1; }
+  .bar .mode { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+  .stop { width: 30px; height: 28px; background: #e8e8e8; border-radius: 6px; display: grid; place-items: center; cursor: pointer; }
+  .stop i { width: 11px; height: 11px; background: #111; border-radius: 2px; display: block; }
+
+  /* history popover */
+  .pop { position: absolute;  background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 14px 40px rgba(0,0,0,.55); padding: 10px; display: none; z-index: 5; }
+  .pop.show { display: block; }
+  .pop .search { display: flex; align-items: center; gap: 8px; background: #3a3a3a; border-radius: 6px; padding: 7px 10px; color: #8a8a8a; margin-bottom: 8px; }
+  .pop .row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+  .pop .row:hover { background: #2f2f2f; }
+  .pop .row.sel { background: var(--sel); color: #fff; font-weight: 600; }
+  .pop .row .t { color: var(--muted); font-weight: 400; flex: none; }
+  .pop .row.sel .t { color: #cfe3ff; }
+  .pop .row .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pop .badge { font-size: 10.5px; color: var(--run); margin-left: 6px; font-weight: 500; }
+
+  .legend { margin-top: 14px; color: #8a8a8a; font-size: 12px; }
+  .legend b { color: #cfcfcf; font-weight: 600; }
+
+  .switch { display:flex; gap:8px; margin:0 0 12px; flex-wrap:wrap; }
+  .switch button { background:#2a2a2a; color:#d0d0d0; border:1px solid #3a3a3a; border-radius:16px; padding:5px 12px; font:inherit; cursor:pointer; }
+  .switch button.on { background:#04395e; border-color:#1b6fb5; color:#fff; }
+  .pop.hist { top: 84px; right: 14px; width: 420px; }
+  .pop.up { bottom: 112px; width: 460px; }
+  .pop.agents { left: 330px; }
+  .pop.models { left: 400px; width: 380px; }
+  .pop.slash { left: 72px; width: 520px; }
+  .pop h4 { margin: 4px 8px 8px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .pop .sep { height:1px; background:#353535; margin:8px 4px; }
+  .arow { display:grid; grid-template-columns: 10px 1fr auto; gap:10px; align-items:start; padding:8px 10px; border-radius:6px; }
+  .arow:hover { background:#2f2f2f; }
+  .arow .d { width:8px; height:8px; border-radius:50%; margin-top:6px; background:var(--ok); }
+  .arow .d.run { background:var(--run); animation:pulse 1.2s infinite; }
+  .arow .d.wait { background:#6e6e6e; }
+  .arow .main b { color:var(--fg-strong); font-weight:600; }
+  .arow .main .s { color:var(--muted); font-size:12px; }
+  .arow .r { color:var(--muted); font-size:12px; text-align:right; }
+  .arow .r .m { display:inline-block; border:1px solid #4a4a4a; border-radius:10px; padding:0 7px; color:#c9c9c9; font-size:11px; }
+  .mrow { display:flex; align-items:center; justify-content:space-between; padding:7px 10px; border-radius:6px; cursor:pointer; }
+  .mrow:hover { background:#2f2f2f; }
+  .mrow.sel { background:var(--sel); color:#fff; }
+  .mrow .s { color:var(--muted); font-size:12px; }
+  .mrow.sel .s { color:#cfe3ff; }
+  .check { color:#fff; }
+  .seg { display:flex; gap:4px; padding:4px 8px 8px; }
+  .seg span { flex:1; text-align:center; background:#333; border-radius:6px; padding:4px 0; font-size:12px; cursor:pointer; }
+  .seg span.on { background:#04395e; color:#fff; }
+  .crow { display:grid; grid-template-columns: 170px 1fr; gap:12px; padding:6px 10px; border-radius:6px; cursor:pointer; }
+  .crow:hover, .crow.sel { background:#2f2f2f; }
+  .crow.sel { background:var(--sel); }
+  .crow .k { font-family: ui-monospace, Menlo, monospace; font-size:12.5px; color:var(--fg-strong); }
+  .crow .v { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .crow.sel .v { color:#cfe3ff; }
+  .thumbs { display:flex; gap:8px; padding:10px 14px 0; }
+  .thumb { position:relative; width:64px; height:64px; border-radius:8px; border:1px solid #4a4a4a; background: linear-gradient(135deg,#3a4a5a,#2a2f3a); overflow:hidden; }
+  .thumb.b { background: linear-gradient(135deg,#4a3a2a,#2f2a24); }
+  .thumb .xx { position:absolute; top:3px; right:3px; width:16px; height:16px; border-radius:50%; background:rgba(0,0,0,.7); color:#ddd; font-size:10px; display:grid; place-items:center; }
+  .thumb .lbl { position:absolute; bottom:0; left:0; right:0; font-size:9.5px; background:rgba(0,0,0,.55); color:#ddd; padding:1px 4px; white-space:nowrap; overflow:hidden; }
+  .uimgs { display:flex; gap:8px; margin-bottom:8px; }
+  .uimg { width:120px; height:80px; border-radius:6px; border:1px solid #4a4a4a; background: linear-gradient(135deg,#3a4a5a,#24303c); }
+  .drop { position:absolute; inset:0; background:rgba(4,57,94,.35); border:2px dashed #3794ff; border-radius:10px; display:none; place-items:center; color:#fff; font-size:16px; z-index:4; }
+  .drop.show { display:grid; }
+
+  .header .title { cursor:text; border-radius:5px; padding:2px 6px; margin-left:-6px; }
+  .header .title:hover { background:#2a2a2a; }
+  .title-edit { display:none; align-items:center; gap:8px; }
+  .title-edit input { background:#2b2b2b; color:#fff; border:1px solid #3794ff; border-radius:5px; padding:4px 8px; font:600 14px -apple-system,sans-serif; width:420px; outline:none; }
+  .title-edit .h { color:var(--muted); font-size:12px; }
+  .lightbox { position:absolute; inset:0; background:rgba(0,0,0,.82); display:none; z-index:9; flex-direction:column; align-items:center; justify-content:center; gap:12px; }
+  .lightbox.show { display:flex; }
+  .lightbox .img { width:70%; height:62%; border-radius:8px; background: linear-gradient(135deg,#3a4a5a,#1e2833); border:1px solid #555; display:grid; place-items:center; color:#9fb4c8; }
+  .lightbox .cap { color:#ccc; font-size:12px; }
+  .lightbox .nav { position:absolute; top:50%; font-size:28px; color:#ddd; cursor:pointer; padding:10px; }
+  .lightbox .close { position:absolute; top:14px; right:18px; font-size:18px; color:#ddd; cursor:pointer; }
+  .uimg, .thumb { cursor:zoom-in; }
+  .pop .row .pen { opacity:0; margin-left:8px; color:var(--muted); }
+  .pop .row:hover .pen { opacity:1; }
+</style></head><body><div class="page">
+<p class="note">Макет v3. Переключай состояния кнопками ниже (или кликай по элементам строки ввода).</p>
+<div class="switch">
+  <button data-s="none">Обычный вид</button>
+  <button data-s="agents" class="on">Агенты</button>
+  <button data-s="models">Модель</button>
+  <button data-s="slash">Меню «/»</button>
+  <button data-s="images">Картинки</button>
+  <button data-s="hist">Сессии</button>
+  <button data-s="preview">Просмотр фото</button>
+  <button data-s="rename">Переименование</button>
+</div>
+<div class="window" id="win">
+  <div class="tabs">
+    <div class="tab">Миграция пулов на v2</div><div class="tab">Ревью NodeProxy</div>
+    <div class="tab active">Кэш каталога: TTL и фоллбек<span class="x">✕</span></div>
+  </div>
+  <div class="header"><div><div class="title" id="ttl" title="Нажми, чтобы переименовать">Кэш каталога: TTL и фоллбек</div><div class="title-edit" id="ttl-edit"><input value="Кэш каталога: TTL и фоллбек"><span class="h">Enter — сохранить · Esc — отмена</span></div></div>
+    <div class="icons">
+      <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z"/></svg></div>
+      <div class="icon-btn" data-open="hist"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+      <div class="icon-btn"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z"/><path d="M12 9v6M9 12h6"/></svg></div>
+    </div></div>
+
+  <div class="pop hist" id="p-hist">
+    <div class="search"><svg viewBox="0 0 24 24" style="width:15px;height:15px"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Поиск по сессиям…</div>
+    <div class="row sel"><span class="n">Кэш каталога: TTL и фоллбек</span><span class="t">сейчас<span class="pen">✎</span></span></div>
+    <div class="row"><span class="n">Миграция пулов на v2 <span class="badge">● работает</span></span><span class="t">12 мин</span></div>
+    <div class="row"><span class="n">Ревью NodeProxy</span><span class="t">3 ч<span class="pen">✎</span></span></div>
+    <div class="row"><span class="n">Почему падает InstanceManagerTests</span><span class="t">2 д</span></div>
+  </div>
+
+  <div class="pop up agents" id="p-agents">
+    <h4>Агенты этой сессии</h4>
+    <div class="arow"><span class="d run"></span><div class="main"><b>Правка CatalogService.swift</b><div class="s">deep-high · пишет код · Edit CatalogService.swift</div></div><div class="r"><span class="m">GPT 6 Astra</span><br>1:42</div></div>
+    <div class="arow"><span class="d run"></span><div class="main"><b>Ревью плана</b><div class="s">plan-reviewer · проверяет шаги 2–4</div></div><div class="r"><span class="m">GPT 6 Astra</span><br>0:31</div></div>
+    <div class="arow"><span class="d"></span><div class="main"><b>Поиск, где пустой ответ затирает кэш</b><div class="s">explore · готово · нашёл refetch() в CatalogService</div></div><div class="r"><span class="m">Opus 5.5</span><br>2:05</div></div>
+    <div class="arow"><span class="d wait"></span><div class="main"><b>Прогон тестов каталога</b><div class="s">quick · ждёт правку</div></div><div class="r"><span class="m">GPT 6 Astra</span><br>—</div></div>
+    <div class="sep"></div>
+    <div class="mrow"><span>Открыть вывод агента в отдельной вкладке</span><span class="s">клик по строке</span></div>
+    <div class="mrow"><span>Остановить агента</span><span class="s">⌥ клик</span></div>
+  </div>
+
+  <div class="pop up models" id="p-models">
+    <h4>Модель главного агента</h4>
+    <div class="mrow sel"><span>Auto <span class="s">— по ролям: Opus 5.5</span></span><span class="check">✓</span></div>
+    <div class="sep"></div>
+    <h4>Claude</h4>
+    <div class="mrow"><span>Opus 5.5</span><span class="s">планирование, ревью</span></div>
+    <div class="mrow"><span>Sonnet 5.5</span><span class="s">быстрее</span></div>
+    <div class="mrow"><span>Haiku 5.5</span><span class="s">дешевле</span></div>
+    <h4>GPT</h4>
+    <div class="mrow"><span>GPT 6 Astra</span><span class="s">код</span></div>
+    <div class="mrow"><span>GPT 6.1 Sol</span><span class="s"></span></div>
+    <div class="mrow"><span>GPT 5.6 Sol</span><span class="s"></span></div>
+    <div class="sep"></div>
+    <h4>Глубина размышлений</h4>
+    <div class="seg"><span>low</span><span>medium</span><span>high</span><span class="on">xhigh</span></div>
+    <div class="mrow"><span class="s">Субагенты всегда идут по ролям из omo.jsonc</span></div>
+  </div>
+
+  <div class="pop up slash" id="p-slash">
+    <div class="search">/re<span style="opacity:.5">▍</span></div>
+    <h4>Команды OmO</h4>
+    <div class="crow sel"><span class="k">/reflect</span><span class="v">Разобрать прошлые ошибки и записать в память</span></div>
+    <div class="crow"><span class="k">/resume</span><span class="v">Продолжить прошлую сессию проекта</span></div>
+    <div class="crow"><span class="k">/review-work</span><span class="v">Ревью сделанной работы (навык OmO)</span></div>
+    <h4>Режимы</h4>
+    <div class="crow"><span class="k">ulw</span><span class="v">ultrawork: агент сам выбирает стратегию и проверяет результат</span></div>
+    <div class="crow"><span class="k">mass ulw</span><span class="v">Разбить задачу на граф параллельных агентов</span></div>
+    <h4>Навыки</h4>
+     <div class="crow"><span class="k">$superpowers:receiving-code-review</span><span class="v">из ~/.omo/skills</span></div>
+    <div class="crow"><span class="k">$release-checklist</span><span class="v">шаблон проекта · .omo/prompts</span></div>
+  </div>
+
+  <div class="lightbox" id="lb"><span class="close">✕</span><span class="nav" style="left:16px">‹</span><div class="img">screenshot.png · 1560×2068</div><div class="cap">1 / 2 · ←/→ листать · Esc закрыть · ⌘C копировать</div><span class="nav" style="right:16px">›</span></div>
+  <div class="drop" id="drop">Отпустите, чтобы приложить картинку</div>
+
+  <div class="feed">
+    <div class="ts">20:10</div>
+    <div class="user"><div class="uimgs"><div class="uimg"></div></div>
+      <div>каталог иногда отдаёт пустой список после смены ноды — разберись и почини, ulw</div></div>
+    <div class="ts">20:11</div>
+    <div class="steps">
+      <div class="step muted">Размышлял 4 с</div>
+      <div class="step ok"><span class="name">Read</span><span class="mono">app/Sources/Launcher/CatalogService.swift</span></div>
+      <div class="step ok"><span class="name">Задача</span><span class="mono">explore</span><span class="agent-tag">Opus 5.5</span><div class="sub">Найти, где пустой ответ ноды перезаписывает кэш · готово за 2 мин</div></div>
+      <div class="step"><p>Причина в <code>refetch()</code>: пустой <code>[]</code> от ноды после failover считается успехом и затирает кэш на диске.</p></div>
+      <div class="step run"><span class="name">Задача</span><span class="mono">deep-high</span><span class="agent-tag">GPT 6 Astra</span><div class="sub">Правка CatalogService.swift · +12 −3</div></div>
+    </div>
+    <div class="spinner"><span class="star">✳</span>Чиню…</div>
+  </div>
+
+  <div class="composer">
+    <div class="thumbs" id="thumbs" style="display:none">
+      <div class="thumb"><span class="xx">✕</span><span class="lbl">screenshot.png</span></div>
+      <div class="thumb b"><span class="xx">✕</span><span class="lbl">лог ошибки.png</span></div>
+    </div>
+    <div class="input" id="inp">В очередь ещё сообщение…  (вставь картинку ⌘V или перетащи)</div>
+    <div class="bar">
+      <span class="icon-btn" data-open="images" title="Приложить картинку"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
+      <span class="icon-btn" data-open="slash" title="Команды и навыки"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m14 8-4 8"/></svg></span>
+      <span class="pill" data-open="agents"><span class="d"></span>2 агента работают</span>
+      <span class="pill" data-open="models">Auto · Opus 5.5 <span class="w">xhigh</span></span>
+      <span class="spacer"></span>
+      <div class="stop" title="Стоп"><i></i></div>
+    </div>
+  </div>
+</div>
+<div class="legend">Клик по картинке (в сообщении или миниатюре) — просмотр на весь экран. Клик по названию — переименование (имя уходит в OmO, вкладка и список сессий обновляются). Таймер хода убран. <b>«+»</b> и ⌘V / перетаскивание — картинки (уходят в OmO вместе с сообщением). <b>«/»</b> — команды OmO, режимы ulw, навыки и шаблоны проекта: список живой, OmO сам его отдаёт.</div>
+</div>
+<script>
+var ids=['hist','agents','models','slash'];
+function show(s){
+  document.getElementById('lb').classList.toggle('show', s==='preview');
+  document.getElementById('ttl').style.display = s==='rename' ? 'none' : '';
+  document.getElementById('ttl-edit').style.display = s==='rename' ? 'flex' : 'none';
+  if(s==='rename'){var i=document.querySelector('#ttl-edit input'); setTimeout(function(){i.focus(); i.select();},0);}
+  if(s==='preview'){document.getElementById('thumbs').style.display='flex';}
+  ids.forEach(function(i){document.getElementById('p-'+i).classList.toggle('show',i===s);});
+  if(s!=='preview') document.getElementById('thumbs').style.display = s==='images' ? 'flex' : 'none';
+  document.getElementById('drop').classList.toggle('show', false);
+  document.getElementById('inp').textContent = s==='images' ? 'вот что вижу в логах — почему так?' : (s==='slash' ? '/re' : 'В очередь ещё сообщение…  (вставь картинку ⌘V или перетащи)');
+  document.querySelectorAll('.switch button').forEach(function(b){b.classList.toggle('on',b.dataset.s===s);});
+}
+document.querySelectorAll('.switch button').forEach(function(b){b.onclick=function(){show(b.dataset.s);};});
+document.querySelectorAll('[data-open]').forEach(function(el){el.onclick=function(e){e.stopPropagation();show(el.dataset.open);};});
+document.getElementById('win').addEventListener('click',function(e){ if(e.target.closest('.uimg,.thumb')){e.stopPropagation(); show('preview'); return;} if(e.target.closest('#ttl')){show('rename'); return;} if(!e.target.closest('.pop,.title-edit,.lightbox .img')) show('none'); });
+document.addEventListener('keydown',function(e){ if(e.key==='Escape') show('none'); if(e.key==='Enter' && document.getElementById('ttl-edit').style.display==='flex'){ var v=document.querySelector('#ttl-edit input').value; document.getElementById('ttl').textContent=v; document.querySelector('.tab.active').firstChild.textContent=v; show('none'); } });
+show('agents');
+</script></body></html>

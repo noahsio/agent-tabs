@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Agent Tabs — Настройки v2</title>
+<style>
+:root{--bg:#1f1f1f;--side:#181818;--panel:#252526;--line:#3c3c3c;--line2:#454545;--fg:#d4d4d4;--strong:#ececec;--muted:#9d9d9d;--dim:#6e6e6e;--sel:#04395e;--acc:#3794ff;--ok:#73c991;--warn:#e0af68;--err:#f48771;--chip:#333;--input:#3c3c3c}
+*{box-sizing:border-box}body{margin:0;background:#111;color:var(--fg);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.page{max-width:1080px;margin:20px auto;padding:0 16px}.note{color:#8a8a8a;font-size:12px;margin:0 0 10px}
+.backdrop{background:rgba(0,0,0,.45);border-radius:12px;padding:28px}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.55);display:grid;grid-template-columns:210px 1fr;height:720px;overflow:hidden}
+.nav{background:var(--side);border-right:1px solid var(--line);padding:14px 8px}
+.nav h1{font-size:14px;color:var(--strong);margin:2px 8px 12px}
+.nav .it{display:flex;gap:8px;align-items:center;padding:7px 10px;border-radius:6px;cursor:pointer;color:var(--fg)}
+.nav .it:hover{background:#2a2d2e}.nav .it.on{background:var(--sel);color:#fff}
+.nav .env{margin:16px 8px 0;color:var(--muted);font-size:11.5px}
+.nav .env b{color:var(--fg);font-weight:500}
+.main{display:flex;flex-direction:column;min-width:0}
+.head{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line)}
+.head h2{margin:0;font-size:15px;color:var(--strong)}.x{color:var(--muted);cursor:pointer;font-size:16px}
+.body{padding:16px 20px;overflow:auto;flex:1}
+.sec{display:none}.sec.on{display:block}
+h3{font-size:12px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px;font-weight:600}
+h3:first-child{margin-top:0}
+.card{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:10px}
+.row{display:flex;align-items:center;gap:12px}.grow{flex:1;min-width:0}
+.t{color:var(--strong);font-weight:600}.s{color:var(--muted);font-size:12px}
+.badge{font-size:11px;border-radius:10px;padding:1px 8px;border:1px solid var(--line2);color:var(--muted)}
+.badge.ok{color:var(--ok);border-color:#2f5a3d}.badge.warn{color:var(--warn);border-color:#5a4a2a}
+.btn{background:#2f2f2f;border:1px solid var(--line2);color:var(--fg);border-radius:6px;padding:5px 12px;cursor:pointer;font:inherit}
+.btn.p{background:#0e639c;border-color:#1177bb;color:#fff}.btn.sm{padding:2px 9px;font-size:12px}
+input,select{background:var(--input);border:1px solid var(--line2);color:var(--fg);border-radius:5px;padding:5px 8px;font:inherit}
+.f{display:grid;grid-template-columns:140px 1fr;gap:8px 12px;align-items:center;margin-top:10px}
+.f label{color:var(--muted)}
+.tg{width:30px;height:17px;border-radius:9px;background:#555;position:relative;flex:none}.tg::after{content:"";position:absolute;width:13px;height:13px;border-radius:50%;background:#fff;top:2px;left:2px}
+.tg.on{background:#0e639c}.tg.on::after{left:15px}
+table{width:100%;border-collapse:collapse}th{text-align:left;color:var(--muted);font-weight:500;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:6px 8px;border-bottom:1px solid #2c2c2c;vertical-align:middle}td .s{display:block}
+.seg{display:inline-flex;background:#2b2b2b;border-radius:6px;padding:2px}.seg span{padding:2px 8px;border-radius:4px;font-size:12px;color:var(--muted)}.seg span.on{background:var(--sel);color:#fff}
+.chips{display:flex;flex-wrap:wrap;gap:6px}.chip{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--line2);border-radius:6px;padding:2px 8px;font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.chip .x2{color:var(--dim)}
+.prov{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.prov .card{cursor:pointer}.prov .card:hover{border-color:var(--acc)}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.foot{border-top:1px solid var(--line);padding:10px 20px;display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:12px}
+.switch{display:flex;gap:8px;margin:0 0 12px;flex-wrap:wrap}.switch button{background:#2a2a2a;color:#d0d0d0;border:1px solid #3a3a3a;border-radius:16px;padding:5px 12px;font:inherit;cursor:pointer}.switch button.on{background:#04395e;border-color:#1b6fb5;color:#fff}
+</style></head><body><div class="page">
+<p class="note">Настройки v2 — модальное окно по шестерёнке в шапке чата. Разделы слева кликабельны.</p>
+<div class="backdrop"><div class="modal">
+ <div class="nav">
+  <h1>Настройки</h1>
+  <div class="it on" data-s="conn">Подключения</div>
+  <div class="it" data-s="roles">Модели и роли</div>
+  <div class="it" data-s="sec">Безопасность</div>
+  <div class="it" data-s="tools">Инструменты</div>
+  <div class="it" data-s="env">Среда</div>
+   <div class="env">Среда этого окна:<br><b>second</b> · ~/.omo/agent-second</div>
+ </div>
+ <div class="main">
+  <div class="head"><h2 id="ttl">Подключения</h2><span class="x">✕</span></div>
+  <div class="body">
+
+  <!-- CONNECTIONS -->
+  <div class="sec on" id="s-conn">
+   <h3>Подключённые</h3>
+   <div class="card"><div class="row"><div class="grow"><div class="t">Шлюз (Anthropic API)</div><div class="s mono">https://ai.example.ru/api/gw · ключ ••••••b7f3</div><div class="s">3 модели · получены от шлюза 2 мин назад · <a style="color:var(--acc)">обновить список</a></div></div><span class="badge ok">● работает</span><button class="btn sm">Проверить</button><button class="btn sm">Изменить</button></div></div>
+   <div class="card"><div class="row"><div class="grow"><div class="t">Шлюз (OpenAI-совместимый)</div><div class="s mono">https://ai.example.ru/api/gw · тот же ключ</div><div class="s">9 моделей · получены от шлюза 2 мин назад · <a style="color:var(--acc)">обновить список</a></div></div><span class="badge ok">● работает</span><button class="btn sm">Проверить</button><button class="btn sm">Изменить</button></div></div>
+   <h3>Добавить</h3>
+   <div class="prov">
+    <div class="card"><div class="t">Claude — войти через аккаунт</div><div class="s">Подписка Claude (Pro/Max). Откроется браузер для входа. Трафик стороннего приложения оплачивается как «extra usage».</div></div>
+    <div class="card"><div class="t">ChatGPT — войти через аккаунт</div><div class="s">Подписка ChatGPT (Plus/Pro). Откроется браузер для входа.</div></div>
+    <div class="card"><div class="t">API-ключ или свой шлюз</div><div class="s">Anthropic, OpenAI или совместимый сервер: адрес, ключ, тип протокола. Список моделей берётся у сервера (/models), без зашитых названий.</div></div>
+   </div>
+   <div class="card" style="margin-top:12px"><div class="t">Новое подключение: API-ключ / шлюз</div>
+    <div class="f"><label>Название</label><input value="Мой шлюз">
+     <label>Протокол</label><div class="seg"><span class="on">Anthropic</span><span>OpenAI-совместимый</span></div>
+     <label>Адрес</label><input class="mono" value="https://ai.example.ru/api/gw">
+     <label>Ключ</label><input type="password" value="xxxxxxxxxxxxxxxx">
+     <label></label><div class="row"><button class="btn p">Проверить и сохранить</button><span class="s">Получит список моделей и сделает пробный запрос</span></div></div></div>
+  </div>
+
+  <!-- ROLES -->
+  <div class="sec" id="s-roles">
+   <h3>Кто чем занимается</h3>
+   <table><tr><th>Роль</th><th>Модель</th><th>Мощность</th></tr>
+    <tr><td><b>Главный агент</b><span class="s">ведёт сессию, планирует, раздаёт задачи</span></td><td><select><option>Claude Opus 5.5</option></select></td><td><div class="seg"><span>low</span><span>medium</span><span>high</span><span class="on">xhigh</span></div></td></tr>
+    <tr><td><b>Ревью плана</b><span class="s">проверяет план до начала работы</span></td><td><select><option>GPT 6 Astra</option></select></td><td><div class="seg"><span>low</span><span>medium</span><span>high</span><span class="on">xhigh</span></div></td></tr>
+    <tr><td><b>Консультант</b><span class="s">второе мнение по сложным вопросам</span></td><td><select><option>GPT 6 Astra</option></select></td><td><div class="seg"><span>low</span><span>medium</span><span class="on">high</span><span>xhigh</span></div></td></tr>
+    <tr><td><b>Разведка кода</b><span class="s">быстро находит, где что лежит</span></td><td><select><option>Claude Opus 5.5</option></select></td><td><div class="seg"><span>low</span><span class="on">medium</span><span>high</span><span>xhigh</span></div></td></tr>
+    <tr><td><b>Глубокая работа</b><span class="s">пишет и правит код в больших задачах</span></td><td><select><option>GPT 6 Astra</option></select></td><td><div class="seg"><span>low</span><span>medium</span><span>high</span><span class="on">xhigh</span></div></td></tr>
+    <tr><td><b>Быстрые задачи</b><span class="s">мелкие правки, тесты, проверки</span></td><td><select><option>GPT 6 Astra</option></select></td><td><div class="seg"><span>low</span><span class="on">medium</span><span>high</span><span>xhigh</span></div></td></tr>
+    <tr><td><b>Сложные головоломки</b><span class="s">алгоритмы, архитектура (ultrabrain)</span></td><td><select><option>GPT 6 Astra</option></select></td><td><div class="seg"><span>low</span><span>medium</span><span>high</span><span class="on">xhigh</span></div></td></tr>
+    <tr><td><b>Интерфейсы</b><span class="s">вёрстка, визуальная часть</span></td><td><select><option>Claude Opus 5.5</option></select></td><td><div class="seg"><span>low</span><span>medium</span><span class="on">high</span><span>xhigh</span></div></td></tr>
+    <tr><td><b>Тексты</b><span class="s">документация, описания</span></td><td><select><option>Claude Opus 5.5</option></select></td><td><div class="seg"><span>low</span><span class="on">medium</span><span>high</span><span>xhigh</span></div></td></tr>
+    <tr><td><b>Память и рефлексия</b><span class="s">разбирает прошлые ошибки в фоне</span></td><td><select><option>Claude Haiku 5.5</option></select></td><td><div class="seg"><span class="on">low</span><span>medium</span><span>high</span><span>xhigh</span></div></td></tr>
+   </table>
+   <p class="s" style="margin-top:10px">Список моделей — из всех подключений. Меняется для новых сессий; в открытой сессии модель главного агента выбирается в строке ввода.</p>
+  </div>
+
+  <!-- SECURITY -->
+  <div class="sec" id="s-sec">
+   <div class="card"><div class="row"><div class="grow"><div class="t">Защита команд</div><div class="s">Опасные команды останавливаются; служебные файлы закрыты песочницей macOS</div></div><div class="tg on"></div></div></div>
+   <h3>Кто решает спорные команды</h3>
+   <div class="card"><div class="seg" style="margin-bottom:8px"><span class="on">Модель-решатель, при сомнении — я</span><span>Сразу спрашивать меня</span><span>Сразу запрещать</span></div>
+    <div class="s">Модель-решатель: Claude Haiku 5.5 — быстро пропускает безобидное (например, git push в свою ветку). Без решателя каждая спорная команда ждёт твоего ответа или запрещается.</div>
+    <div class="f"><label>Модель решателя</label><select><option>Claude Haiku 5.5</option><option>GPT 6 Sol</option></select>
+     <label>Спрашивать меня</label><div class="row"><span class="badge ok">карточкой в чате</span><span class="s">Telegram</span><div class="tg"></div></div>
+     <label>Ждать ответа</label><div class="seg"><span>1 мин</span><span>3 мин</span><span class="on">5 мин</span></div></div></div>
+   <h3>Всегда запрещено <span class="s" style="text-transform:none;letter-spacing:0">· одна строка — одно правило, можно вставить сразу много</span></h3>
+   <div class="card"><textarea class="mono" style="width:100%;height:110px;background:var(--input);border:1px solid var(--line2);color:var(--fg);border-radius:6px;padding:8px">rm -rf /
+sudo rm *
+mkfs*
+dd if=*
+diskutil erase*
+curl * | sh</textarea>
+    <div class="row s" style="margin-top:6px"><span>6 правил · шаблоны с * </span><span class="grow"></span><button class="btn sm">Импорт из Claude (permissions.deny)</button></div></div>
+   <h3>Спросить перед выполнением</h3>
+   <table><tr><th>Группа</th><th></th></tr>
+    <tr><td><b>Отправка в git</b><span class="s">git push, push --force</span></td><td><div class="tg on"></div></td></tr>
+    <tr><td><b>Переписывание истории git</b><span class="s">reset --hard, rebase, clean, branch -D</span></td><td><div class="tg on"></div></td></tr>
+    <tr><td><b>Ключи и секреты</b><span class="s">~/.ssh, ~/.aws, *.pem, ключи</span></td><td><div class="tg on"></div></td></tr>
+    <tr><td><b>Внешние адреса</b><span class="s">IP не из белого списка</span></td><td><div class="tg on"></div></td></tr>
+    <tr><td><b>Глобальная установка пакетов</b><span class="s">npm -g, pip install</span></td><td><div class="tg on"></div></td></tr>
+   </table>
+   <div class="card" style="margin-top:8px"><div class="t" style="font-size:12.5px">Свои правила «спросить» · одна строка — одно правило</div>
+    <textarea class="mono" style="width:100%;height:70px;margin-top:6px;background:var(--input);border:1px solid var(--line2);color:var(--fg);border-radius:6px;padding:8px">docker volume prune*
+kubectl delete *
+DROP TABLE</textarea>
+    <div class="s" style="margin-top:4px">3 правила · <span style="color:var(--err)">строка 4: незакрытая скобка в шаблоне</span> (пример подсветки ошибки)</div></div>
+   <h3>Белый список адресов · одна строка — один адрес или подсеть, после # — подпись</h3>
+    <div class="card"><textarea class="mono" style="width:100%;height:70px;background:var(--input);border:1px solid var(--line2);color:var(--fg);border-radius:6px;padding:8px">203.0.113.10   # дев-сервер
+203.0.113.20
+10.20.0.0/16    # офис</textarea>
+    <div class="s" style="margin-top:4px">3 записи · локальная сеть (192.168.*, 10.*, localhost) разрешена всегда</div></div>
+  </div>
+
+  <!-- TOOLS -->
+  <div class="sec" id="s-tools">
+   <h3>CodeGraph</h3>
+   <div class="card"><div class="row"><div class="grow"><div class="t">Индекс кода в каждом проекте</div><div class="s">создаётся при открытии сессии · подсказки к каждому сообщению · инструмент codegraph_explore</div></div><span class="badge ok">● подключён</span><div class="tg on"></div></div></div>
+   <h3>Навыки</h3>
+   <div class="card"><div class="row"><div class="grow"><div class="t">superpowers (сборка коллеги, с proof-loop)</div><div class="s">15 навыков · версия d592fb7 · <a style="color:var(--acc)">обновить</a></div></div><div class="tg on"></div></div></div>
+   <div class="card"><div class="row"><div class="grow"><div class="t">Навыки Claude этой среды</div><div class="s">repo-task-proof-loop, prompt-master, security-audit, chainium-agent</div></div><div class="tg on"></div></div></div>
+   <h3>MCP-серверы</h3>
+   <div class="card"><div class="row"><div class="grow"><div class="t mono">codegraph</div><div class="s mono">codegraph serve --mcp</div></div><span class="badge ok">1 инструмент</span><button class="btn sm">Изменить</button></div></div>
+   <button class="btn">+ Добавить MCP-сервер</button>
+   <h3>Меню «/»</h3>
+   <p class="s">Скрытые команды OmO: /tui, /keybindings, /help, /hooks … <a style="color:var(--acc)">изменить список</a></p>
+  </div>
+
+  <!-- ENV -->
+  <div class="sec" id="s-env">
+    <div class="f"><label>Папка данных OmO</label><input class="mono" value="~/.omo/agent">
+     <label>Память</label><input class="mono" value="~/.omo/memory">
+     <label>Папка Claude</label><input class="mono" value="~/.claude">
+    <label>OmO</label><div class="row"><span class="mono">5.1.59</span><button class="btn sm">Проверить обновления</button></div>
+    <label></label><div class="row"><button class="btn">Перезапустить OmO</button><span class="s">нужно после смены папок</span></div></div>
+  </div>
+
+  </div>
+  <div class="foot"><span>Изменения сохраняются сразу · файлы OmO, а не настройки VS Code</span><span>Agent Tabs 0.3.0</span></div>
+ </div>
+</div></div>
+<p class="note" style="margin-top:12px">Не придумано за вас: адреса и ключи — пример. Роли сгруппированы человеческими названиями; технические имена (deep-high, quick, plan-reviewer) видны во всплывающей подсказке.</p>
+</div>
+<script>
+var T={conn:"Подключения",roles:"Модели и роли",sec:"Безопасность",tools:"Инструменты",env:"Среда"};
+document.querySelectorAll('.nav .it').forEach(function(n){n.onclick=function(){document.querySelectorAll('.nav .it').forEach(function(x){x.classList.toggle('on',x===n)});document.querySelectorAll('.sec').forEach(function(s){s.classList.toggle('on',s.id==='s-'+n.dataset.s)});document.getElementById('ttl').textContent=T[n.dataset.s];};});
+document.querySelectorAll('.tg').forEach(function(t){t.onclick=function(){t.classList.toggle('on')}});
+document.querySelectorAll('.seg').forEach(function(g){g.querySelectorAll('span').forEach(function(s){s.onclick=function(){g.querySelectorAll('span').forEach(function(x){x.classList.toggle('on',x===s)})}})});
+</script></body></html>

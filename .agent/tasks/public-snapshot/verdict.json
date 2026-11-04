@@ -1,0 +1,12 @@
+{
+  "verdict": "PASS",
+  "criteria": "AC1-AC13",
+  "basis": "Fresh current-tree verification passed; final repository metadata is verified by the post-commit command.",
+  "separateVerifier": "unavailable at the nesting limit",
+  "rawEvidence": [
+    "raw/final-required.txt",
+    "raw/install.txt",
+    "raw/scans.txt",
+    "raw/tree-cleanup.txt"
+  ]
+}

@@ -1,0 +1,127 @@
+{
+  "version": 2,
+  "hardDeny": [
+    "rm -rf /",
+    "rm -rf /\\*",
+    "rm -rf / *",
+    "rm -fr /",
+    "rm -fr /\\*",
+    "rm -fr / *",
+    "rm -rf ~",
+    "rm -rf ~/\\*",
+    "rm -rf ~ *",
+    "rm -rf ~/",
+    "rm -fr ~",
+    "rm -fr ~/\\*",
+    "rm -fr ~ *",
+    "rm -rf ..",
+    "rm -rf ../\\*",
+    "rm -rf .",
+    "rm -rf $HOME",
+    "rm -rf $HOME/",
+    "rm -rf $HOME/\\*",
+    "rm -rf ${HOME}",
+    "rm -rf ${HOME}/",
+    "rm -rf ${HOME}/\\*",
+    "rm -rf /System*",
+    "rm -rf /Library*",
+    "rm -rf /Applications*",
+    "rm -rf /etc*",
+    "rm -rf /usr*",
+    "rm -rf /bin*",
+    "rm -rf /sbin*",
+    "rm -rf /private",
+    "rm -rf /private/",
+    "rm -rf /private/\\*",
+    "rm -rf /private/etc*",
+    "rm -rf /private/var",
+    "rm -rf /private/var/",
+    "rm -rf /private/var/db*",
+    "sudo rm*",
+    "sudo dd*",
+    "sudo mkfs*",
+    "find / *-delete*",
+    "mkfs*",
+    "fdisk*",
+    "dd *of=/dev/*",
+    "diskutil erase*",
+    "diskutil eraseVolume*"
+  ],
+  "groups": {
+    "git-push": true,
+    "history": true,
+    "secrets": true,
+    "external-ip": true,
+    "global-install": true
+  },
+  "askCustom": [],
+  "allow": [
+    {
+      "id": "remote-exec",
+      "label": "remote-exec runs on a remote host (its commands still meet the built-in remote checks)",
+      "pattern": "^\\s*remote-exec\\s+(exec|execute|shell|push|up|down|restart|logs|ps)(\\s|$)",
+      "denyIf": [],
+      "escalateIf": []
+    },
+    {
+      "id": "sudo-read",
+      "label": "read-only sudo",
+      "pattern": "^sudo(\\s+-[nkS]+)*\\s+(pfctl\\s+((-a|-t)\\s+\\S+\\s+)*(-s[a-zA-Z]*|-T\\s+show|-n[a-zA-Z]*)|launchctl\\s+(list|print)|lsof|log\\s+show|dmesg)(?![\\w-])",
+      "denyIf": [],
+      "escalateIf": [
+        "(^|\\s)\\d*>>?\\s*(?!/dev/null(\\s|$)|&\\d)",
+        "\\bpfctl\\b[^;|&]*\\s-[A-Za-z]*[EdFKkXxe]",
+        "\\bpfctl\\b(?![^;|&]*\\s-[a-zA-Z]*n[a-zA-Z]*(\\s|$))[^;|&]*\\s-[A-Za-z]*f",
+        "\\bpfctl\\b[^;|&]*\\s-T\\s+(?!show(\\s|$))"
+      ]
+    }
+  ],
+  "builtinEscalate": [
+    {
+      "id": "sudo",
+      "label": "sudo",
+      "patterns": [
+        "\\bsudo(?![\\w-])"
+      ]
+    },
+    {
+      "id": "chmod-777",
+      "label": "chmod 777",
+      "patterns": [
+        "\\bchmod\\s+(-R\\s+)?777"
+      ]
+    },
+    {
+      "id": "curl-write",
+      "label": "curl with a write method or body",
+      "patterns": [
+        "\\bcurl(\\s[^|;]*)?\\s(-X\\s*(POST|PUT|DELETE|PATCH)|--request\\s+(POST|PUT|DELETE|PATCH)|--data([\\s=]|$)|-d\\s)"
+      ]
+    },
+    {
+      "id": "rm-rf-variable",
+      "label": "rm -rf of a path held in a variable",
+      "patterns": [
+        "(^|\\s)rm -rf(\\s+\\S+)*\\s+\\$"
+      ]
+    },
+    {
+      "id": "find-delete-home",
+      "label": "find -delete over the home directory",
+      "patterns": [
+        "\\bfind\\s+(~|\\$HOME|\\$\\{HOME\\}|/Users/[^/\\s]+|/home/[^/\\s]+)/?\\s([^;|&]*\\s)?-delete(?![\\w-])"
+      ]
+    }
+  ],
+  "ipWhitelist": [],
+  "decider": {
+    "mode": "decider-then-me",
+    "model": "",
+    "timeoutMs": 20000
+  },
+  "human": {
+    "waitSeconds": 300,
+    "card": true,
+    "telegram": false
+  }
+}

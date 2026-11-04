@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "hardDeny": [
+    "rm -rf /",
+    "rm -rf /\\*",
+    "rm -rf / *",
+    "rm -fr /",
+    "rm -fr /\\*",
+    "rm -fr / *",
+    "rm -rf ~",
+    "rm -rf ~/\\*",
+    "rm -rf ~ *",
+    "rm -fr ~",
+    "rm -fr ~/\\*",
+    "rm -fr ~ *",
+    "rm -rf ..",
+    "rm -rf ../\\*",
+    "rm -rf .",
+    "rm -rf $*",
+    "rm -rf /System*",
+    "rm -rf /Library*",
+    "rm -rf /Applications*",
+    "rm -rf /etc*",
+    "rm -rf /usr*",
+    "rm -rf /bin*",
+    "rm -rf /sbin*",
+    "rm -rf /private*",
+    "sudo rm*",
+    "sudo dd*",
+    "sudo mkfs*",
+    "mkfs*",
+    "fdisk*",
+    "dd if=*",
+    "diskutil erase*",
+    "diskutil eraseVolume*"
+  ],
+  "allow": [
+    {
+      "id": "remote-exec",
+      "label": "remote-exec runs on a remote host",
+      "pattern": "^\\s*remote-exec\\s+(exec|execute|shell|push|up|down|restart|logs|ps)(\\s|$)",
+      "denyIf": [
+        "(^|[^\\w])rm\\s+(-\\S+\\s+)+/([\\s*\\\"']|$)",
+        "(^|[^\\w])mkfs",
+        "(^|[^\\w])dd\\s+if=",
+        "(^|[^\\w])fdisk(\\s|$)"
+      ]
+    }
+  ],
+  "escalate": [
+    {
+      "id": "git-reset",
+      "label": "git reset",
+      "patterns": [
+        "\\bgit\\s+reset(?![\\w-])"
+      ]
+    },
+    {
+      "id": "git-rebase",
+      "label": "git rebase",
+      "patterns": [
+        "\\bgit\\s+rebase(?![\\w-])"
+      ]
+    },
+    {
+      "id": "git-clean",
+      "label": "git clean",
+      "patterns": [
+        "\\bgit\\s+clean(?![\\w-])"
+      ]
+    },
+    {
+      "id": "git-checkout-discard",
+      "label": "git checkout discarding changes",
+      "patterns": [
+        "\\bgit\\s+checkout\\s+(\\.|--)"
+      ]
+    },
+    {
+      "id": "git-restore-discard",
+      "label": "git restore discarding changes",
+      "patterns": [
+        "\\bgit\\s+restore\\s+(\\.|--)"
+      ]
+    },
+    {
+      "id": "git-branch-delete",
+      "label": "git branch -D (or --delete --force)",
+      "patterns": [
+        "\\bgit\\s+branch\\s+(\\S+\\s+)*-D(?![\\w-])",
+        "\\bgit\\s+branch\\s+(\\S+\\s+)*-(df|fd)(?![\\w-])",
+        "\\bgit\\s+branch\\s+(\\S+\\s+)*(-d|--delete)\\s+(\\S+\\s+)*(-f|--force)(?![\\w-])",
+        "\\bgit\\s+branch\\s+(\\S+\\s+)*(-f|--force)\\s+(\\S+\\s+)*(-d|--delete)(?![\\w-])"
+      ]
+    },
+    {
+      "id": "git-push",
+      "label": "git push",
+      "patterns": [
+        "\\bgit\\s+push(?![\\w-])"
+      ]
+    },
+    {
+      "id": "git-stash",
+      "label": "git stash (except list/show)",
+      "patterns": [
+        "\\bgit\\s+stash(?!\\s+(list|show)(?![\\w-]))(?![\\w-])"
+      ]
+    },
+    {
+      "id": "chmod-777",
+      "label": "chmod 777",
+      "patterns": [
+        "\\bchmod\\s+(-R\\s+)?777"
+      ]
+    },
+    {
+      "id": "secrets-access",
+      "label": "access to keys and credentials",
+      "patterns": [
+        "(\\.ssh(/|\\s|$)|\\.aws/credentials|private\\.key|id_rsa|id_ed25519|keystore|\\.pem([^A-Za-z0-9]|$))"
+      ]
+    },
+    {
+      "id": "global-install",
+      "label": "global package install",
+      "patterns": [
+        "\\bpip[0-9]?\\s+install",
+        "\\bnpm\\s+(-\\S+\\s+)*(i|install|add)(\\s.*)?\\s(-g|--global)(?![\\w-])",
+        "\\bnpm\\s+(-g|--global)\\s+(i|install|add)(?![\\w-])",
+        "\\bpnpm\\s+add(\\s.*)?\\s(-g|--global)(?![\\w-])",
+        "\\byarn\\s+global\\s+add"
+      ]
+    },
+    {
+      "id": "sudo",
+      "label": "sudo",
+      "patterns": [
+        "\\bsudo(?![\\w-])"
+      ]
+    },
+    {
+      "id": "curl-write",
+      "label": "curl with a write method or body",
+      "patterns": [
+        "\\bcurl(\\s[^|;]*)?\\s(-X\\s*(POST|PUT|DELETE|PATCH)|--request\\s+(POST|PUT|DELETE|PATCH)|--data([\\s=]|$)|-d\\s)"
+      ]
+    }
+  ],
+  "ipWhitelist": [],
+  "decider": {
+    "enabled": true,
+    "model": "claude-haiku-5-5",
+    "timeoutMs": 20000
+  },
+  "human": {
+    "waitSeconds": 300,
+    "telegram": false
+  }
+}

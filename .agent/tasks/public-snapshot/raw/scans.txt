@@ -1,0 +1,7 @@
+Private-string scan:
+  PRIVATE_SCAN_MATCHES=0
+  SUPERPOWERS_DIRECTORIES=0
+  SECRET_SCAN_MATCHES=0
+  SCANS=PASS
+
+The complete output is retained at /tmp/agent-tabs-public-evidence/scans.log.
