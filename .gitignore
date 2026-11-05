@@ -1,4 +1,10 @@
 .superpowers/
+# Private working material: never published.
+private/
+docs/research/
+docs/superpowers/notes/
+docs/superpowers/plans/
+tools/live-checks/
 node_modules
 dist/
 *.vsix
