@@ -12,7 +12,6 @@ import re
 
 SUSPICIOUS = {
     'rm -rf (literal path outside tmp)': r'\brm\s+-[a-zA-Z]*[rR][a-zA-Z]*f?\s+(?!/tmp|/private/tmp|\$|"\$|\./tmp|tmp/|node_modules|\.build|build)(/|~)\S*',
-    'remote-exec with rm -r': r'remote-exec\s+exec[^\n]*\brm\s+-[a-zA-Z]*r',
     'docker rm/prune/down -v': r'docker\s+(system\s+prune|volume\s+(rm|prune)|rm\s+-f|container\s+prune|image\s+prune)|compose\s+down\s+(-v|--volumes)',
     'sql DROP/TRUNCATE/DELETE FROM': r'(?i)\b(drop\s+(table|database|schema)|truncate\s+table|delete\s+from)\b',
     'curl|wget piped to shell': r'(curl|wget)[^\n|]*\|\s*(sudo\s+)?(ba|z)?sh\b',

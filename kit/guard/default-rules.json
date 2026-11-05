@@ -57,13 +57,6 @@
   "askCustom": [],
   "allow": [
     {
-      "id": "remote-exec",
-      "label": "remote-exec runs on a remote host (its commands still meet the built-in remote checks)",
-      "pattern": "^\\s*remote-exec\\s+(exec|execute|shell|push|up|down|restart|logs|ps)(\\s|$)",
-      "denyIf": [],
-      "escalateIf": []
-    },
-    {
       "id": "sudo-read",
       "label": "read-only sudo",
       "pattern": "^sudo(\\s+-[nkS]+)*\\s+(pfctl\\s+((-a|-t)\\s+\\S+\\s+)*(-s[a-zA-Z]*|-T\\s+show|-n[a-zA-Z]*)|launchctl\\s+(list|print)|lsof|log\\s+show|dmesg)(?![\\w-])",

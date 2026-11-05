@@ -490,7 +490,6 @@ const SSHPASS_OPTIONS_WITH_VALUE = new Set(["-p", "-f", "-d", "-P"]);
 // ssh -o options whose value ssh runs: on this machine, or (RemoteCommand) on the host.
 const SSH_COMMAND_OPTION_RE = /^(ProxyCommand|LocalCommand|KnownHostsCommand|RemoteCommand)\s*[= ]\s*([\s\S]+)$/i;
 const DOCKER_EXEC_OPTIONS_WITH_VALUE = new Set(["-u", "--user", "-e", "--env", "-w", "--workdir", "--env-file", "--detach-keys"]);
-const REMOTE_EXEC = new Set(["exec", "execute"]);
 const SOURCE_HEADS = new Set(["source", "."]);
 // Consumers that only read a quoted, top-level heredoc as data.
 const DATA_CONSUMERS = new Set(["cat", "tee", "grep", "egrep", "fgrep", "rg", "sed", "awk", "gawk", "jq", "wc", "sort", "uniq", "head", "tail", "diff"]);
@@ -600,12 +599,11 @@ function containerCommand(words, head) {
   return index + 1 < words.length ? words.slice(index + 1) : null;
 }
 
-/** The command words a wrapper (ssh, `remote-exec exec`, `docker|kubectl exec`) runs: { inner, remote } or null. */
+/** The command words a wrapper (ssh, `docker|kubectl exec`) runs: { inner, remote } or null. */
 function wrappedCommand(words, head) {
   const command = basename(words[head]);
   const ssh = sshParts(words, head);
   if (ssh.remote) return { inner: ssh.remote, remote: "ssh" };
-  if (command === "remote-exec" && REMOTE_EXEC.has(words[head + 1])) return { inner: withoutRedirects(words.slice(head + 2)), remote: "remote-exec" };
   if ((command === "docker" || command === "kubectl") && words[head + 1] === "exec") {
     const inner = containerCommand(words, head);
     return inner && { inner: withoutRedirects(inner), remote: "container" };
@@ -630,13 +628,13 @@ function isDataConsumer(words, head) {
 }
 
 /**
- * Who reads this segment's stdin, through ssh / `remote-exec exec` / `docker|kubectl exec`:
+ * Who reads this segment's stdin, through ssh / `docker|kubectl exec`:
  * { kind: "shell" | "code" | "data" | "other", language?, remote, login? }.
  */
 function stdinConsumer(words, head, remote = null) {
   const wrapped = wrappedCommand(words, head);
   if (wrapped) {
-    // ssh and remote-exec hand one command line to a remote shell; docker/kubectl exec pass argv as is.
+    // ssh hands one command line to a remote shell; docker/kubectl exec passes argv as is.
     const inner = wrapped.remote === "container" ? wrapped.inner : shellWordsDetailed(wrapped.inner.join(" ")).map((word) => word.value);
     const innerHead = headIndex(inner);
     const via = wrapped.remote ?? remote;
@@ -665,14 +663,14 @@ function stdinFeeds(segment, words, ctx) {
   return feeds;
 }
 
-/** Leaves of a program run on another host (ssh, remote-exec) or here (remote null); a remote one also gets a whole-script leaf. */
+/** Leaves of a program run on another host (ssh) or here (remote null); a remote one also gets a whole-script leaf. */
 function programLeaves(text, remote, depth, ctx) {
   const here = ctx.cd;
   if (remote) ctx.cd = undefined; // another host or container starts in a directory we do not know
   const leaves = expand(text, depth + 1, ctx);
   ctx.cd = here;
   if (!remote) return leaves;
-  // A container reached through ssh/remote-exec is judged as that host's command (remote-exec trust and remote checks included).
+  // A container reached through ssh is judged as that host's command (remote checks included).
   const label = (leaf) => (leaf.remote === "container" && remote !== "container" ? remote : (leaf.remote ?? remote));
   return [...leaves.map((leaf) => ({ ...leaf, remote: label(leaf) })), { script: true, text, remote }];
 }
@@ -803,7 +801,7 @@ function analyzeSegment(rawSegment, depth, ctx) {
     const wrapped = wrappedCommand(words, head);
     // The wrapped command itself (unless it is just the stdin reader of a fed program, e.g. `ssh h bash -s <<EOF`).
     if (wrapped && wrapped.inner.length > 0 && !(readsProgram && feeds.length > 0)) {
-      // ssh/remote-exec hand over one command line; a container gets argv (re-quoted so it parses back to the same words).
+      // ssh hands over one command line; a container gets argv (re-quoted so it parses back to the same words).
       const line = wrapped.remote === "container" ? wrapped.inner.map(shellQuote).join(" ") : wrapped.inner.join(" ");
       nested.push(...programLeaves(line, wrapped.remote, depth, ctx));
     }
@@ -1718,8 +1716,6 @@ export function commandsOf(toolName, toolInput) {
 const show = (text) => text.replaceAll(UNKNOWN, "${…}").replaceAll(SUBST, "$(…)").replaceAll(PROC_SUBST, "<(…)").replace(HEREDOC_TOKEN_RE, "<<…");
 const hashKey = (normalized, cwd) => createHash("sha256").update(`${normalized}\0${cwd}`).digest("hex").slice(0, 32);
 
-// The editable allow rule that trusts `remote-exec exec` (its remote commands still meet REMOTE_CHECKS and hardDeny).
-const REMOTE_EXEC_RULE_ID = "remote-exec";
 // An allow-tier match never switches off the secrets check (remote command or not, a key path is a key path).
 const ALWAYS_CHECKED_ID = "secrets-access";
 
@@ -1785,7 +1781,7 @@ export function classify(input, rules) {
   const denied = [];
   const escalated = [];
   const anyMatch = (regexes, texts) => texts.find((text) => regexes.some((regex) => regex.test(text)));
-  // On another host (ssh, remote-exec) every remote check applies; inside a container only the catastrophic denies.
+  // On another host (ssh) every remote check applies; inside a container only the catastrophic denies.
   const remoteCheck = (texts, where) => {
     const deniedText = anyMatch(matchers.remote.denyIf, texts);
     if (deniedText) denied.push(`remote-deny: ${show(deniedText)}`);
@@ -1793,8 +1789,6 @@ export function classify(input, rules) {
     if (escalatedText) escalated.push(`remote-escalate: ${show(escalatedText)}`);
     return Boolean(deniedText || escalatedText);
   };
-  // Commands under `remote-exec exec` are trusted like the command itself only while the remote-exec allow rule exists (fail closed).
-  const remoteExecTrusted = matchers.allow.some((entry) => entry.id === REMOTE_EXEC_RULE_ID);
   // A whole remote script: cd + rm across lines, etc.
   for (const script of scripts) remoteCheck([script.text], script.remote);
   for (const leaf of leaves) {
@@ -1807,11 +1801,6 @@ export function classify(input, rules) {
     if (leaf.helpOnly) continue;
     if (globText) escalated.push(`hard-deny-elsewhere: ${show(globText[0])} matches ${globText[1].glob} (${leaf.remote})`);
     if (leaf.remote && (remoteCheck(leaf.texts, leaf.remote) || globText)) continue;
-    if (leaf.remote === "remote-exec" && remoteExecTrusted) {
-      // The remote checks match text: they cannot see behind a value the eval code computes.
-      for (const text of leaf.texts) escalated.push(...escalationReasons(text, matchers, true));
-      continue;
-    }
     const allowed = matchers.allow.find((entry) => entry.regex.test(leaf.text));
     if (allowed) {
       if (allowed.denyIf.some((regex) => regex.test(leaf.text))) denied.push(`deny-if: ${show(leaf.text)} (${allowed.id})`);

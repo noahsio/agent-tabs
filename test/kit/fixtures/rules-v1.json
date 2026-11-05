@@ -34,19 +34,7 @@
     "diskutil erase*",
     "diskutil eraseVolume*"
   ],
-  "allow": [
-    {
-      "id": "remote-exec",
-      "label": "remote-exec runs on a remote host",
-      "pattern": "^\\s*remote-exec\\s+(exec|execute|shell|push|up|down|restart|logs|ps)(\\s|$)",
-      "denyIf": [
-        "(^|[^\\w])rm\\s+(-\\S+\\s+)+/([\\s*\\\"']|$)",
-        "(^|[^\\w])mkfs",
-        "(^|[^\\w])dd\\s+if=",
-        "(^|[^\\w])fdisk(\\s|$)"
-      ]
-    }
-  ],
+  "allow": [],
   "escalate": [
     {
       "id": "git-reset",

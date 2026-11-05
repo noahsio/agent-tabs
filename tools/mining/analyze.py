@@ -11,7 +11,7 @@ import sys
 
 HOME = os.path.expanduser('~')
 MAX_COMMAND = 200000  # long heredoc commands must keep their terminator line
-HEAD_SUBCOMMANDS = {'git', 'remote-exec', 'docker', 'npm', 'swift', 'codegraph', 'xcodebuild', 'pnpm', 'yarn', 'cargo', 'brew', 'gh',
+HEAD_SUBCOMMANDS = {'git', 'docker', 'npm', 'swift', 'codegraph', 'xcodebuild', 'pnpm', 'yarn', 'cargo', 'brew', 'gh',
                     'launchctl', 'kubectl', 'defaults', 'security', 'plutil', 'codesign', 'xcrun', 'make', 'pip', 'systemctl'}
 IP_RE = re.compile(r'(?<![\d.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d])(?!\.\d)')
 HOST_RE = re.compile(r'(?:https?|wss?|ftp)://(?:[^/\s@"\']+@)?([A-Za-z0-9.-]+\.[A-Za-z]{2,}|localhost|\d+\.\d+\.\d+\.\d+)')

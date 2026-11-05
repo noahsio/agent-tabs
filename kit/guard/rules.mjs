@@ -68,7 +68,7 @@ export const GROUP_RULES = {
   ],
 };
 
-// Checks for commands that run on another host (`remote-exec`, ssh, a heredoc fed to a remote shell). Built in, so that
+// Checks for commands that run on another host (ssh, a heredoc fed to a remote shell). Built in, so that
 // deleting or editing an allow rule cannot switch them off.
 export const REMOTE_CHECKS = {
   denyIf: [
@@ -319,8 +319,8 @@ export function compileRules(rules) {
       })),
       // P45: the bare-public-IP check is retired. REMOTE_CHECKS is not: every line of it, deny and ask alike, is a
       // destructive form, and the person's Seatbelt sandbox does not reach the other machine — so `rm -rf /srv/app`,
-      // `docker volume prune`, `DROP TABLE`, a `DELETE FROM` with no WHERE and `pkill` over ssh/remote-exec still ask.
-      // A remote command that is not one of those forms (`ssh host uptime`, `remote-exec exec 'npm ci'`) is allowed.
+      // `docker volume prune`, `DROP TABLE`, a `DELETE FROM` with no WHERE and `pkill` over ssh still ask.
+      // A remote command that is not one of those forms (`ssh host uptime`) is allowed.
       remote: { denyIf: REMOTE_CHECKS.denyIf.map((pattern) => new RegExp(pattern)), escalateIf: REMOTE_CHECKS.escalateIf.map((pattern) => new RegExp(pattern)) },
       ipCheck: false,
       whitelist: rules.ipWhitelist.map((entry) => parseCidr(entry.cidr)),

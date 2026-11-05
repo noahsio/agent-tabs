@@ -116,7 +116,7 @@ describe("escalation_forms", () => {
     // Whatever is left in the ask list still has to say which rule it was, because that line is what the person (or
     // the decider) reads on the card. The forms differ from the ones above; the contract on `reasons` does not.
     expect(bash("rm -rf $BUILD").reasons).toEqual(["rm-rf-variable: rm -rf of a path held in a variable"]);
-    expect(bash("remote-exec exec 'pkill -f worker'").reasons[0]).toMatch(/^remote-escalate: /);
+    expect(bash("ssh host 'pkill -f worker'").reasons[0]).toMatch(/^remote-escalate: /);
     expect(bash("docker run -v /:/host alpine sh").reasons[0]).toMatch(/^docker-mount: /);
   });
 });
@@ -126,7 +126,7 @@ describe("review_fix_round_1", () => {
     "git push>/dev/null", "git push>log 2>&1", "git reset>x", "git stash>x", "git push<<<x", "git push&", "git push>>x",
     "git branch --delete --force x", "git branch -d -f x", "git branch -df x", "git branch -f --delete x",
     "sudo ls", "curl -X POST http://localhost/x", "curl --data a http://localhost/x", "curl localhost -d a",
-    'remote-exec exec "x" && git push', "git commit -m x && git push", "echo $(git push)", 'echo "$(git push)"', "echo `git push`",
+    "git commit -m x && git push", "echo $(git push)", 'echo "$(git push)"', "echo `git push`",
     "G=git; $G push", "xargs git push", 'ssh host "git push"', 'eval "$(echo git push)"',
   ];
   it.each(escalate)("retired_ask_now_allows: %s", (command) => expect(bash(command).tier).toBe("allow"));
@@ -142,7 +142,7 @@ describe("review_fix_round_1", () => {
     "git push-all", "git reset-hard", "git stash list>x", "git stash show>x",
     'git commit -m "fix git push bug"', 'echo "git push"', 'printf "git reset --hard\\n"', 'grep "git push" file', 'rg "rm -rf /" src',
     'git log --grep="git push"', 'gh pr create --title "x" --body "git push later"', 'gh issue comment 1 --body "git reset"',
-    'remote-exec exec "git reset --hard"', 'remote-exec exec "git push origin main"', 'remote-exec logs "x"', "bash script.sh", "bash -n script.sh",
+    "bash script.sh", "bash -n script.sh",
     "ls /tmp/a::b", "cat /var/dead::beef/x", "echo $(date)", "git branch -d merged", "git branch -f x HEAD",
   ];
   it.each(allow)("allows: %s", (command) => expect(bash(command).tier).toBe("allow"));
@@ -152,10 +152,10 @@ describe("review_fix_round_1", () => {
     (command) => expect(bash(command).tier).toBe("deny"),
   );
 
-  it("remote-exec deny_if turns a remote destructive command into a hard deny", () => {
-    expect(bash('remote-exec exec "rm -rf /"').tier).toBe("deny");
-    expect(bash('remote-exec exec "rm -r -f -- /"').tier).toBe("deny");
-    expect(bash('remote-exec exec "mkfs.ext4 /dev/x"').tier).toBe("deny");
+  it("ssh deny_if turns a remote destructive command into a hard deny", () => {
+    expect(bash('ssh host "rm -rf /"').tier).toBe("deny");
+    expect(bash('ssh host "rm -r -f -- /"').tier).toBe("deny");
+    expect(bash('ssh host "mkfs.ext4 /dev/x"').tier).toBe("deny");
   });
 
   it("quoting_does_not_hide_a_target_from_the_rules", () => {
@@ -164,8 +164,8 @@ describe("review_fix_round_1", () => {
     // does. That is what keeps the deny list and the remote ask list from being escaped with a pair of quotes.
     expect(bash('rm -rf "$HOME"').tier).toBe("deny");
     expect(bash("rm -rf $HOME").tier).toBe("deny");
-    expect(bash(`remote-exec exec "rm -rf '/srv/app'"`).tier).toBe("escalate");
-    expect(bash("remote-exec exec 'rm -rf /srv/app'").tier).toBe("escalate");
+    expect(bash(`ssh host "rm -rf '/srv/app'"`).tier).toBe("escalate");
+    expect(bash("ssh host 'rm -rf /srv/app'").tier).toBe("escalate");
     expect(bash('docker run -v "$HOME":/host alpine sh').tier).toBe("escalate");
   });
 
@@ -178,7 +178,7 @@ describe("review_fix_round_1", () => {
 
 describe("review_fix_round_2", () => {
   const escalate = [
-    "remote-exec push ~/.ssh/id_rsa", 'remote-exec exec "x" > ~/.ssh/authorized_keys', 'remote-exec exec "cat /root/.aws/credentials"',
+    'ssh host "x" > ~/.ssh/authorized_keys', 'ssh host "cat /root/.aws/credentials"',
     'echo "a b" > "/Users/x/.ssh/my key/id_rsa"', 'echo "a b" >> "/Users/x/.ssh/my key/id_rsa"', 'echo x 2> "/Users/x/.ssh/my key/e"', 'echo x >"/Users/x/.ssh/my key/e"',
     'cat < "/Users/x/.ssh/my key/id_rsa"',
     "git grep -O foo", "git grep --open-files-in-pager=vim foo", "git grep -Ovim foo", "git -C x grep -O foo",
@@ -189,7 +189,7 @@ describe("review_fix_round_2", () => {
   it.each(escalate)("retired_ask_now_allows: %s", (command) => expect(bash(command).tier).toBe("allow"));
 
   const allow = [
-    'remote-exec exec "git reset --hard"', 'echo "a b" > out.txt', 'echo "a b" > "out dir/f.txt"', "git grep foo", "git log --oneline", "git log --output-indicator-new=x",
+    'echo "a b" > out.txt', 'echo "a b" > "out dir/f.txt"', "git grep foo", "git log --oneline", "git log --output-indicator-new=x",
     "git -c user.name=x commit -m y", "git -c alias.x=log x", "git diff -O orderfile", 'git commit -m "x --output y"',
   ];
   it.each(allow)("allows: %s", (command) => expect(bash(command).tier).toBe("allow"));
@@ -225,7 +225,7 @@ describe("hard_deny_globs", () => {
 describe("eval_code_scanned", () => {
   it("picks the risky tool.bash call out of an eval and leaves the benign one alone", () => {
     const verdict = evalCode(
-      'const kill = await tool.bash({ command: "remote-exec exec \'pkill -f worker\'" });\nconst echo = await tool.bash({ command: "echo hello" });\nreturn { kill, echo };',
+      'const kill = await tool.bash({ command: "ssh host \'pkill -f worker\'" });\nconst echo = await tool.bash({ command: "echo hello" });\nreturn { kill, echo };',
     );
     expect(verdict.tier).toBe("escalate");
     expect(verdict.reasons).toEqual(["remote-escalate: pkill -f worker"]);
@@ -245,11 +245,11 @@ describe("eval_code_scanned", () => {
     reads("await tool.bash({ command: 'git ' + 'push' })", ["git push"]);
     // And what it reads is then judged: a destructive payload in any of those shapes is still caught.
     expect(evalCode('Bun.spawn(["rm","-rf","/"])').tier).toBe("deny");
-    expect(evalCode('Bun.spawn(["remote-exec","exec","pkill -f worker"])').tier).toBe("escalate");
-    expect(evalCode("await Bun.$`remote-exec exec 'pkill -f worker'`").tier).toBe("escalate");
+    expect(evalCode('Bun.spawn(["ssh","host","pkill -f worker"])').tier).toBe("escalate");
+    expect(evalCode("await Bun.$`ssh host 'pkill -f worker'`").tier).toBe("escalate");
     expect(evalCode('const cp = require("node:child_process"); cp.execSync("docker run -v /:/host alpine sh")').tier).toBe("escalate");
-    expect(evalCode('import { spawnSync } from "child_process"; spawnSync("remote-exec", ["exec", "pkill -f worker"])').tier).toBe("escalate");
-    expect(evalCode('Bun.spawn(["bash","-lc","remote-exec exec \'pkill -f x\'"])').tier).toBe("escalate");
+    expect(evalCode('import { spawnSync } from "child_process"; spawnSync("ssh", ["host", "pkill -f worker"])').tier).toBe("escalate");
+    expect(evalCode('Bun.spawn(["bash","-lc","ssh host \'pkill -f x\'"])').tier).toBe("escalate");
   });
 
   it("allows eval that runs nothing risky", () => {
@@ -265,7 +265,7 @@ describe("eval_code_scanned", () => {
     expect(evalCode("const dir = '/'; execSync(`rm -rf ${dir}`)").tier).toBe("deny");
     expect(evalCode('const script = "rm -rf ~"; Bun.spawn(["bash", "-c", script])').tier).toBe("deny");
     expect(evalCode("execSync('rm -rf *', { cwd: '/' })").tier).toBe("deny");
-    expect(evalCode("const cmd = \"remote-exec exec 'pkill -f worker'\"; execSync(cmd)").tier).toBe("escalate");
+    expect(evalCode("const cmd = \"ssh host 'pkill -f worker'\"; execSync(cmd)").tier).toBe("escalate");
     expect(evalCode("const root = '/work/proj'; execSync(`cd ${root} && rm -rf build`)").tier).toBe("allow");
     expect(evalCode('const d = "/"; await tool.bash({ command: `docker run -v ${d}:/host alpine sh` })').reasons.join(" ")).toContain("docker-mount");
   });
@@ -299,7 +299,7 @@ describe("eval_code_scanned", () => {
     'Bun.spawn(["bash", "-c", script])',
     "let dir = '/tmp/x'; dir = '/'; execSync(`rm -rf ${dir}`)",
     'execSync(`ls ${ok ? "a" : "b"}`)',
-    "execSync(`remote-exec exec ${cmd}`)",
+    "execSync(`ssh host ${cmd}`)",
     "execSync('rm -rf build', { cwd: dir })",
     "const run = async (args) => Bun.spawn(args);\nawait run(['ls']);",
   ])("unreadable_is_not_a_verdict: %s", (code) => {
@@ -310,7 +310,7 @@ describe("eval_code_scanned", () => {
     const helper = (calls: string) =>
       `const repo = '/work/proj';\nconst run = async (args) => {\n  const child = Bun.spawn(args, { cwd: repo, stdout: 'pipe' });\n  return await new Response(child.stdout).text();\n};\n${calls}`;
     expect(evalCode(helper('print(await run(["git", "status", "--short"]));')).tier).toBe("allow");
-    expect(evalCode(helper('await run(["remote-exec", "exec", "pkill -f worker"])')).tier).toBe("escalate");
+    expect(evalCode(helper('await run(["ssh", "host", "pkill -f worker"])')).tier).toBe("escalate");
     expect(evalCode(helper('await run(["rm", "-rf", "/"])')).tier).toBe("deny");
     expect(evalCode("const run = (args, cwd) => { return Bun.spawnSync(args, { cwd }) };\nrun(['rm', '-rf', '*'], '/');").tier).toBe("deny");
   });
@@ -385,8 +385,8 @@ describe("tuned_on_the_real_command_corpus", () => {
     ["cat <<'EOF'\nrm -rf ~\nEOF", "allow"],
     ["echo $((1+2))", "allow"],
     ["sudo pfctl -s rules", "allow"],
-    ["remote-exec exec 'docker system prune -f'", "escalate"],
-    ["remote-exec exec 'rm -rf /'", "deny"],
+    ["ssh host 'docker system prune -f'", "escalate"],
+    ["ssh host 'rm -rf /'", "deny"],
     ["sshpass -p x ssh dev@192.168.1.50 hostname", "allow"],
     ["docker run -v ~/.omo:/h alpine true", "escalate"],
   ])("tuned_%s", (command, tier) => {
@@ -413,11 +413,11 @@ describe("tuned_on_the_real_command_corpus", () => {
     "cat > gen.sh <<EOF\necho \\$(date) \\`uname\\`\nEOF",
     "cat <<EOF\nbuilt at $(date)\nEOF",
     "bash <<'EOF'\nls -la\nEOF",
-    "remote-exec exec bash <<'EOF'\ndocker ps\nEOF",
+    "ssh host bash <<'EOF'\ndocker ps\nEOF",
     "ssh dev@10.0.0.5 'ls /tmp && df -h'",
     "sshpass -p x ssh dev@10.0.0.5 <<'EOF'\nuptime\nEOF",
-    "remote-exec exec 'rm -rf build ./dist node_modules/.cache'",
-    "remote-exec exec \"psql -c 'DELETE FROM jobs WHERE id = 3 AND done'\"",
+    "ssh host 'rm -rf build ./dist node_modules/.cache'",
+    "ssh host \"psql -c 'DELETE FROM jobs WHERE id = 3 AND done'\"",
     "cat ~/.ssh/config 2>/dev/null | head",
     "ssh-keygen -l -f ~/.ssh/known_hosts",
     "tail -5 ~/.ssh/known_hosts",
@@ -443,9 +443,9 @@ describe("tuned_on_the_real_command_corpus", () => {
     "swift run --disable-sandbox tool",
     "xcodebuild -scheme App -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePackageSandbox=YES build",
     "curl http://203.0.113.10:8080/health",
-    "remote-exec exec 'docker ps' && remote-exec exec 'git reset --hard'",
-    "remote-exec exec 'rm -rf platform/web/node_modules && echo cleaned'",
-    "remote-exec exec \"psql -c 'DELETE FROM jobs WHERE id = 3'\"",
+    "ssh host 'docker ps' && ssh host 'git reset --hard'",
+    "ssh host 'rm -rf platform/web/node_modules && echo cleaned'",
+    "ssh host \"psql -c 'DELETE FROM jobs WHERE id = 3'\"",
     "cat ~/.ssh/config | head -20",
     "grep -c . ~/.ssh/known_hosts",
     "FILES=(${(f)\"$(grep -rl old .)\"}) && print -l $FILES",
@@ -459,7 +459,7 @@ describe("tuned_on_the_real_command_corpus", () => {
     "rm -rf $HOME",
     "rm -rf \"$HOME\"",
     "rm -rf ~/",
-    "remote-exec exec 'mkfs.ext4 /dev/sda'",
+    "ssh host 'mkfs.ext4 /dev/sda'",
   ])("denies: %s", (command) => {
     expect(bash(command).tier).toBe("deny");
   });
@@ -491,21 +491,21 @@ describe("tuned_on_the_real_command_corpus", () => {
   it.each([
     // Ruling P45: a destructive form that runs on ANOTHER machine stays in the ask list. The person's Seatbelt
     // sandbox covers this Mac and nothing else, so `rm -rf` of an absolute path or a glob, docker removals and
-    // prunes, a DROP/TRUNCATE, a DELETE FROM with no real WHERE, pkill and kill -9 are worse over ssh/remote-exec than
+    // prunes, a DROP/TRUNCATE, a DELETE FROM with no real WHERE, pkill and kill -9 are worse over ssh than
     // they are here, not better. A remote command that is not one of those forms is allowed (see the list above).
-    "remote-exec exec 'rm -rf /srv/app/data'",
-    "remote-exec exec 'cd /srv && rm -rf app'",
-    "remote-exec exec 'rm -rf ../other'",
-    "remote-exec exec 'rm -rf *'",
-    "remote-exec exec 'rm -rf ./build \"$OUT\"'",
-    "remote-exec exec \"docker rm -f web\"",
-    "remote-exec exec \"docker rmi app:latest\"",
-    "remote-exec exec \"docker volume prune -f\"",
-    "remote-exec exec \"psql -c 'DROP TABLE users'\"",
-    "remote-exec exec \"psql -c 'DELETE FROM jobs'\"",
-    "remote-exec exec \"psql -c 'delete from users'\"",
-    "remote-exec exec 'pkill -f worker'",
-    "remote-exec exec 'kill -9 1234'",
+    "ssh host 'rm -rf /srv/app/data'",
+    "ssh host 'cd /srv && rm -rf app'",
+    "ssh host 'rm -rf ../other'",
+    "ssh host 'rm -rf *'",
+    "ssh host 'rm -rf ./build \"$OUT\"'",
+    "ssh host \"docker rm -f web\"",
+    "ssh host \"docker rmi app:latest\"",
+    "ssh host \"docker volume prune -f\"",
+    "ssh host \"psql -c 'DROP TABLE users'\"",
+    "ssh host \"psql -c 'DELETE FROM jobs'\"",
+    "ssh host \"psql -c 'delete from users'\"",
+    "ssh host 'pkill -f worker'",
+    "ssh host 'kill -9 1234'",
     // A bind mount that hands a container the home directory, the whole disk or the agent's own files is how the
     // sandbox gets escaped on this machine, so it keeps asking too.
     "docker run -v $HOME:/host alpine sh",
@@ -541,7 +541,7 @@ describe("custom ask rules", () => {
     expect(bash("terraform destroyer", rules).tier).toBe("allow");
     expect(bash("kubectl delete pod x", rules).tier).toBe("escalate");
     expect(bash("echo kubectl delete pod", rules).tier).toBe("allow");
-    expect(bash('remote-exec exec "terraform destroy"', rules).tier).toBe("escalate");
+    expect(bash('ssh host "terraform destroy"', rules).tier).toBe("escalate");
   });
 
   it("the_group_flags_gate_nothing_now_and_askCustom_is_the_persons_own_switch", () => {
@@ -626,7 +626,7 @@ describe("tool inputs (F7)", () => {
     expect(sameAsText("bash", ["-c", "rm -rf /"]).tier).toBe("deny");
     expect(sameAsText("sh", ["-c", "cd / && rm -rf *"]).tier).toBe("deny");
     expect(sameAsText("rm", ["-rf", "/"]).tier).toBe("deny");
-    expect(sameAsText("remote-exec", ["exec", "pkill -f worker"]).tier).toBe("escalate");
+    expect(sameAsText("ssh", ["host", "pkill -f worker"]).tier).toBe("escalate");
     expect(sameAsText("bash", ["-c", "echo hi; pwd"]).tier).toBe("allow");
     // execve runs no shell, so an argument that only looks like a substitution is a quoted word, not a command
     expect(sameAsText("echo", ["$(rm -rf /)"]).tier).toBe("allow");
@@ -758,7 +758,7 @@ describe("tool inputs (F7)", () => {
 
   it("eval_is_classified_by_its_shell", () => {
     const evalIn = (language: string, code: string) => call("eval", { language, summary: "x", code });
-    expect(evalIn("ts", "await Bun.$`remote-exec exec 'pkill -f worker'`").tier).toBe("escalate");
+    expect(evalIn("ts", "await Bun.$`ssh host 'pkill -f worker'`").tier).toBe("escalate");
     expect(evalIn("python", 'import os\nos.system("rm -rf /")').tier).toBe("deny");
     expect(evalIn("python", "import subprocess\nsubprocess.check_output(['docker', 'run', '-v', '/:/host', 'alpine', 'sh'])").tier).toBe("escalate");
     expect(evalIn("python", "import subprocess\nsubprocess.run(args)").tier).toBe("allow"); // P43: unread, not asked
@@ -789,7 +789,7 @@ describe("known dangerous forms", () => {
     // forms were retired. Asserted in both directions — catching one of these again, or losing one from `denied` or
     // `asked`, fails here instead of going unnoticed.
     expect(fixture.allowed.filter((form) => bash(form).tier !== "allow")).toEqual([]);
-    expect(fixture.denied.length + fixture.asked.length + fixture.allowed.length).toBe(290);
+    expect(fixture.denied.length + fixture.asked.length + fixture.allowed.length).toBe(289);
   });
 
   // Round 3 reads a Python name bound to a literal. Everything it now reads has to face the same rules: a dangerous
@@ -880,7 +880,7 @@ describe("review_fix_round_2 (task 8, P25)", () => {
   it("user_hard_deny_on_another_host_asks_instead_of_denying", () => {
     const rules = { ...defaults, hardDeny: [...defaults.hardDeny, "terraform destroy*"] };
     expect(bash("ssh dev@10.0.0.5 bash -s <<'EOF'\nterraform destroy -auto-approve\nEOF", rules).tier).toBe("escalate");
-    expect(bash("remote-exec exec 'terraform destroy -auto-approve'", rules).tier).toBe("escalate");
+    expect(bash("ssh host 'terraform destroy -auto-approve'", rules).tier).toBe("escalate");
     expect(bash("docker exec -i app sh <<'EOF'\nterraform destroy\nEOF", rules).tier).toBe("escalate");
     expect(bash("terraform destroy -auto-approve", rules).tier).toBe("deny");
   });
@@ -890,8 +890,8 @@ describe("review_fix_round_2 (task 8, P25)", () => {
       "ssh dev@10.0.0.5 'rm -rf /'",
       "ssh dev@10.0.0.5 'rm -rf //*'",
       "ssh dev@10.0.0.5 'nice rm -r /tmp/../'",
-      "remote-exec exec 'mkfs.ext4 /dev/sda'",
-      "remote-exec exec 'dd if=/dev/zero of=/dev/sda'",
+      "ssh host 'mkfs.ext4 /dev/sda'",
+      "ssh host 'dd if=/dev/zero of=/dev/sda'",
       "ssh dev@10.0.0.5 'find /. -delete'",
       "ssh dev@10.0.0.5 'diskutil eraseDisk JHFS+ x disk2'",
       "kubectl exec -i pod -- sh <<'EOF'\nrm -rf /\nEOF",
@@ -904,16 +904,15 @@ describe("review_fix_round_2 (task 8, P25)", () => {
   });
 
   it("remote_checks_do_not_depend_on_the_editable_allow_rule", () => {
-    const rules = { ...defaults, allow: defaults.allow.filter((entry: { id: string }) => entry.id !== "remote-exec") };
+    const rules = { ...defaults, allow: [] };
     expect(bash("ssh dev@10.0.0.5 'rm -rf /'", rules).tier).toBe("deny");
     expect(bash("ssh dev@10.0.0.5 'docker system prune -af'", rules).tier).toBe("escalate");
-    expect(bash("remote-exec exec 'rm -rf /'", rules).tier).toBe("deny");
   });
 });
 
 describe("review_fix_round_4 (task 8)", () => {
   it("ansi_c_quotes_do_not_hide_the_rest_of_the_command", () => {
-    expect(bash("git commit -m $'don\\'t\\nbody' && remote-exec exec 'pkill -f worker'").tier).toBe("escalate");
+    expect(bash("git commit -m $'don\\'t\\nbody' && ssh host 'pkill -f worker'").tier).toBe("escalate");
     expect(bash("echo $'it\\'s' && rm -rf /").tier).toBe("deny");
     expect(bash("echo $'tab\\there' $'x\\'y'").tier).toBe("allow");
   });
@@ -945,8 +944,8 @@ describe("review_fix_round_4 (task 8)", () => {
   });
 
   it("an_unquoted_or_extended_cat_substitution_still_runs", () => {
-    expect(bash("git commit -m \"$(cat <<EOF\n$(remote-exec exec 'pkill -f x')\nEOF\n)\"").tier).toBe("escalate");
-    expect(bash("git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n) $(remote-exec exec 'pkill -f x')\"").tier).toBe("escalate");
+    expect(bash("git commit -m \"$(cat <<EOF\n$(ssh host 'pkill -f x')\nEOF\n)\"").tier).toBe("escalate");
+    expect(bash("git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n) $(ssh host 'pkill -f x')\"").tier).toBe("escalate");
   });
 });
 
@@ -1000,7 +999,7 @@ describe("round_3_false_positives: an unread name is not an unread command", () 
     // Reading the literal hands the command to the full rule set, deny rules included.
     expect(pyEval("import subprocess\ncmd = ['rm', '-rf', '/']\nsubprocess.run(cmd)").tier).toBe("deny");
     expect(pyEval("import subprocess\nfor cmd in [['ls'], ['rm', '-rf', '~']]:\n    subprocess.run(cmd)").tier).toBe("deny");
-    expect(pyEval("import subprocess\ncmd = ['remote-exec', 'exec', 'pkill -f worker']\nsubprocess.run(cmd)").tier).toBe("escalate");
+    expect(pyEval("import subprocess\ncmd = ['ssh', 'host', 'pkill -f worker']\nsubprocess.run(cmd)").tier).toBe("escalate");
     expect(pyEval("import subprocess\nscript = 'rm -rf /'\nsubprocess.run(script, shell=True)").tier).toBe("deny");
   });
 
