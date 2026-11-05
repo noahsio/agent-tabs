@@ -3,10 +3,13 @@ import { mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { applyEntries, initialState } from "../../src/chat/reducer";
 import { DaemonManager, hostSocketPath } from "../../src/daemon";
 import type { OmoEnv } from "../../src/env";
 import { ImageStore } from "../../src/sessions/images";
+import type { LadderView } from "../../src/sessions/ladder";
 import { SessionController } from "../../src/sessions/controller";
+import type { Ladder } from "../../src/settings/ladder";
 import { Checkpointer } from "../../src/rewind/checkpointer";
 import { CheckpointStore } from "../../src/rewind/store";
 import { FakeDaemon, type Frame } from "../helpers/fakeDaemon";
@@ -223,6 +226,45 @@ describe("SessionController", () => {
     expect(ofType("set_model")[1]).toMatchObject({ provider: "gw", modelId: "profile-model" });
   });
 
+  /**
+   * The person switched the model while a turn ran and the new model's first request failed. OmO ends that run with
+   * `turn_end`/`agent_end` and never sends `agent_settled`; its lifecycle keeps saying "running" while naming that very
+   * run as the one it stopped. The turn has to end in the tab too, with the error, and the composer has to stay usable —
+   * or every further message is steered into a turn that is over and waits in a queue nothing will ever drain.
+   */
+  it("a_turn_whose_model_request_fails_ends_in_the_tab_with_the_error", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    expect(await controller.send("посчитай", "auto")).toBe(true);
+    daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "running", runId: "run-1", activity: { kind: "model" } } }));
+    await settle(() => controller?.state.running === true);
+
+    await controller.setModel({ provider: "gw", id: "m2" });
+    daemon.push(frame({ type: "extension_ui_request", id: "n1", method: "notify", notifyType: "error", message: "Connection error." }));
+    daemon.push(frame({ type: "turn_end" }));
+    daemon.push(frame({ type: "agent_end" }));
+    daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "running", runId: "run-1", lastStop: { runId: "run-1", cause: "error" } } }));
+
+    await settle(() => controller?.state.running === false);
+    expect(controller.state.blocks.some((block) => block.kind === "notice" && block.text === "Connection error.")).toBe(true);
+    expect(await controller.send("ещё раз", "auto")).toBe(true);
+    expect(ofType("steer")).toEqual([]); // the composer prompts again instead of steering a turn that is over
+    expect(ofType("prompt").length).toBe(2);
+  });
+
+  it("a_set_model_that_fails_leaves_the_model_and_the_composer_alone", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "running", runId: "run-1" } }));
+    await settle(() => controller?.state.running === true);
+    daemon.on("set_model", () => ({ errorCode: "unknown_model", error: "no such model for sekret-key-123" }));
+
+    await controller.setModel({ provider: "gw", id: "nope" });
+    expect(controller.state.error).toContain("no such model");
+    expect(controller.state.error).not.toContain("sekret-key-123");
+    expect(controller.state.model).toEqual({ provider: "gw", id: "m1" }); // nothing half-switched
+    expect(controller.tabState.modelMode).toBe("auto");
+    expect(controller.state.running).toBe(true); // the turn it ran during is left alone
+  });
+
   it("surfaces_prompt_error_in_view", async () => {
     daemon.on("prompt", () => ({ errorCode: "provider_credentials_missing", error: "Missing credentials for sekret-key-123" }));
     controller = await SessionController.create(manager, "/tmp");
@@ -360,6 +402,7 @@ describe("SessionController", () => {
         request["name"] === "omo.task.list" ? { data: { parent_session_id: "durable-1", tasks: [task("st_a", "completed"), task("st_b", "running")] } } : { data: { kind: "not_found" } },
       );
       controller = await SessionController.attach(manager, SESSION_FILE);
+      await settle(() => rows()?.length === 2); // asked for after the open, merged whenever it answers
       expect(ofType("extension_request")).toEqual([
         expect.objectContaining({ name: "omo.task.list", sessionId: "rpc-1", data: { parent_session_id: "durable-1" } }),
       ]);
@@ -367,6 +410,40 @@ describe("SessionController", () => {
         ["task:st_a", "done"],
         ["task:st_b", "running"],
       ]);
+    });
+
+    it("attach_does_not_wait_for_a_task_list_that_never_answers", async () => {
+      daemon.on("extension_request", () => ({ silent: true })); // what OmO 5.1.59 does on a session it reopens
+      const startedAt = Date.now();
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      // Over long before the list's own deadline, which is itself far short of the client's 30-second default that the
+      // open used to sit on with the whole conversation already in hand.
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      expect(controller.state.error).toBeUndefined();
+      await settle(() => ofType("extension_request").length === 1);
+    });
+
+    it("a_journal_that_comes_in_pages_ends_in_the_state_one_page_would_give", async () => {
+      const entries = Array.from({ length: 1_200 }, (_, index) => ({
+        id: `e${index}`,
+        type: "message",
+        message: {
+          role: index % 3 === 0 ? "user" : "assistant",
+          timestamp: 1_700_000_000_000 + index,
+          content: [{ type: "text", text: `line ${index}` }],
+        },
+      }));
+      daemon.on("get_entries", (request) => {
+        const since = request["since"];
+        const from = since === undefined ? 0 : entries.findIndex((entry) => entry.id === since) + 1;
+        const page = entries.slice(from, from + 500);
+        const last = page[page.length - 1];
+        return { data: { entries: page, hasMore: from + page.length < entries.length, nextSince: last?.id } };
+      });
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      expect(ofType("get_entries")).toHaveLength(3);
+      expect(controller.state.blocks).toEqual(applyEntries(initialState(), entries).blocks);
+      expect(controller.state.cursor).toBe("e1199");
     });
 
     it("attach_keeps_the_journals_tasks_when_omo_no_longer_lists_them", async () => {
@@ -402,7 +479,7 @@ describe("SessionController", () => {
 
     it("an_omo_without_the_task_list_still_attaches", async () => {
       controller = await SessionController.attach(manager, SESSION_FILE);
-      expect(ofType("extension_request")).toHaveLength(1);
+      await settle(() => ofType("extension_request").length === 1);
       expect(controller.state.agents).toEqual([]);
       expect(controller.state.error).toBeUndefined();
     });
@@ -644,6 +721,93 @@ describe("SessionController", () => {
     daemon.on("get_entries", () => ({ data: { entries: [], hasMore: true, nextSince: "same" } }));
     controller = await SessionController.attach(manager, SESSION_FILE);
     expect(ofType("get_entries").map((request) => request["since"])).toEqual([undefined, "same"]);
+  });
+
+  /**
+   * OmO 5.1.59 resumes a session with a stopped goal by saying, in English, that the client must resume it itself; the
+   * goal stays a human wait in the lifecycle meanwhile, so a tab that believed it was a running turn queued every
+   * message the person sent and answered none of them.
+   */
+  describe("a resumed session whose goal OmO stopped", () => {
+    const RESUME_NOTICE = "Goal remains blocked after session resume. Resume it explicitly after the session finishes loading.";
+    const GOAL_CARD = "Goal active\nObjective: ship it\nStatus: active\nTime used: 2s\nTokens used: 0";
+    const blockedGoal = {
+      lifecycle: { state: "waiting_human", runId: "r1", waitingOn: { children: 0, background: [], human: [{ kind: "goal_blocked", requestId: "goal:1", revision: 1 }] } },
+    };
+
+    function openWithStoppedGoal(): void {
+      daemon.on("open_session", () => ({
+        data: openData("rpc-1", blockedGoal),
+        frames: [frame({ type: "extension_ui_request", id: "n1", method: "notify", notifyType: "info", message: RESUME_NOTICE })],
+      }));
+    }
+
+    const notices = () => (controller?.state.blocks ?? []).filter((block) => block.kind === "notice");
+    const texts = () => notices().map((block) => (block.kind === "notice" ? block.text : ""));
+    const goalPrompts = () => ofType("prompt").filter((request) => request["message"] === "/goal resume");
+
+    it("the_tab_resumes_the_goal_itself_and_the_person_s_message_is_delivered", async () => {
+      openWithStoppedGoal();
+      daemon.on("prompt", (request) =>
+        request["message"] === "/goal resume"
+          ? { data: { disposition: "handled" }, frames: [frame({ type: "extension_ui_request", id: "n2", method: "notify", notifyType: "info", message: GOAL_CARD })] }
+          : { data: { disposition: "started", clientMessageId: request["clientMessageId"] } },
+      );
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await settle(() => goalPrompts().length === 1);
+      await settle(() => texts().includes("Цель сессии была остановлена — возобновил её, агент продолжает работу"));
+
+      // nothing English reached the feed: not OmO's instruction, not the goal card its own command answered with
+      expect(texts().some((text) => /Goal remains|Objective:/.test(text))).toBe(false);
+      expect(controller.state.running).toBe(false); // the composer is usable, nothing waits for an answer
+
+      expect(await controller.send("продолжи", "auto")).toBe(true);
+      const sent = ofType("prompt").filter((request) => request["message"] === "продолжи");
+      expect(sent).toHaveLength(1); // a prompt, not a steer that would only queue
+      expect(ofType("steer")).toHaveLength(0);
+      daemon.push(frame({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "продолжи" }], clientMessageId: sent[0]?.["clientMessageId"] } }));
+      await settle(() => controller?.state.blocks.some((block) => block.kind === "user" && block.text === "продолжи" && block.delivery === undefined) === true);
+    });
+
+    it("a_refused_resume_says_so_in_russian_and_leaves_the_tab_idle", async () => {
+      openWithStoppedGoal();
+      daemon.on("prompt", (request) =>
+        request["message"] === "/goal resume" ? { error: "goal store contains an invalid goal", errorCode: "open_failed" } : { data: { disposition: "started" } },
+      );
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await settle(() => notices().length === 1);
+      expect(notices()[0]).toMatchObject({
+        level: "warn",
+        text: "Цель сессии остановлена, и возобновить её не удалось — агент сам не продолжит, напишите, что делать дальше",
+      });
+      expect(controller.state.running).toBe(false);
+      expect(controller.state.error).toBeUndefined(); // one line, not a banner about a command the person never sent
+    });
+
+    it("a_turn_that_is_running_after_all_is_left_alone", async () => {
+      openWithStoppedGoal();
+      daemon.on("prompt", (request) =>
+        request["message"] === "/goal resume" ? { error: "Agent is already processing.", errorCode: "streaming" } : { data: { disposition: "started" } },
+      );
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await settle(() => goalPrompts().length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(notices()).toEqual([]);
+    });
+
+    it("overlapping_notices_resume_the_goal_once", async () => {
+      openWithStoppedGoal();
+      daemon.on("prompt", (request) =>
+        request["message"] === "/goal resume" ? { data: { disposition: "handled" }, delayMs: 20 } : { data: { disposition: "started" } },
+      );
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      daemon.push(frame({ type: "extension_ui_request", id: "n3", method: "notify", notifyType: "info", message: RESUME_NOTICE }));
+      daemon.push(frame({ type: "extension_ui_request", id: "n4", method: "notify", notifyType: "info", message: RESUME_NOTICE }));
+      await settle(() => goalPrompts().length >= 1);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(goalPrompts()).toHaveLength(1);
+      expect(notices()).toHaveLength(1); // and one line, however many times OmO says it
+    });
   });
   describe("redesign requests", () => {
     it("send_with_images_puts_image_parts", async () => {
@@ -1024,6 +1188,166 @@ describe("SessionController", () => {
       controller.note("info", "x");
       expect(controller.state.blocks[controller.state.blocks.length - 1]).toMatchObject({ kind: "notice", level: "info", text: "x" });
       expect(controller.state.blocks[controller.state.blocks.length - 1]?.id).toMatch(/^rewind:/);
+    });
+  });
+
+  describe("the model ladder", () => {
+    const LADDER: Ladder = {
+      rungs: [
+        { id: "top", action: { kind: "model", provider: "gw", id: "m1" }, on: [] },
+        { id: "next", action: { kind: "model", provider: "gw", id: "m2" }, on: ["refusal", "rejected", "empty", "silence", "transport"] },
+        { id: "ask", action: { kind: "ask" }, on: ["refusal", "rejected", "empty", "silence", "transport"] },
+      ],
+    };
+    let views: (LadderView | undefined)[];
+    let lines: string[];
+
+    function withLadder(): void {
+      views = [];
+      (controller as SessionController).setLadder({ ladder: () => LADDER, view: (view) => views.push(view) });
+    }
+
+    const refusal = (): Frame =>
+      frame({
+        type: "message_end",
+        message: { role: "assistant", timestamp: 7, content: [], stopReason: "error", rawStopReason: "refusal", stopDetails: { type: "refusal", explanation: "нет" } },
+      });
+
+    /** The live `gw-openai` moderation rejection, verbatim in shape: nothing typed, begun, not one token produced. */
+    const rejection = (): Frame =>
+      frame({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          timestamp: 8,
+          content: [{ type: "thinking", thinking: "…" }],
+          api: "openai-responses",
+          usage: { totalTokens: 0 },
+          stopReason: "error",
+          errorMessage: "This content was flagged for possible cybersecurity risk. …",
+          timing: { requestedAt: 1, firstTokenAt: 18_291, lastTokenAt: 18_291, endedAt: 20_195, generationMs: 1 },
+        },
+      });
+
+    beforeEach(() => {
+      lines = [];
+      daemon.on("get_available_models", () => ({ data: { models: [{ provider: "gw", id: "m1", name: "Первая" }, { provider: "gw", id: "m2", name: "Вторая" }] } }));
+    });
+
+    it("every_abort_we_send_names_its_path_and_its_reason_in_the_channel", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE, undefined, undefined, undefined, (text) => lines.push(text));
+      withLadder();
+      controller.watchForLadder("m-own", "привет", []);
+      await controller.send("привет", "auto", [], "m-own");
+      daemon.push(frame({ type: "message_start", message: { role: "user", clientMessageId: "m-own", content: [{ type: "text", text: "привет" }] } }));
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(refusal());
+      await settle(() => ofType("abort").length === 1);
+      // the ladder's own abort says which rung it is going to and why it is going there
+      expect(lines.filter((text) => text.startsWith("Прерываю ход"))).toEqual([
+        "Прерываю ход: лесенка моделей — Модель отказалась, ступенька 2 (Вторая)",
+      ]);
+    });
+
+    it("the_persons_own_stop_is_logged_as_theirs", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE, undefined, undefined, undefined, (text) => lines.push(text));
+      await controller.stop();
+      expect(lines).toContain("Прерываю ход: «Стоп» — попросил человек");
+    });
+
+    it("an_unwedge_says_who_asked_for_it", async () => {
+      daemon.on("unload_session", () => ({ data: { outcome: "refused", reason: "turn_active" } }));
+      controller = await SessionController.attach(manager, SESSION_FILE, undefined, undefined, undefined, (text) => lines.push(text));
+      await controller.unwedgeSession();
+      await controller.unwedgeSession("перезапуск после «Стоп»");
+      expect(lines.filter((text) => text.startsWith("Выгружаю сессию"))).toEqual([
+        "Выгружаю сессию: «Снять зависание» — попросил человек",
+        "Выгружаю сессию: «Снять зависание» — перезапуск после «Стоп»",
+      ]);
+    });
+
+    it("a_provider_rejection_moves_the_message_on_and_never_reaches_the_banner", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      withLadder();
+      controller.watchForLadder("m-own", "собери статистику каналов", []);
+      await controller.send("собери статистику каналов", "auto", [], "m-own");
+      daemon.push(frame({ type: "message_start", message: { role: "user", clientMessageId: "m-own", content: [{ type: "text", text: "собери статистику каналов" }] } }));
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(rejection());
+      await settle(() => ofType("set_model").length === 1);
+      await settle(() => ofType("prompt").length === 2);
+
+      expect(ofType("abort")).toHaveLength(1);
+      expect(ofType("set_model")[0]).toMatchObject({ provider: "gw", modelId: "m2" });
+      expect((ofType("prompt")[1] as Frame)["message"]).toBe("собери статистику каналов");
+      expect(controller.state.error).toBeUndefined(); // the English sentence never becomes the red banner
+      const notices = controller.state.blocks.filter((block) => block.kind === "notice").map((block) => (block.kind === "notice" ? block.text : ""));
+      expect(notices).toContain("Провайдер отклонил запрос — смените модель для этой сессии");
+      expect(notices).toContain("Провайдер отклонил запрос — перешёл на Вторая и повторил");
+    });
+
+    it("a_refusal_on_the_persons_message_aborts_switches_and_repeats_it_under_a_new_id", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      withLadder();
+      controller.watchForLadder("m-own", "разбери кошельки", []);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "message_start", message: { role: "user", clientMessageId: "m-own", content: [{ type: "text", text: "разбери кошельки" }] } }));
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(refusal());
+      await settle(() => ofType("set_model").length === 1);
+      await settle(() => ofType("prompt").length === 2);
+
+      expect(ofType("abort")).toHaveLength(1);
+      expect(types().indexOf("abort")).toBeLessThan(types().indexOf("set_model"));
+      expect(ofType("set_model")[0]).toMatchObject({ provider: "gw", modelId: "m2" });
+      const repeat = ofType("prompt")[1] as Frame;
+      expect(repeat["message"]).toBe("разбери кошельки");
+      expect(repeat["clientMessageId"]).not.toBe("m-own"); // a repeat under the same id would come back from OmO's record
+      expect(views.at(-1)).toEqual({ state: "walking", rung: 2, total: 3, label: "Вторая" });
+      const notices = controller.state.blocks.filter((block) => block.kind === "notice").map((block) => (block.kind === "notice" ? block.text : ""));
+      expect(notices).toContain("Модель отказалась — перешёл на Вторая и повторил");
+    });
+
+    it("a_goal_resume_prompt_never_arms_the_ladder", async () => {
+      daemon.on("open_session", () => ({
+        data: openData("rpc-1", {
+          lifecycle: { state: "waiting_human", runId: "r1", waitingOn: { children: 0, background: [], human: [{ kind: "goal_blocked", requestId: "g1", revision: 1 }] } },
+        }),
+        frames: [
+          frame({
+            type: "extension_ui_request",
+            id: "n1",
+            method: "notify",
+            notifyType: "info",
+            message: "Goal remains blocked after session resume. Resume it explicitly after the session finishes loading.",
+          }),
+        ],
+      }));
+      daemon.on("prompt", (request) =>
+        request["message"] === "/goal resume" ? { data: { disposition: "handled" } } : { data: { disposition: "started", clientMessageId: request["clientMessageId"] } },
+      );
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      withLadder();
+      await settle(() => ofType("prompt").some((request) => request["message"] === "/goal resume"));
+
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(refusal());
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(ofType("set_model")).toHaveLength(0);
+      expect(ofType("abort")).toHaveLength(0);
+      expect(views).toEqual([]);
+    });
+
+    it("without_a_ladder_a_refusal_changes_nothing", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      controller.watchForLadder("m-own", "привет", []);
+      await controller.send("привет", "auto", [], "m-own");
+      daemon.push(frame({ type: "message_start", message: { role: "user", clientMessageId: "m-own", content: [] } }));
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(refusal());
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(ofType("set_model")).toHaveLength(0);
+      expect(ofType("abort")).toHaveLength(0);
     });
   });
 });

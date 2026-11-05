@@ -4,6 +4,7 @@ import type { Block, ChatState } from "../../src/chat/model";
 import { initialState } from "../../src/chat/reducer";
 import type { StateMessage, WebviewMessage } from "../../src/panel/protocol";
 import { ChatView } from "../../webview/render";
+import { text, type } from "../helpers/composer";
 
 let root: HTMLElement;
 let posted: WebviewMessage[];
@@ -13,8 +14,8 @@ function show(state: Partial<ChatState>, extra: Partial<StateMessage> = {}): voi
   view.update({ type: "state", state: { ...initialState(), ...state }, tab: { modelMode: "auto" }, reconnectable: true, ...extra });
 }
 
-function input(): HTMLTextAreaElement {
-  return root.querySelector("textarea") as HTMLTextAreaElement;
+function input(): HTMLElement {
+  return root.querySelector(".input") as HTMLElement;
 }
 
 function press(key: string, modifiers: { altKey?: boolean; shiftKey?: boolean } = {}): KeyboardEvent {
@@ -71,20 +72,20 @@ describe("ChatView", () => {
 
   it("enter_sends_auto_alt_enter_sends_follow_up", () => {
     show({});
-    input().value = "first";
+    type(input(), "first");
     expect(press("Enter").defaultPrevented).toBe(true);
     expect(posted).toEqual([{ type: "send", id: expect.any(String), text: "first", mode: "auto" }]);
-    expect(input().value).toBe("");
+    expect(text(input())).toBe("");
 
-    input().value = "later";
+    type(input(), "later");
     press("Enter", { altKey: true });
     expect(posted[1]).toEqual({ type: "send", id: expect.any(String), text: "later", mode: "followUp" });
 
-    input().value = "multi";
+    type(input(), "multi");
     expect(press("Enter", { shiftKey: true }).defaultPrevented).toBe(false);
     expect(posted).toHaveLength(2);
 
-    input().value = "   ";
+    type(input(), "   ");
     press("Enter");
     expect(posted).toHaveLength(2);
   });
@@ -92,21 +93,21 @@ describe("ChatView", () => {
   it("unsent_text_returns_to_the_input", () => {
     type Send = Extract<WebviewMessage, { type: "send" }>;
     show({});
-    input().value = "lost?";
+    type(input(), "lost?");
     press("Enter");
     const first = posted[0] as Send;
-    expect(input().value).toBe("");
+    expect(text(input())).toBe("");
 
-    input().value = "draft";
+    type(input(), "draft");
     view.sent(first.id, false);
-    expect(input().value).toBe("lost?\ndraft");
+    expect(text(input())).toBe("lost?\ndraft");
 
-    input().value = "ok";
+    type(input(), "ok");
     press("Enter");
     const second = posted[1] as Send;
     view.sent(second.id, true);
     view.sent(first.id, false); // already answered: nothing is given back twice
-    expect(input().value).toBe("");
+    expect(text(input())).toBe("");
   });
 
   describe("a message on its way", () => {
@@ -114,7 +115,7 @@ describe("ChatView", () => {
     const bubble = (id: string): HTMLElement | null => root.querySelector(`[data-block="${id}"] .user-bubble`);
     const label = (id: string): string | undefined => bubble(id)?.querySelector(".queued-label")?.textContent ?? undefined;
     const sendText = (text: string): Send => {
-      input().value = text;
+      type(input(), text);
       press("Enter");
       return posted.at(-1) as Send;
     };
@@ -144,16 +145,16 @@ describe("ChatView", () => {
       const send = sendText("lost?");
       view.sent(send.id, false);
       expect(label(send.id)).toBe("Не отправлено");
-      expect(input().value).toBe("lost?");
+      expect(text(input())).toBe("lost?");
       (root.querySelector(`[data-block="${send.id}"] [data-role="retry"]`) as HTMLButtonElement).click();
       expect(posted.at(-1)).toEqual(send);
-      expect(input().value).toBe(""); // the text went out again: no second copy in the input
+      expect(text(input())).toBe(""); // the text went out again: no second copy in the input
       expect(label(send.id)).toBe("отправляется…");
       view.sent(send.id, false);
-      input().value = "lost? and more";
+      type(input(), "lost? and more");
       (root.querySelector(`[data-block="${send.id}"] [data-role="discard"]`) as HTMLButtonElement).click();
       expect(bubble(send.id)).toBeNull();
-      expect(input().value).toBe("lost? and more"); // what the person typed since is theirs
+      expect(text(input())).toBe("lost? and more"); // what the person typed since is theirs
     });
 
     it("a_taken_back_message_returns_to_the_composer_and_a_late_one_says_it_was_delivered", async () => {
@@ -164,7 +165,7 @@ describe("ChatView", () => {
       expect(label("m1")).toBe("уже передано агенту");
       view.draft({ type: "draft", text: "later", images: [] });
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(input().value).toBe("later");
+      expect(text(input())).toBe("later");
     });
   });
 
@@ -341,7 +342,7 @@ describe("ChatView", () => {
   it("draft_message_prefills_the_composer", async () => {
     view.draft({ type: "draft", text: "Fix", images: [] });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(input().value).toBe("Fix");
+    expect(text(input())).toBe("Fix");
   });
 
   it("the_actions_button_opens_the_menu_which_asks_the_host_and_shows_its_answer", () => {

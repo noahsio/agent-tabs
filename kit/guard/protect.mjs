@@ -86,24 +86,50 @@ function spellings(dir, home) {
   return [...forms].filter((form) => form.length > 1).map(fold);
 }
 
-/** Why a bash command / eval code must be decided by a human only, or null. */
+/**
+ * Files inside an agent dir that decide what the guard and the agent may do: the hook wiring, the permission preset
+ * and the provider credentials. The state dir and the keys dir are checked as directories, below.
+ */
+const AGENT_DECISION_FILES = ["hooks.json", "hooks-state.json", "settings.json", "models.json"];
+// launchctl subcommands that could stop, replace or re-point the service's LaunchAgent.
+const LAUNCHCTL_RE = /(?<![\w-])launchctl\s+(?:bootout|bootstrap|unload|load|disable|enable|remove|stop|kickstart|submit)(?![\w-])/i;
+
+/**
+ * Why a bash command / eval code must be decided by a human only, or null.
+ *
+ * Ruling P40. What this protects is the guard's own ability to decide: its state and keys, the kit it runs from, the
+ * hook wiring and permission files, omo.jsonc, and the LaunchAgent that starts the service. It used to protect the
+ * WHOLE agent dir and the whole kit tree, which made ordinary tooling human-only for merely naming a path inside
+ * them — the person's two cards were `python3 …/binary-runtime/<v>/plugin/skills/…/find-agent-sessions.py --root
+ * <agentDir>/projects`, a read-only script OmO itself ships, run to list its own sessions. The agent's data under
+ * the agent dir (sessions, projects, memory, the unpacked runtime) is its work, not the guard's decision surface.
+ *
+ * This is the second layer, and deliberately a text heuristic: the Seatbelt profile is what actually refuses the
+ * writes (kit/sandbox/profile.mjs), and file-writing tools are hard-denied by protectedTarget above. Narrowing the
+ * heuristic does not widen what the sandbox allows.
+ */
 export function guardStateReason(text, { cwd, agentDir, home }) {
-  if (cwd && [agentDir, path.join(home, ".omo", "kit")].some((dir) => isInside(realpathOrSelf(cwd), realpathOrSelf(dir)) || isInside(cwd, dir))) {
-    return "команда запускается в папке решателя или кита";
+  const guardDirs = agentDirs(agentDir, home).flatMap((dir) => [path.join(dir, "guard"), path.join(dir, "keys")]);
+  const kit = path.join(home, ".omo", "kit");
+  // Running *inside* the state, keys or kit dir, where a relative path reaches them without naming them.
+  if (cwd && [...guardDirs, kit].some((dir) => isInside(realpathOrSelf(cwd), realpathOrSelf(dir)) || isInside(cwd, dir))) {
+    return "команда запускается в папке решателя, ключей или кита";
   }
   if (!text) return null;
   if (/agent-guard/i.test(text)) return "команда упоминает agent-guard";
   if (/guardctl/i.test(text)) return "команда вызывает guardctl";
+  if (LAUNCHCTL_RE.test(text)) return "команда управляет автозапуском (launchctl)";
   // Paths, not words: prose about the guard (a spec the code writes to a project file) names none of these.
   const joined = joinedLiterals(text);
   if (GUARD_STATE_FILE_RE.test(joined)) return "команда обращается к файлам состояния решателя (guard/rules.json, cache, answers, сокеты…)";
   if (/hooks(-state)?\.json/i.test(text)) return "команда упоминает hooks.json / hooks-state.json";
   const folded = fold(joined);
-  for (const dir of agentDirs(agentDir, home).flatMap((dir) => [path.join(dir, "guard"), path.join(dir, "keys")])) {
-    if (spellings(dir, home).some((form) => folded.includes(form))) return "команда обращается к папке решателя или ключей";
+  const names = (dirs) => dirs.some((dir) => spellings(dir, home).some((form) => folded.includes(form)));
+  if (names(guardDirs)) return "команда обращается к папке решателя или ключей";
+  if (names(agentDirs(agentDir, home).flatMap((dir) => AGENT_DECISION_FILES.map((file) => path.join(dir, file))))) {
+    return "команда обращается к настройкам агента или его хукам";
   }
-  for (const dir of [agentDir, path.join(home, ".omo", "kit")]) {
-    if (spellings(dir, home).some((form) => folded.includes(form))) return "команда обращается к папке агента или кита";
-  }
+  if (names([kit, path.join(home, ".omo", "omo.jsonc")])) return "команда обращается к киту или omo.jsonc";
+  if (names([path.join(home, "Library", "LaunchAgents")])) return "команда обращается к автозапуску (LaunchAgents)";
   return null;
 }

@@ -23,10 +23,13 @@ const GROUPS: ReadonlyArray<[GroupId, string, string]> = [
 ];
 const SWIFT_FLAGS = "swift build --disable-sandbox (и test, run); xcodebuild -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePackageSandbox=YES";
 const SANDBOX_HINT = `Под песочницей вложенная песочница запрещена ядром: Swift и Xcode собирают с флагами — ${SWIFT_FLAGS}.`;
-const NO_MODEL_NOTE = "Решатель: модель не выбрана — спорное спросит вас. Выберите модель, чтобы безобидное пропускалось без вопроса.";
+// P44: не выбранная модель — пробел в настройке, а не свидетельство о команде: служба разрешает и пишет строку в лог.
+const NO_MODEL_NOTE = "Решатель: модель не выбрана — спорное пройдёт с записью в лог, а не спросит вас. Выберите модель, чтобы спорное разбирал он.";
 const MISSING = "нет в подключениях";
 const BACKGROUND_NOTICE = "macOS покажет уведомление «Node.js Foundation может работать в фоне» — это служба защиты; не выключайте её в «Объектах входа».";
 const FIX_BEFORE_IMPORT = "исправьте поле перед импортом — иначе следующее сохранение затрёт импортированные строки";
+const KIT_STALE = "она старее установленного расширения: решают её правила, а не нынешние. Перезагрузите окно — копия обновится";
+const KIT_NOT_REFRESHED = "Копию защиты не удалось обновить до нынешней";
 
 function plural(count: number, one: string, few: string, many: string): string {
   const tens = count % 100;
@@ -251,6 +254,8 @@ export class SecuritySection implements SectionView {
   private readonly protection: HTMLElement;
   private readonly reason: HTMLElement;
   private readonly note: HTMLElement;
+  /** Which guard copy is actually running and since when — the one thing a stale installation never said out loud. */
+  private readonly installed: HTMLElement;
   private readonly importNotice: HTMLElement;
   private readonly consent: HTMLElement;
   private readonly hint: HTMLElement;
@@ -276,6 +281,7 @@ export class SecuritySection implements SectionView {
     this.protection = el("div", { class: "st-row" });
     this.reason = el("div", { class: "st-row st-broken", "data-role": "protection-reason" });
     this.note = el("p", { class: "st-s st-warn st-hint", "data-role": "protection-note" });
+    this.installed = el("div", { class: "st-s st-hint", "data-role": "installed-kit" });
     this.importNotice = el("span", { class: "st-import-notice", "data-role": "import-notice", role: "status" });
     this.consent = el("div", { class: "st-consent", "data-role": "consent", role: "group", "aria-label": "Подтверждение" });
     this.consent.hidden = true;
@@ -288,7 +294,7 @@ export class SecuritySection implements SectionView {
     this.element = el(
       "div",
       { class: "st-security" },
-      el("div", { class: "st-card st-protection" }, this.protection, this.reason, this.note, this.consent, this.hint),
+      el("div", { class: "st-card st-protection" }, this.protection, this.reason, this.note, this.installed, this.consent, this.hint),
       el("h3", { class: "st-h3" }, "Кто решает спорные команды"),
       this.decider,
       this.telegram.element,
@@ -425,7 +431,33 @@ export class SecuritySection implements SectionView {
     this.reason.hidden = view.state !== "broken";
     this.note.textContent = view.note ?? "";
     this.note.hidden = view.note === undefined;
+    this.renderInstalled(view);
     this.hint.hidden = view.state !== "on";
+  }
+
+  /**
+   * The guard copy the hook and the service really run: the extension installs a copy and that copy decides, so an
+   * extension update that nothing carried forward has to be readable here instead of looking like today's rules.
+   */
+  private renderInstalled(view: SecurityView): void {
+    const { installed, refreshError } = view;
+    const when = installed?.installedAt !== undefined ? `, установлена ${new Date(installed.installedAt).toLocaleString("ru-RU")}` : "";
+    this.installed.replaceChildren(
+      ...(installed !== undefined
+        ? [
+            el(
+              "div",
+              {},
+              "Работает копия защиты ",
+              el("span", { class: "st-mono st-url" }, ...breakable(installed.dir)),
+              `${when}${installed.stale ? ` · ${KIT_STALE}` : ""}`,
+            ),
+          ]
+        : []),
+      ...(refreshError !== undefined ? [el("div", { "data-role": "kit-refresh-error" }, `${KIT_NOT_REFRESHED}: ${refreshError}`)] : []),
+    );
+    this.installed.hidden = installed === undefined && refreshError === undefined;
+    this.installed.classList.toggle("st-warn", installed?.stale === true || refreshError !== undefined);
   }
 
   /** The person confirms what changes before anything is installed or removed. */
@@ -508,7 +540,7 @@ export class SecuritySection implements SectionView {
         ? "Без решателя каждая спорная команда ждёт твоего ответа или запрещается."
         : decider.model === undefined || decider.model === ""
           ? NO_MODEL_NOTE
-          : `Модель-решатель: ${labels.get(decider.model) ?? decider.model} — быстро пропускает безобидное (например, git push в свою ветку). Без решателя каждая спорная команда ждёт твоего ответа или запрещается.`;
+          : `Модель-решатель: ${labels.get(decider.model) ?? decider.model} — быстро пропускает безобидное (например, rm -rf папки сборки по пути из переменной). Без решателя каждая спорная команда ждёт твоего ответа или запрещается.`;
     const field = (label: string, control: HTMLElement): HTMLElement => el("div", { class: "st-field" }, el("label", {}, label), control);
     this.decider.replaceChildren(
       segmented("mode", "Кто решает", MODES, decider.mode, (mode) => this.context.act({ kind: "decider.set", mode })),

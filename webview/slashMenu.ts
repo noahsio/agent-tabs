@@ -1,6 +1,7 @@
 import type { CommandRow } from "../src/sessions/controller";
 import { MODE_INFO } from "./composer";
 import { el } from "./dom";
+import type { TextField } from "./inputField";
 import type { PopoverContent } from "./popover";
 import { HIDDEN_COMMANDS } from "./slashCatalog";
 
@@ -18,7 +19,7 @@ const LEADING_TOKEN = /^\/\S*/;
 const TYPING_TOKEN = /^\/\S*$/;
 
 export type SlashMenuHost = {
-  input: HTMLTextAreaElement;
+  input: TextField;
   show: () => void;
   hide: () => void;
 };
@@ -160,6 +161,6 @@ export class SlashMenu implements PopoverContent {
     this.host.hide();
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
-    input.dispatchEvent(new Event("input", { bubbles: true })); // the input refits its height
+    input.element.dispatchEvent(new Event("input", { bubbles: true })); // the composer catches up with the new text
   }
 }

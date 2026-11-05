@@ -10,8 +10,30 @@ export type ImageRef = { id: string; mimeType: string; name?: string };
  */
 export type Delivery = { state: "sending" } | { state: "queued"; queuedId?: string; revision?: number } | { state: "failed" };
 
+/**
+ * One question of an `ask_user_question` as the feed shows it back, with what the person answered. `options` are the
+ * rows that were on screen, descriptions included; `words` are their own words when no option says it.
+ */
+export type AnsweredQuestion = {
+  /** OmO's `header`: the question's short name, when it had one. */
+  header?: string;
+  /** The question as it was asked; absent when nothing left holds it. */
+  text?: string;
+  options?: { label: string; description?: string; chosen: boolean }[];
+  words?: string;
+  /** A question of a set they left alone. */
+  skipped?: boolean;
+};
+
+/**
+ * An answered question of the agent's, as one card: OmO's request id (the `ask_user_question` call) and one entry per
+ * question. `forkFrom` is the message whose turn asked it — where «Ответвить» from the card goes, since OmO never
+ * re-asks a question it has already recorded as settled.
+ */
+export type Answer = { questionId: string; questions: AnsweredQuestion[]; forkFrom?: string };
+
 export type Block =
-  | { kind: "user"; id: string; text: string; delivery?: Delivery; timestamp?: number; images?: ImageRef[] }
+  | { kind: "user"; id: string; text: string; delivery?: Delivery; timestamp?: number; images?: ImageRef[]; answer?: Answer }
   | {
       kind: "assistant";
       id: string;
@@ -55,8 +77,20 @@ export type Block =
       description?: string;
       /** A `todo` call: its op and texts (the feed draws a plan or a one-line update instead of the box). */
       todo?: TodoCall;
+      /**
+       * An `ask_user_question` the agent waited on (`waitForAnswer: true`): its answer card, built from the record its
+       * own result carries. The feed draws that card instead of the step; without one the call shows nothing.
+       */
+      answer?: Answer;
     }
-  | { kind: "notice"; id: string; level: "info" | "warn" | "error"; text: string };
+  | {
+      kind: "notice";
+      id: string;
+      level: "info" | "warn" | "error";
+      text: string;
+      /** Someone else's words behind «Подробнее» (a provider's refusal text): never part of the line itself. */
+      details?: string;
+    };
 
 export type Dialog = {
   id: string;

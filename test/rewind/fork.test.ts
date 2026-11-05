@@ -108,6 +108,43 @@ describe("rewind fork", () => {
   });
 });
 
+/**
+ * An answered question's card forks at the message whose turn asked it (the reducer's `forkFrom`), because OmO writes
+ * its `ask-user:settlement` before the answer: a session cut at the answer still holds a question marked settled and
+ * is never asked again (measured — see test/live/answeredQuestion.live.test.ts). Cutting at the message that led to it
+ * leaves the agent to reach the question itself, which is the only way back to answering it differently.
+ */
+describe("a fork from an answered question", () => {
+  const ASKED: Entry[] = [
+    { type: "custom", customType: "repository-identity", id: "m0", parentId: null, data: { x: 1 } },
+    user("u1", "m0", "почини каталог", "c1"),
+    {
+      type: "message",
+      id: "q1",
+      parentId: "u1",
+      message: { role: "assistant", content: [{ type: "toolCall", id: "toolu_1", name: "ask_user_question", arguments: { questions: [] } }] },
+    },
+    { type: "custom", customType: "ask-user:question", id: "k1", parentId: "q1", data: { requestId: "toolu_1", headers: ["Кэш"] } },
+    { type: "custom", customType: "ask-user:settlement", id: "k2", parentId: "k1", data: { requestId: "toolu_1", status: "answered" } },
+    user("a1", "k2", "[Answer to question toolu_1]\nКэш: Без кэша", "c2"),
+  ];
+
+  it("cutting_at_the_answer_would_keep_a_question_omo_has_already_settled", () => {
+    const { text } = buildFork(HEADER, ASKED, "a1", "new-id", NOW, "/s/orig.jsonl");
+    const kinds = text.trimEnd().split("\n").slice(1).map((line) => JSON.parse(line).customType ?? JSON.parse(line).type);
+    expect(kinds).toContain("ask-user:settlement"); // why the card forks at the message before instead
+  });
+
+  it("cutting_at_the_message_that_led_to_it_leaves_neither_the_question_nor_the_answer", () => {
+    const { text } = buildFork(HEADER, ASKED, "u1", "new-id", NOW, "/s/orig.jsonl");
+    const lines = text.trimEnd().split("\n").slice(1);
+    expect(lines.map((line) => JSON.parse(line).id)).toEqual(["m0"]);
+    expect(text).not.toContain("ask_user_question");
+    expect(text).not.toContain("Answer to question");
+    expect(forkDraft(ASKED[1] as Entry).text).toBe("почини каталог"); // their own words in the fork's composer
+  });
+});
+
 describe("forkTitle", () => {
   it("marks_a_first_fork_and_numbers_the_next_ones", () => {
     expect(forkTitle("Починить вход")).toBe("Починить вход (fork)");

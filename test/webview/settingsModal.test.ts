@@ -74,7 +74,7 @@ describe("Settings modal", () => {
     expect(modal().hidden).toBe(true);
     openSettings();
     expect(modal().hidden).toBe(false);
-    expect(navLabels()).toEqual(["Подключения", "Модели и роли", "Безопасность", "Инструменты", "Среда"]);
+    expect(navLabels()).toEqual(["Подключения", "Модели и роли", "Лесенка моделей", "Безопасность", "Инструменты", "Среда"]);
     expect(activeSection()).toBe("Подключения");
     expect(role("settings-footer").textContent).toBe("Изменения сохраняются сразу · файлы OmO, а не настройки VS Code");
     expect(posted).toContainEqual({ type: "settingsGet" });
@@ -104,7 +104,7 @@ describe("Settings modal", () => {
     openSettings();
     key(document, "Escape");
     expect(modal().hidden).toBe(true);
-    expect(document.activeElement).toBe(root.querySelector("textarea"));
+    expect(document.activeElement).toBe(root.querySelector(".input"));
 
     openSettings();
     expect(modal().hidden).toBe(false);

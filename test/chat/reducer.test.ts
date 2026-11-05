@@ -613,6 +613,22 @@ describe("chat reducer: redesigned-UI model", () => {
     expect(state).toMatchObject({ running: false, activity: "idle" });
   });
 
+  it("a_run_the_host_already_stopped_is_not_running", () => {
+    const life = (lifecycle: object) => ({ type: "session_lifecycle", lifecycle });
+    // a turn whose model request errored out: turn_end and agent_end arrive, agent_settled never does, and the
+    // lifecycle still reads "running" while naming this very run as the one it stopped
+    let state = applyFrame(initialState(), life({ state: "running", runId: "r1", activity: { kind: "model" } }));
+    expect(state).toMatchObject({ running: true, activity: "thinking" });
+    state = applyFrame(state, { type: "turn_end" });
+    state = applyFrame(state, life({ state: "running", runId: "r1", lastStop: { runId: "r1", cause: "error" } }));
+    expect(state).toMatchObject({ running: false, activity: "idle" });
+    // the next turn has its own run: the older stop says nothing about it
+    state = applyFrame(state, life({ state: "running", runId: "r2", lastStop: { runId: "r1", cause: "error" } }));
+    expect(state.running).toBe(true);
+    // a state the lifecycle has no word on leaves the turn as it was
+    expect(applyFrame(state, life({ state: "waiting_background", runId: "r2" })).running).toBe(true);
+  });
+
   it("thinking_level_tracked", () => {
     let state = applyFrame(initialState(), { type: "model_changed", model: { provider: "p", id: "m" }, thinkingLevel: "xhigh" });
     expect(state).toMatchObject({ thinkingLevel: "xhigh", model: { provider: "p", id: "m" } });
@@ -751,6 +767,158 @@ describe("chat reducer: a tool step's input", () => {
   });
 });
 
+describe("a goal OmO stopped is not a turn waiting for an answer", () => {
+  const life = (lifecycle: object) => ({ type: "session_lifecycle", lifecycle });
+  const waits = (...kinds: string[]) => ({
+    state: "waiting_human",
+    runId: "r1",
+    waitingOn: { children: 0, background: [], human: kinds.map((kind, index) => ({ kind, requestId: `w${index}`, revision: 1 })) },
+  });
+
+  // Live, OmO 5.1.59: a session resumed with a blocked goal reports waiting_human whose only human wait is the goal
+  // itself (`{kind: "goal_blocked"}`), with no pending dialog and no pending question — and it stays that way.
+  it("a_goal_or_stall_attention_ends_the_turn", () => {
+    for (const kind of ["goal_blocked", "goal_paused", "stalled", "interrupted_run"]) {
+      const state = applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(waits(kind)));
+      expect(state, kind).toMatchObject({ running: false, activity: "idle" });
+    }
+    expect(applyFrame(initialState(), life(waits("goal_blocked", "goal_paused")))).toMatchObject({ running: false, activity: "idle" });
+  });
+
+  it("a_question_or_approval_still_waits", () => {
+    for (const kinds of [["question"], ["approval"], ["goal_blocked", "question"]]) {
+      const state = applyFrame(initialState(), life(waits(...kinds)));
+      expect(state, kinds.join("+")).toMatchObject({ running: true, activity: "waiting_human" });
+    }
+  });
+
+  it("a_host_that_reports_no_waits_keeps_waiting", () => {
+    expect(applyFrame(initialState(), life({ state: "waiting_human", runId: "r1" }))).toMatchObject({ running: true, activity: "waiting_human" });
+    expect(applyFrame(initialState(), life(waits()))).toMatchObject({ running: true, activity: "waiting_human" });
+  });
+
+  it("the_stopped_run_still_wins", () => {
+    const stopped = life({ ...waits("question"), lastStop: { runId: "r1", cause: "aborted" } });
+    expect(applyFrame({ ...initialState(), running: true }, stopped)).toMatchObject({ running: false, activity: "idle" });
+  });
+
+  it("omo_s_english_resume_notice_never_reaches_the_feed", () => {
+    const notify = (message: string) => applyFrame(initialState(), { type: "extension_ui_request", method: "notify", id: "n1", message, notifyType: "info" });
+    for (const status of ["blocked", "paused"]) {
+      expect(notify(`Goal remains ${status} after session resume. Resume it explicitly after the session finishes loading.`).blocks).toEqual([]);
+    }
+    expect(notify("Goal active\nObjective: ship it\nStatus: active").blocks).toHaveLength(1); // a card the person asked for
+  });
+});
+
+describe("a provider refusal", () => {
+  // Verbatim from the person's journal (2026-11-04T20:18:42Z, gw-anthropic/claude-opus-4-8).
+  const PROVIDER_TEXT =
+    "This request triggered cyber-related safeguards. To learn about the Cyber Verification Program and apply for access, " +
+    "visit our help center: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude.";
+  const message = {
+    role: "assistant",
+    content: [],
+    timestamp: 1793823520826,
+    stopReason: "error",
+    rawStopReason: "refusal",
+    errorMessage: PROVIDER_TEXT,
+    stopDetails: { type: "refusal", explanation: PROVIDER_TEXT },
+    diagnostics: [{ type: "provider_retry_failure" }],
+  };
+  const notices = (state: ChatState) => state.blocks.filter((block): block is Extract<Block, { kind: "notice" }> => block.kind === "notice");
+
+  it("ends_the_turn_with_one_russian_line_and_the_provider_s_words_folded_away", () => {
+    const running: ChatState = { ...initialState(), running: true, activity: "thinking" };
+    const state = applyFrame(running, { type: "message_end", message });
+    expect(state).toMatchObject({ running: false, activity: "idle" });
+    expect(state.error).toBeUndefined(); // no banner: the English sentence reaches nothing the person reads
+    const lines = notices(state);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ level: "warn", text: "Модель отказалась отвечать на этот запрос — смените модель для этой сессии" });
+    expect(lines[0]?.details).toBe(PROVIDER_TEXT);
+  });
+
+  it("the_journal_shows_the_same_one_line_and_a_catch_up_adds_no_second", () => {
+    const live = applyFrame(initialState(), { type: "message_end", message });
+    const reloaded = applyEntries(initialState(), [{ type: "message", id: "e1", message }]);
+    expect(notices(reloaded).map((line) => line.id)).toEqual(notices(live).map((line) => line.id));
+    expect(notices(reloaded)[0]?.details).toBe(PROVIDER_TEXT);
+    expect(notices(applyEntries(live, [{ type: "message", id: "e1", message }]))).toHaveLength(1);
+  });
+
+  it("an_ordinary_turn_error_still_reaches_the_banner", () => {
+    const state = applyFrame(initialState(), { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "503 upstream" } });
+    expect(state.error).toBe("503 upstream");
+    expect(notices(state)).toEqual([]);
+  });
+});
+
+describe("a provider rejection", () => {
+  /**
+   * Verbatim from the person's journal — `tg_channels_manager`, 2026-11-04T18:51:29Z line 608, `gw-openai/gpt-6-astra`.
+   * Nothing typed on it: the 0.4.14 refusal detector cannot see it, so its English sentence went to the red banner.
+   */
+  const PROVIDER_TEXT =
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. " +
+    "If you’re doing authorized security work that requires more cyber permissive safeguards, apply for Daybreak access " +
+    "via https://platform.openai.com/settings/organization/status-and-access before retrying.";
+  const message = {
+    role: "assistant",
+    content: [{ type: "thinking", thinking: "…" }],
+    api: "openai-responses",
+    provider: "gw-openai",
+    model: "gpt-6-astra",
+    timestamp: 1793880180189,
+    usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } },
+    stopReason: "error",
+    errorMessage: PROVIDER_TEXT,
+    timing: { requestedAt: 1793880159994, firstTokenAt: 1793880178285, lastTokenAt: 1793880178285, endedAt: 1793880180189, generationMs: 1 },
+  };
+  const notices = (state: ChatState) => state.blocks.filter((block): block is Extract<Block, { kind: "notice" }> => block.kind === "notice");
+
+  it("reads_as_the_quiet_russian_line_and_never_as_the_banner", () => {
+    const running: ChatState = { ...initialState(), running: true, activity: "thinking" };
+    const state = applyFrame(running, { type: "message_end", message });
+    expect(state.error).toBeUndefined(); // the whole point: this English sentence reached the red banner before
+    expect(state).toMatchObject({ running: false, activity: "idle" });
+    const lines = notices(state);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ level: "warn", text: "Провайдер отклонил запрос — смените модель для этой сессии" });
+    expect(lines[0]?.details).toBe(PROVIDER_TEXT);
+  });
+
+  it("the_thinking_the_model_did_before_it_was_rejected_is_kept_and_carries_no_prose", () => {
+    const bubbles = applyFrame(initialState(), { type: "message_end", message }).blocks.filter((block) => block.kind === "assistant");
+    expect(bubbles).toHaveLength(1);
+    expect(bubbles[0]).toMatchObject({ text: "", thinking: "…", streaming: false });
+  });
+
+  it("the_journal_shows_the_same_one_line_and_a_catch_up_adds_no_second", () => {
+    const live = applyFrame(initialState(), { type: "message_end", message });
+    const reloaded = applyEntries(initialState(), [{ type: "message", id: "e1", message }]);
+    expect(notices(reloaded).map((line) => line.id)).toEqual(notices(live).map((line) => line.id));
+    expect(notices(reloaded)[0]?.details).toBe(PROVIDER_TEXT);
+    expect(notices(applyEntries(live, [{ type: "message", id: "e1", message }]))).toHaveLength(1);
+  });
+
+  it("the_shapes_that_only_look_like_it_still_reach_the_banner", () => {
+    // every one of these carries totalTokens 0 and words of its own; none of them ever began a response
+    const near = [
+      { ...message, content: [], errorMessage: "Our servers are currently overloaded. Please try again later.", timing: { requestedAt: 1, endedAt: 10_007 } },
+      { ...message, content: [], errorMessage: "Idle timeout waiting for provider stream after 300000ms", timing: { requestedAt: 1, endedAt: 300_565 } },
+      { ...message, providerDiagnostic: { category: "rate_limit", code: "rate_limit_error", httpStatus: 429 } },
+      { ...message, providerDiagnostic: { category: "context_limit", code: "context_length_exceeded" } },
+      { ...message, providerDiagnostic: { category: "auth", code: "invalid_api_key" } },
+    ];
+    for (const candidate of near) {
+      const state = applyFrame(initialState(), { type: "message_end", message: candidate });
+      expect(state.error).toBe(candidate.errorMessage);
+      expect(notices(state)).toEqual([]);
+    }
+  });
+});
+
 describe("housekeeping notices", () => {
   const notify = (message: string, notifyType?: string) =>
     applyFrame(initialState(), { type: "extension_ui_request", method: "notify", id: `n:${message}`, message, ...(notifyType === undefined ? {} : { notifyType }) });
@@ -768,5 +936,181 @@ describe("housekeeping notices", () => {
 
   it("an_ordinary_notice_still_shows", () => {
     expect(notify("Сервер вернул 500").blocks).toHaveLength(1);
+  });
+});
+
+/**
+ * The two ways OmO records an answer to `ask_user_question`, both measured against a live host (see
+ * test/live/answeredQuestion.live.test.ts): with `waitForAnswer: false` the answer arrives as a user message of protocol
+ * text whose questions live only in the call's arguments, and with `waitForAnswer: true` the call's own result carries
+ * questions and answers together. Either way the feed gets one answer card and never OmO's wording.
+ */
+describe("chat reducer: an answered question", () => {
+  const ID = "toolu_01Ch2MZAiBWY6S1fa8Lm31mg";
+  const CACHE = {
+    header: "Кэш",
+    question: "Как хранить кэш каталога?",
+    multiSelect: false,
+    options: [
+      { label: "TTL и запасной кэш", description: "Кэш с временем жизни и запасным слоем" },
+      { label: "Только на диске", description: "Кэш хранится в файлах на диске" },
+      { label: "Без кэша" },
+    ],
+  };
+  const KEY = {
+    header: "Ключ",
+    question: "Какой ключ использовать?",
+    multiSelect: false,
+    options: [
+      { label: "age", description: "Современное шифрование age" },
+      { label: "gpg", description: "Шифрование через GnuPG" },
+    ],
+  };
+  const QUESTIONS = [CACHE, KEY];
+
+  /** OmO's own answer text, part for part as it writes it: a chosen option, then words in a section of their own. */
+  const ANSWER_PARTS = [
+    { type: "text", text: `[Answer to question ${ID}]\nКэш: Только на диске\nКлюч: (see [The user's answer to Ключ for question ${ID}] below)` },
+    { type: "text", text: `[The user's answer to Ключ for question ${ID}]` },
+    { type: "text", text: "не понимаю что это" },
+  ];
+  const RAW = ANSWER_PARTS.map((part) => part.text).join("");
+
+  const prompt = (text: string, id = "c1") => ({ type: "message", id: "e1", message: { role: "user", content: text, clientMessageId: id, timestamp: 1 } });
+  const call = (questions: unknown[] = QUESTIONS) => ({
+    type: "message",
+    id: "e2",
+    message: { role: "assistant", content: [{ type: "toolCall", id: ID, name: "ask_user_question", arguments: { questions, waitForAnswer: false } }], timestamp: 2 },
+  });
+  const accepted = () => ({
+    type: "message",
+    id: "e3",
+    message: {
+      role: "toolResult",
+      toolCallId: ID,
+      toolName: "ask_user_question",
+      content: [{ type: "text", text: "Question accepted; the answer will arrive as a user message." }],
+      details: { accepted: true, requestId: ID, status: "pending" },
+    },
+  });
+  const answerEntry = (parts: unknown[] = ANSWER_PARTS) => ({ type: "message", id: "e4", message: { role: "user", content: parts, timestamp: 4 } });
+
+  const card = (state: ChatState) => state.blocks.flatMap((block) => ((block.kind === "user" || block.kind === "tool") && block.answer ? [block.answer] : []));
+
+  it("a_journal_answer_becomes_a_card_of_the_questions_options_and_descriptions", () => {
+    const state = applyEntries(initialState(), [prompt("почини каталог"), call(), accepted(), answerEntry()]);
+    expect(card(state)).toEqual([
+      {
+        questionId: ID,
+        forkFrom: "c1",
+        questions: [
+          {
+            header: "Кэш",
+            text: "Как хранить кэш каталога?",
+            options: [
+              { label: "TTL и запасной кэш", description: "Кэш с временем жизни и запасным слоем", chosen: false },
+              { label: "Только на диске", description: "Кэш хранится в файлах на диске", chosen: true },
+              { label: "Без кэша", chosen: false },
+            ],
+          },
+          {
+            header: "Ключ",
+            text: "Какой ключ использовать?",
+            options: [
+              { label: "age", description: "Современное шифрование age", chosen: false },
+              { label: "gpg", description: "Шифрование через GnuPG", chosen: false },
+            ],
+            words: "не понимаю что это",
+          },
+        ],
+      },
+    ]);
+    // the answer's own block keeps OmO's text (the queue is matched by it), and the call shows no JSON of its own
+    const answered = state.blocks.find((block) => block.kind === "user" && block.answer !== undefined);
+    expect(answered?.kind === "user" && answered.text).toBe(RAW);
+    expect(tools(state).find((block) => block.name === "ask_user_question")?.input).toBeUndefined();
+  });
+
+  it("a_question_left_alone_is_in_the_card_as_unanswered", () => {
+    const text = `[Answer to question ${ID}]\nКэш: Без кэша\nUnanswered: Ключ`;
+    const state = applyEntries(initialState(), [prompt("почини каталог"), call(), accepted(), answerEntry([{ type: "text", text }])]);
+    const [answer] = card(state);
+    expect(answer?.questions.map((question) => [question.header, question.skipped === true])).toEqual([
+      ["Кэш", false],
+      ["Ключ", true],
+    ]);
+    expect(answer?.questions[1]?.options?.every((option) => !option.chosen)).toBe(true);
+  });
+
+  it("a_question_the_agent_waited_on_builds_the_same_card_from_its_own_result", () => {
+    const result = {
+      type: "message",
+      id: "e3",
+      message: {
+        role: "toolResult",
+        toolCallId: ID,
+        toolName: "ask_user_question",
+        content: [{ type: "text", text: `Кэш: Только на диске\nКлюч: (see [The user's answer to Ключ for question ${ID}] below)` }],
+        details: {
+          questions: QUESTIONS,
+          answers: { "Как хранить кэш каталога?": "Только на диске", "Какой ключ использовать?": "не понимаю что это" },
+          unanswered: [],
+          status: "answered",
+        },
+      },
+    };
+    const state = applyEntries(initialState(), [prompt("почини каталог"), call(), result]);
+    const [answer] = card(state);
+    expect(answer?.forkFrom).toBe("c1");
+    expect(answer?.questions[0]?.options?.find((option) => option.chosen)?.label).toBe("Только на диске");
+    expect(answer?.questions[1]?.words).toBe("не понимаю что это");
+    expect(answer?.questions[1]?.options?.map((option) => option.description)).toEqual(["Современное шифрование age", "Шифрование через GnuPG"]);
+  });
+
+  it("live_frames_build_the_card_as_the_journal_does", () => {
+    const asked = applyFrame(
+      applyFrame(initialState(), { type: "message_start", message: { role: "user", content: "почини каталог", clientMessageId: "c1", timestamp: 1 } }),
+      { type: "message_update", assistantMessageEvent: { type: "toolcall_end", toolCall: { id: ID, name: "ask_user_question", arguments: { questions: QUESTIONS } } } },
+    );
+    const answered = applyFrame(asked, { type: "message_start", message: { role: "user", content: ANSWER_PARTS, timestamp: 4 } });
+    const [answer] = card(answered);
+    expect(answer?.questionId).toBe(ID);
+    expect(answer?.forkFrom).toBe("c1");
+    expect(answer?.questions.map((question) => question.header)).toEqual(["Кэш", "Ключ"]);
+
+    // and the other way round: the call the agent waited on, settled by its own result frame
+    const waited = applyFrame(asked, {
+      type: "tool_execution_end",
+      toolCallId: ID,
+      toolName: "ask_user_question",
+      result: { content: [{ type: "text", text: "Кэш: Без кэша" }], details: { questions: QUESTIONS, answers: { "Как хранить кэш каталога?": "Без кэша" }, status: "answered" } },
+    });
+    expect(card(waited)[0]?.questions[0]?.options?.find((option) => option.chosen)?.label).toBe("Без кэша");
+  });
+
+  it("an_answer_waiting_in_omos_queue_is_already_a_card", () => {
+    const asked = applyEntries(initialState(), [prompt("почини каталог"), call(), accepted()]);
+    const queued = applyFrame(asked, { type: "queue_update", ordered: [{ text: RAW, queuedId: "q_1" }] });
+    const waiting = queued.blocks.find((block) => block.kind === "user" && block.delivery !== undefined);
+    expect(waiting?.kind === "user" && waiting.answer?.questions[0]?.text).toBe("Как хранить кэш каталога?");
+  });
+
+  it("an_answer_whose_question_is_gone_keeps_the_words_and_invents_nothing", () => {
+    const state = applyEntries(initialState(), [prompt("почини каталог"), answerEntry()]);
+    expect(card(state)).toEqual([
+      {
+        questionId: ID,
+        forkFrom: "c1",
+        questions: [
+          { header: "Кэш", words: "Только на диске" },
+          { header: "Ключ", words: "не понимаю что это" },
+        ],
+      },
+    ]);
+  });
+
+  it("an_ordinary_message_that_merely_mentions_the_wording_is_still_a_message", () => {
+    const state = applyEntries(initialState(), [prompt("смотри: [Answer to question …] — что это за текст?")]);
+    expect(card(state)).toEqual([]);
   });
 });

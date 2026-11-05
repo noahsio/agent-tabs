@@ -345,6 +345,14 @@ const CATALOG_FIELDS = ["name", "reasoning", "thinkingLevelMap", "input", "conte
 /**
  * Keeps a still-served model's own fields (e.g. `compat`, or a capability the server stopped mentioning) and takes
  * from the server every field it did send; a new model is the whole normalised set.
+ *
+ * A model nobody has said anything about is written as thinking. OmO reads a missing `reasoning` as «cannot think» and
+ * then answers `get_available_thinking_levels` with `["off"]` — a denial the gateway never made: an OpenAI-style
+ * `/models` list is bare ids and describes no capability either way. Writing that silence into the catalogue as a
+ * denial took the levels away from every such model (live proof in `test/live/thinkingLevels.live.test.ts`: a bare
+ * entry answered `["off"]`, exactly like a model marked `reasoning: false`). So absence of information now
+ * means «let OmO decide»: it owns the ladder, how many steps it has and where a model starts on it. An explicit
+ * `reasoning: false` — from the server, or edited into the entry by hand — still wins and survives every refresh.
  */
 function mergeModels(previous: Provider | undefined, served: readonly ServedModel[]): Array<Record<string, unknown>> {
   const before = new Map(providerModels(previous ?? {}).map((model) => [model["id"], model]));
@@ -352,6 +360,7 @@ function mergeModels(previous: Provider | undefined, served: readonly ServedMode
     const entry: Record<string, unknown> = { ...before.get(model.id), id: model.id };
     for (const field of CATALOG_FIELDS) if (model[field] !== undefined) entry[field] = model[field];
     entry["name"] ??= model.id;
+    entry["reasoning"] ??= true;
     return entry;
   });
 }

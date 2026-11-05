@@ -3,15 +3,18 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { guardFilesDir } from "../../kit/guard/lifecycle.mjs";
 import { hostSocketPath, profilePath, protectedHostPidPath, protectedHostSocketPath } from "../../kit/sandbox/profile.mjs";
 import { launchAgentPath, serviceLabel } from "../../src/guard/launchAgent";
 import {
   chooseServiceNode,
   disableProtection,
   enableProtection,
+  installedKit,
   protectionState,
   protectionStatus,
   refreshProfile,
+  refreshProtection,
   hostRestarter,
   isSandboxed,
   systemProtectionDeps,
@@ -459,6 +462,145 @@ describe("protection lifecycle", () => {
     expect(text).toContain(`(subpath "${path.join(fs.realpathSync(link), "guard")}")`);
     expect(text).toContain(`(subpath "${path.join(link, "guard")}")`);
   });
+});
+
+/**
+ * The guard the person runs is the installed copy, not the extension's own files: an update that only changes
+ * `kit/guard` leaves them on the copy protection was turned on with until something brings it forward.
+ */
+describe("the installed guard copy follows the extension", () => {
+  /** The kit this «extension» ships, editable: an update to it is what the refresh has to notice. */
+  let bundled: string;
+  let planned: number;
+
+  beforeEach(() => {
+    bundled = path.join(root, "kit");
+    fs.cpSync(KIT, bundled, { recursive: true });
+    deps.kitDir = bundled;
+    planned = 0;
+    const loginPath = deps.loginPath;
+    deps.loginPath = async () => {
+      planned += 1;
+      return loginPath();
+    };
+  });
+
+  const source = (): string => path.join(bundled, "guard");
+  /** The extension is updated: one guard file changes, so the content hash — and the installed dir — change with it. */
+  const update = (): void => fs.appendFileSync(path.join(source(), "classify.mjs"), "\n// the extension was updated\n");
+  const running = (): string => path.dirname(/'([^']*\/hook\.mjs)'/.exec(ourGroups()[0]!.hooks[0]!.command)![1]!);
+  const shipped = (): string => guardFilesDir(paths.home, source());
+  /** The first service start fails; the one that puts the previous service back does not. */
+  const serviceWontStart = (): void => {
+    const real = deps.waitForSocket;
+    let failed = false;
+    deps.waitForSocket = async (file, ms) => {
+      if (failed) return real(file, ms);
+      failed = true;
+      calls.push("socket");
+      return false;
+    };
+  };
+
+  it("a_stale_copy_is_brought_forward_at_activation_without_restarting_the_host", async () => {
+    await enableProtection(paths, deps);
+    const before = running();
+    const denies = JSON.parse(fs.readFileSync(inputs(), "utf8")).writableDirs;
+    update();
+    expect(running()).toBe(before); // nothing refreshes it by itself: this is the bug
+    expect(installedKit(paths, source())).toEqual({ dir: before, installedAt: expect.any(Number), stale: true });
+
+    calls = [];
+    planned = 0;
+    deps.loginPath = async () => {
+      planned += 1;
+      return [nodeBin, userBin, paths.home, path.join(root, "later")]; // the PATH grew since the person consented
+    };
+    expect(await refreshProtection(paths, deps)).toEqual({ kind: "refreshed", kitDir: shipped() });
+
+    expect(running()).toBe(shipped());
+    expect(ourGroups("SessionStart")[0]!.hooks[0]!.command).toContain(shipped());
+    expect(fs.readFileSync(plistFile(), "utf8")).toContain(path.join(shipped(), "service.mjs"));
+    expect(fs.readFileSync(path.join(shipped(), "classify.mjs"), "utf8")).toContain("the extension was updated");
+    expect(calls).toContain("bootstrap"); // the service runs the new code
+    expect(calls).not.toContain("restart"); // nobody's turn is interrupted: the sandbox profile did not change
+    expect(await protectionState(paths, vscode)).toBe("on");
+    expect(installedKit(paths, source())).toEqual({ dir: shipped(), installedAt: expect.any(Number), stale: false });
+    // what the person consented to close stays as it was, and the login shell is never run for a refresh
+    expect(JSON.parse(fs.readFileSync(inputs(), "utf8")).writableDirs).toEqual(denies);
+    expect(planned).toBe(0);
+    // the copy a session already started with keeps working until that session ends
+    expect(exists(path.join(before, "hook.mjs"))).toBe(true);
+  }, 20_000);
+
+  it("an_up_to_date_copy_is_left_alone", async () => {
+    await enableProtection(paths, deps);
+    const before = snapshot();
+    calls = [];
+    expect(await refreshProtection(paths, deps)).toEqual({ kind: "fresh" });
+    expect(calls).toEqual([]); // no launchctl, no host restart, nothing written
+    expect(snapshot()).toEqual(before);
+    expect(await protectionState(paths, vscode)).toBe("on");
+  });
+
+  it("a_drifted_plist_or_hook_entry_is_refreshed_too", async () => {
+    await enableProtection(paths, deps);
+    const good = fs.readFileSync(plistFile(), "utf8");
+    fs.writeFileSync(plistFile(), good.replace("<key>KeepAlive</key>", "<key>Disabled</key>\n  <false/>\n  <key>KeepAlive</key>"));
+    expect(await refreshProtection(paths, deps)).toEqual({ kind: "refreshed", kitDir: shipped() });
+    expect(fs.readFileSync(plistFile(), "utf8")).toBe(good);
+
+    // the hook entry is ours but not what this version writes (an older timeout)
+    const text = fs.readFileSync(paths.hooksJson, "utf8");
+    fs.writeFileSync(paths.hooksJson, text.replace(/"timeout": \d+/g, '"timeout": 60'));
+    expect(await refreshProtection(paths, deps)).toEqual({ kind: "refreshed", kitDir: shipped() });
+    expect(fs.readFileSync(paths.hooksJson, "utf8")).toBe(text);
+  }, 20_000);
+
+  it("two_windows_activating_at_once_refresh_once", async () => {
+    await enableProtection(paths, deps);
+    update();
+    calls = [];
+    const outcomes = await Promise.all([refreshProtection(paths, deps), refreshProtection(paths, deps)]);
+    expect(calls.filter((call) => call === "bootstrap")).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.kind === "refreshed")).toEqual([{ kind: "refreshed", kitDir: shipped() }]);
+    // the window that did not get the lock either waited for nothing or found it already done
+    expect(["elsewhere", "fresh"]).toContain(outcomes.find((outcome) => outcome.kind !== "refreshed")?.kind);
+    expect(running()).toBe(shipped());
+    expect(await protectionState(paths, vscode)).toBe("on");
+  }, 20_000);
+
+  it("a_failed_refresh_says_why_and_leaves_the_old_copy_running", async () => {
+    await enableProtection(paths, deps);
+    const before = running();
+    update();
+    serviceWontStart();
+    const outcome = await refreshProtection(paths, deps);
+    expect(outcome).toEqual({ kind: "failed", reason: expect.stringMatching(/служба защиты не запустилась/i) });
+    // the pair agrees again: the plist runs the copy the hook names, and that service answers
+    expect(running()).toBe(before);
+    expect(fs.readFileSync(plistFile(), "utf8")).toContain(path.join(before, "service.mjs"));
+    expect(await protectionState(paths, vscode)).toBe("on");
+    expect(installedKit(paths, source())?.stale).toBe(true);
+  }, 20_000);
+
+  it("protection_off_means_no_refresh_at_all", async () => {
+    expect(await refreshProtection(paths, deps)).toEqual({ kind: "absent" });
+    expect(installedKit(paths, source())).toBeUndefined();
+    // a leftover v1 hook is not an installation of ours either
+    const v1 = `'${process.execPath}' '${path.join(paths.home, ".omo/kit/abc123def456/guard/agent-guard.mjs")}'`;
+    fs.writeFileSync(paths.hooksJson, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: "command", command: v1 }] }] } }));
+    expect(await refreshProtection(paths, deps)).toEqual({ kind: "absent" });
+    expect(installedKit(paths, source())).toBeUndefined();
+
+    await enableProtection(paths, deps);
+    await disableProtection(paths, deps);
+    update();
+    calls = [];
+    expect(await refreshProtection(paths, deps)).toEqual({ kind: "absent" });
+    expect(calls).toEqual([]);
+    expect(exists(plistFile())).toBe(false);
+  }, 20_000);
 });
 
 describe("service node and login PATH (P33, N4)", () => {

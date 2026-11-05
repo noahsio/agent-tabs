@@ -41,7 +41,13 @@ export const GROUP_RULES = {
       id: "secrets-access",
       label: "access to keys and credentials",
       patterns: [
-        "(\\.ssh(\\s|$|[\"'])|\\.aws/credentials|private\\.key|id_rsa|id_ed25519|keystore|\\.pem([^A-Za-z0-9]|$))",
+        // A public CA trust store is not a credential: cacert.pem, /etc/ssl/cert.pem, certifi's bundle and the env
+        // vars that point at them are how ordinary code reaches the system roots (P43 measurement: they were 79 of
+        // the 234 questions left on the person's corpus). A real key file still matches.
+        // `(?<!\\)`: a backslash-escaped dot is regex or glob syntax, not a path on disk. The card the person
+        // photographed was `grep -n '^\*\*/\*\.pem$' deploy/.rsyncignore` — a command that CHECKS .pem files are
+        // excluded from a deploy, read as access to a key. Spelling `.pem` inside a pattern reads no key.
+        "(\\.ssh(\\s|$|[\"'])|\\.aws/credentials|private\\.key|id_rsa|id_ed25519|keystore|(?<!cacert)(?<!/cert)(?<!ca-bundle)(?<!ca-certificates)(?<!\\\\)\\.pem([^A-Za-z0-9]|$))",
         // Anything under ~/.ssh/ except a pure read (cat/grep/head/tail/less/ssh -G/ssh-keygen -l, no redirect) of config, known_hosts or *.pub.
         "^(?!(cat|grep|head|tail|less|ssh\\s+-G|ssh-keygen\\s+(-\\S+\\s+)*-l)\\s(?![\\s\\S]*>(?!\\s*/dev/null(\\s|$)|&\\d))(?![\\s\\S]*\\.ssh/(?!(config|known_hosts)(?![\\w.-])|[\\w.-]+\\.pub(?![\\w.-]))))[\\s\\S]*\\.ssh/",
       ],
@@ -276,8 +282,21 @@ const globToRegExp = (glob) => new RegExp(`^${globSource(glob)}$`, "s");
 const askToRegExp = (glob) => (glob.includes("*") ? globToRegExp(glob) : new RegExp(`(?<![\\w-])${globSource(glob)}(?![\\w-])`, "s"));
 
 /** Escalation categories in force: the switched-on groups, then the built-in ones. */
+/**
+ * Ruling P45: the ask list is destructive forms and the guard's own decision surface. Nothing else interrupts the
+ * person. These ids keep their place in a
+ * rules file (so an older file still validates, and the Безопасность section still round-trips it) but no longer
+ * match anything: `git push`, the history group, secrets, global installs, `sudo`, `chmod 777` and curl-with-a-body
+ * were all questions about things that are not destructive and cannot disable the guard. The DENY set is untouched —
+ * everything it denied it still denies — and so is guard-state, docker mounts that escape the sandbox, and the
+ * deny-set forms seen on another host.
+ */
+const RETIRED_ASK_IDS = new Set(["sudo", "chmod-777", "curl-write"]);
+const RETIRED_ASK_GROUPS = new Set(["git-push", "history", "secrets", "global-install", "external-ip"]);
+
 export function escalationRules(rules) {
-  return [...GROUP_IDS.flatMap((group) => (rules.groups[group] ? (GROUP_RULES[group] ?? []) : [])), ...rules.builtinEscalate];
+  const groups = GROUP_IDS.filter((group) => !RETIRED_ASK_GROUPS.has(group) && rules.groups[group]);
+  return [...groups.flatMap((group) => GROUP_RULES[group] ?? []), ...rules.builtinEscalate.filter((entry) => !RETIRED_ASK_IDS.has(entry.id))];
 }
 
 const compiled = new WeakMap();
@@ -296,10 +315,14 @@ export function compileRules(rules) {
         id: entry.id,
         regex: new RegExp(entry.pattern),
         denyIf: entry.denyIf.map((pattern) => new RegExp(pattern)),
-        escalateIf: (entry.escalateIf ?? []).map((pattern) => new RegExp(pattern)),
+        escalateIf: [], // P45: retired with the rest of the ask list; denyIf below is untouched
       })),
+      // P45: the bare-public-IP check is retired. REMOTE_CHECKS is not: every line of it, deny and ask alike, is a
+      // destructive form, and the person's Seatbelt sandbox does not reach the other machine — so `rm -rf /srv/app`,
+      // `docker volume prune`, `DROP TABLE`, a `DELETE FROM` with no WHERE and `pkill` over ssh/remote-exec still ask.
+      // A remote command that is not one of those forms (`ssh host uptime`, `remote-exec exec 'npm ci'`) is allowed.
       remote: { denyIf: REMOTE_CHECKS.denyIf.map((pattern) => new RegExp(pattern)), escalateIf: REMOTE_CHECKS.escalateIf.map((pattern) => new RegExp(pattern)) },
-      ipCheck: rules.groups["external-ip"],
+      ipCheck: false,
       whitelist: rules.ipWhitelist.map((entry) => parseCidr(entry.cidr)),
     };
     compiled.set(rules, result);

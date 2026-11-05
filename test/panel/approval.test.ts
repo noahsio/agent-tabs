@@ -1,10 +1,11 @@
-import { mkdir, symlink } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 import { DaemonManager, hostSocketPath } from "../../src/daemon";
-import type { GuardEvent, PendingView, RulesV2 } from "../../src/guard/admin";
+import type { ClaimVerdict, GuardEvent, GuardSubscription, PendingView, RulesV2 } from "../../src/guard/admin";
 import { GuardApprovals, type GuardAdminPort } from "../../src/guard/approvals";
+import { TaskRegistry } from "../../src/guard/tasks";
 import { ChatPanel, type PanelHost } from "../../src/panel/ChatPanel";
 import { PanelRegistry } from "../../src/panel/registry";
 import { FakeDaemon, type Frame } from "../helpers/fakeDaemon";
@@ -46,6 +47,8 @@ class FakeAdmin implements GuardAdminPort {
   answerError: string | undefined;
   /** Held answers: resolved by the test (a double click lands while the first is in flight). */
   hold: Array<() => void> | undefined;
+  /** Claim answers this window sent back, in order. */
+  readonly claims: Array<{ id: string; verdict: ClaimVerdict; owner?: string }> = [];
 
   async rulesGet(): Promise<RulesV2> {
     return { human: { waitSeconds: 300, card: this.card, telegram: false } } as RulesV2;
@@ -55,16 +58,19 @@ class FakeAdmin implements GuardAdminPort {
     return this.open;
   }
 
-  subscribe(listener: (event: GuardEvent) => void, onGiveUp?: () => void, onSubscribed?: () => void): () => void {
+  subscribe(listener: (event: GuardEvent) => void, onGiveUp?: () => void, onSubscribed?: () => void): GuardSubscription {
     this.listener = listener;
     this.giveUp = onGiveUp;
     this.confirmed = onSubscribed;
     this.subscriptions += 1;
     onSubscribed?.();
     for (const event of this.replay) listener(event);
-    return () => {
-      this.stops += 1;
-      this.listener = undefined;
+    return {
+      stop: () => {
+        this.stops += 1;
+        this.listener = undefined;
+      },
+      claim: (id, verdict, owner) => void this.claims.push({ id, verdict, ...(owner !== undefined ? { owner } : {}) }),
     };
   }
 
@@ -166,8 +172,18 @@ let secrets: string[];
 let admin: FakeAdmin;
 let protectionOn: boolean;
 let approvals: GuardApprovals;
+let tasks: TaskRegistry;
+/** Requests the window raised outside the chats, with the owner it named. */
+let outside: Array<{ id: string; owner: string | undefined }>;
 let tabS1: Tab;
 let tabS2: Tab;
+
+/** One senpi-task record, written where OmO writes it under the environment's agent dir. */
+async function taskRecord(fields: { task_id: string; child_session_id: string; parent_session_id: string; root_session_id?: string }): Promise<void> {
+  const dir = join(daemon.agentDir, "projects", "proj", "senpi-task", "tasks");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${fields.task_id}.json`), JSON.stringify({ status: "running", depth: 1, ...fields }));
+}
 
 async function attach(sessionPath: string): Promise<Tab> {
   const fake = fakePanel();
@@ -192,10 +208,18 @@ beforeEach(async () => {
   host = windowHost(secrets);
   admin = new FakeAdmin();
   protectionOn = true;
+  outside = [];
+  // the real registry over the fake daemon's agent dir: a test writes OmO's own task records into it
+  tasks = new TaskRegistry(daemon.agentDir, { staleMs: 0, layoutStaleMs: 0 });
   approvals = new GuardApprovals({
     protectionOn: async () => protectionOn,
     connect: async () => admin,
     panels: () => host.panels,
+    rootOf: (session) => tasks.rootOf(session),
+    outside: (request, owner) => {
+      outside.push({ id: request.id, owner });
+      return () => void outside.splice(outside.findIndex((raised) => raised.id === request.id), 1);
+    },
     log: () => undefined,
     retryDelaysMs: [],
   });
@@ -218,11 +242,149 @@ describe("guard approvals in the chat", () => {
     expect(guardMessages(tabS2)).toEqual([]);
   });
 
-  it("a_request_of_an_unknown_session_goes_to_every_panel_labelled_with_its_cwd", () => {
+  it("a_request_of_an_unknown_session_goes_to_every_panel_with_nothing_claimed_about_it", () => {
     admin.emit({ event: "pending", item: pending({ session: "terminal-session" }) });
     for (const tab of [tabS1, tabS2]) {
+      // no `owner`: the card says we could not attribute it, rather than naming a session we do not know
       expect(guardMessages(tab)).toEqual([{ type: "guardRequest", request: expect.objectContaining({ id: "abc123abc123", cwd: "/work/proj" }), elsewhere: true }]);
     }
+  });
+
+  it("a_childs_request_reaches_only_the_tab_of_the_session_that_spawned_it", async () => {
+    await taskRecord({ task_id: "st_1", child_session_id: "child-of-s2", parent_session_id: "s2", root_session_id: "s2" });
+    admin.emit({ event: "pending", item: pending({ session: "child-of-s2" }) });
+    expect(guardMessages(tabS2)).toEqual([{ type: "guardRequest", request: expect.objectContaining({ id: "abc123abc123" }) }]);
+    expect(guardMessages(tabS1)).toEqual([]);
+  });
+
+  it("a_grandchilds_request_resolves_through_two_hops_to_its_root_tab", async () => {
+    await taskRecord({ task_id: "st_1", child_session_id: "child-of-s1", parent_session_id: "s1" });
+    await taskRecord({ task_id: "st_2", child_session_id: "grandchild", parent_session_id: "child-of-s1" });
+    admin.emit({ event: "pending", item: pending({ session: "grandchild" }) });
+    expect(guardMessages(tabS1)).toEqual([{ type: "guardRequest", request: expect.objectContaining({ id: "abc123abc123" }) }]);
+    expect(guardMessages(tabS2)).toEqual([]);
+  });
+
+  it("a_claim_round_is_answered_own_for_a_session_this_window_has_open", () => {
+    admin.emit({ event: "claim", id: "r1", session: "s2" });
+    expect(admin.claims).toEqual([{ id: "r1", verdict: "own" }]);
+  });
+
+  it("a_claim_round_is_answered_own_for_a_child_of_a_session_this_window_has_open", async () => {
+    await taskRecord({ task_id: "st_1", child_session_id: "child-of-s1", parent_session_id: "s1", root_session_id: "s1" });
+    admin.emit({ event: "claim", id: "r2", session: "child-of-s1" });
+    expect(admin.claims).toEqual([{ id: "r2", verdict: "own" }]);
+  });
+
+  it("a_claim_round_is_answered_knows_with_the_owner_when_no_tab_here_has_it", async () => {
+    await taskRecord({ task_id: "st_1", child_session_id: "child-of-s9", parent_session_id: "s9-not-open", root_session_id: "s9-not-open" });
+    admin.emit({ event: "claim", id: "r3", session: "child-of-s9" });
+    expect(admin.claims).toEqual([{ id: "r3", verdict: "knows", owner: "s9-not-open" }]);
+  });
+
+  it("a_claim_round_is_answered_no_for_a_session_nothing_here_claims", () => {
+    admin.emit({ event: "claim", id: "r4", session: "a-terminal" });
+    expect(admin.claims).toEqual([{ id: "r4", verdict: "no" }]);
+  });
+
+  it("a_tab_that_closes_hands_its_request_back_to_the_service", async () => {
+    await taskRecord({ task_id: "st_1", child_session_id: "child-of-s2", parent_session_id: "s2", root_session_id: "s2" });
+    admin.emit({ event: "pending", item: pending({ session: "child-of-s2" }), only: true });
+    expect(guardMessages(tabS2)).toHaveLength(1);
+    host.panels.delete(tabS2.chat); // the person closed that tab
+    approvals.panelsChanged();
+    expect(admin.claims).toEqual([{ id: "abc123abc123", verdict: "no" }]);
+  });
+
+  it("a_request_the_service_sent_outside_the_chats_puts_no_card_in_any_tab", async () => {
+    await taskRecord({ task_id: "st_1", child_session_id: "child-of-s9", parent_session_id: "s9-not-open", root_session_id: "s9-not-open" });
+    admin.emit({ event: "pending", item: pending({ session: "child-of-s9" }), outside: { owner: "s9-not-open" } });
+    expect(outside).toEqual([{ id: "abc123abc123", owner: "s9-not-open" }]);
+    expect(guardMessages(tabS1)).toEqual([]); // nothing a chat did not ask for
+    expect(guardMessages(tabS2)).toEqual([]);
+  });
+
+  it("a_request_raised_outside_the_chats_is_taken_down_when_it_ends", () => {
+    admin.emit({ event: "pending", item: pending({ session: "child-of-s9" }), outside: { owner: "s9-not-open" } });
+    expect(outside).toHaveLength(1);
+    admin.emit({ event: "resolved", id: "abc123abc123", decision: "deny", by: "timeout", session: "child-of-s9" });
+    expect(outside).toEqual([]); // the deadline passed: the notice goes with the request, it does not linger
+  });
+
+  it("a_request_raised_outside_the_chats_is_not_replayed_as_a_card_into_a_reloaded_tab", async () => {
+    admin.emit({ event: "pending", item: pending({ session: "child-of-s9" }), outside: { owner: "s9-not-open" } });
+    tabS1.posted.length = 0;
+    tabS1.receive({ type: "ready" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(guardMessages(tabS1)).toEqual([]);
+  });
+
+  it("a_deny_given_outside_the_chats_reaches_the_service_once", async () => {
+    admin.emit({ event: "pending", item: pending({ session: "child-of-s9" }), outside: { owner: "s9-not-open" } });
+    await approvals.answerOutside("abc123abc123", "deny");
+    await approvals.answerOutside("abc123abc123", "deny"); // a second press after the first is in flight
+    expect(admin.answers).toEqual([{ id: "abc123abc123", decision: "deny" }]);
+  });
+
+  it("a_request_the_service_placed_here_as_the_owner_docks_in_this_tabs_session", async () => {
+    await taskRecord({ task_id: "st_1", child_session_id: "child-of-s2", parent_session_id: "s2", root_session_id: "s2" });
+    admin.emit({ event: "pending", item: pending({ session: "child-of-s2" }), only: true });
+    expect(guardMessages(tabS2)).toEqual([{ type: "guardRequest", request: expect.objectContaining({ id: "abc123abc123" }) }]);
+    expect(guardMessages(tabS1)).toEqual([]);
+    expect(outside).toEqual([]);
+  });
+
+  it("a_request_placed_here_whose_tab_went_in_between_is_given_back_not_shown_elsewhere", () => {
+    // the service placed it with this window, but by the time it arrived no tab of ours owns the session
+    admin.emit({ event: "pending", item: pending({ session: "child-of-nobody" }), only: true });
+    expect(guardMessages(tabS1)).toEqual([]);
+    expect(guardMessages(tabS2)).toEqual([]);
+    expect(admin.claims).toEqual([{ id: "abc123abc123", verdict: "no" }]);
+  });
+
+  it("a_decider_step_of_a_child_whose_tab_is_closed_names_the_session_too", async () => {
+    await taskRecord({ task_id: "st_1", child_session_id: "child-of-s9", parent_session_id: "s9-not-open", root_session_id: "s9-not-open" });
+    const decider = { model: "gw/m", decision: "deny", reason: "force push", ms: 300 };
+    const item = pending({ id: "d9", session: "child-of-s9", decider });
+    admin.emit({ event: "resolved", id: "d9", decision: "deny", by: "decider", session: "child-of-s9", decider, item });
+    expect(guardMessages(tabS1)).toEqual([expect.objectContaining({ type: "guardStep", id: "d9", cwd: "/work/proj", owner: "s9-not-open" })]);
+  });
+
+  it("the_registry_of_another_environment_is_never_read", async () => {
+    // the same child id recorded in a second agent dir: this window's registry must not answer for it
+    const other = join(daemon.agentDir, "..", "other-agent-dir");
+    await mkdir(join(other, "projects", "proj", "senpi-task", "tasks"), { recursive: true });
+    await writeFile(
+      join(other, "projects", "proj", "senpi-task", "tasks", "st_other.json"),
+      JSON.stringify({ task_id: "st_other", child_session_id: "child-elsewhere", parent_session_id: "s1", root_session_id: "s1" }),
+    );
+    admin.emit({ event: "pending", item: pending({ session: "child-elsewhere" }) });
+    for (const tab of [tabS1, tabS2]) {
+      expect(guardMessages(tab)).toEqual([expect.objectContaining({ type: "guardRequest", elsewhere: true })]);
+      expect(guardMessages(tab)[0]?.["owner"]).toBeUndefined();
+    }
+  });
+
+  it("a_registry_that_cannot_be_read_falls_back_to_the_fan_out_without_losing_the_request", () => {
+    const logged: string[] = [];
+    approvals.dispose();
+    const broken = new GuardApprovals({
+      protectionOn: async () => true,
+      connect: async () => admin,
+      panels: () => host.panels,
+      rootOf: () => {
+        throw new Error("registry unreadable");
+      },
+      outside: () => undefined,
+      log: (text) => logged.push(text),
+      retryDelaysMs: [],
+    });
+    approvals = broken;
+    return broken.sync().then(() => {
+      admin.emit({ event: "pending", item: pending({ session: "child-of-s2" }) });
+      expect(guardMessages(tabS1)).toEqual([expect.objectContaining({ type: "guardRequest", elsewhere: true })]);
+      expect(logged.some((line) => line.includes("registry unreadable"))).toBe(true);
+    });
   });
 
   it("a_subagents_request_goes_to_the_panel_whose_agents_run_that_child_session", async () => {
@@ -325,6 +487,21 @@ describe("guard approvals in the chat", () => {
     expect(guardMessages(tabS1).at(-1)).toEqual({ type: "guardResolved", id: "abc123abc123", decision: "allow", by: "telegram" });
   });
 
+  it("the_end_of_a_request_reaches_only_the_tabs_that_were_shown_it", () => {
+    admin.emit({ event: "pending", item: pending({ session: "s1" }) });
+    admin.emit({ event: "resolved", id: "abc123abc123", decision: "allow", by: "agent-tabs", session: "s1" });
+    expect(guardMessages(tabS1).map((message) => message["type"])).toEqual(["guardRequest", "guardResolved"]);
+    expect(guardMessages(tabS2)).toEqual([]); // S2 was never shown it: its end is not S2's event either
+  });
+
+  it("a_request_the_service_lost_is_closed_only_where_its_card_was", async () => {
+    admin.emit({ event: "pending", item: pending({ id: "gone00000000", session: "s1" }) });
+    admin.open = [];
+    admin.confirmed?.();
+    await settle(() => guardMessages(tabS1).some((message) => message["type"] === "guardClosed"));
+    expect(guardMessages(tabS2)).toEqual([]);
+  });
+
   it("a_decider_final_verdict_shows_as_a_step_in_its_sessions_feed_only", () => {
     const decider = { model: "gw-anthropic/claude-haiku", decision: "allow", reason: "read-only push --dry-run", ms: 1200 };
     admin.emit({ event: "resolved", id: "d1", decision: "allow", by: "decider", session: "s2", decider, item: pending({ id: "d1", session: "s2", decider }) });
@@ -369,7 +546,7 @@ describe("guard approvals in the chat", () => {
     const quiet = new FakeAdmin();
     quiet.card = false;
     quiet.replay = [{ event: "pending", item: pending() }];
-    const fresh = new GuardApprovals({ protectionOn: async () => true, connect: async () => quiet, panels: () => host.panels, log: () => undefined, retryDelaysMs: [] });
+    const fresh = new GuardApprovals({ protectionOn: async () => true, connect: async () => quiet, panels: () => host.panels, rootOf: () => undefined, outside: () => undefined, log: () => undefined, retryDelaysMs: [] });
     await fresh.sync();
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(guardMessages(tabS1)).toEqual([]);
@@ -480,6 +657,8 @@ describe("guard approvals in the chat", () => {
         attempts += 1;
         throw new Error("connect ENOENT");
       },
+      rootOf: () => undefined,
+      outside: () => undefined,
       panels: () => host.panels,
       log: (text) => logged.push(text),
       retryDelaysMs: [1, 1],

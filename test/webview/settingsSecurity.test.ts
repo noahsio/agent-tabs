@@ -177,6 +177,29 @@ describe("«Безопасность»", () => {
     expect(actions()).toEqual([{ kind: "protection.set", on: true, confirmed: true }]);
   });
 
+  it("the_running_guard_copy_and_a_failed_refresh_are_visible", () => {
+    const at = Date.parse("2026-11-05T14:48:00");
+    const dir = "/h/.omo/kit/6cdd90b9ec09/guard";
+    show({ state: "on" });
+    expect(q('[data-role="installed-kit"]').hidden).toBe(true); // nothing known: no line at all
+
+    show({ state: "on", installed: { dir, installedAt: at, stale: false } });
+    const line = q('[data-role="installed-kit"]');
+    expect(line.hidden).toBe(false);
+    expect(line.textContent).toContain(dir);
+    expect(line.textContent).toContain(new Date(at).toLocaleString("ru-RU"));
+    expect(line.textContent).not.toContain("старее");
+    expect(line.classList.contains("st-warn")).toBe(false);
+
+    // the copy that decides is an older build's: said out loud, though protection itself reads «on»
+    show({ state: "on", installed: { dir, installedAt: at, stale: true } });
+    expect(q('[data-role="installed-kit"]').textContent).toContain("старее установленного расширения");
+    expect(q('[data-role="installed-kit"]').classList.contains("st-warn")).toBe(true);
+
+    show({ state: "on", installed: { dir, stale: true }, refreshError: "Служба защиты не запустилась за 10 с" });
+    expect(q('[data-role="kit-refresh-error"]').textContent).toContain("Служба защиты не запустилась за 10 с");
+  });
+
   it("an_old_v1_guard_is_named", () => {
     show({ note: "найдена старая защита v1 — включите защиту, чтобы заменить её" });
     const note = q('[data-role="protection-note"]');
@@ -264,14 +287,15 @@ describe("«Безопасность»", () => {
     ]);
   });
 
-  it("no_decider_model_falls_back_to_the_person", () => {
+  it("no_decider_model_says_so_and_no_longer_promises_a_question", () => {
+    // P44: with no model chosen the service allows and logs — the note must not promise the person a card.
     show({ decider: { mode: "decider-then-me", timeoutMs: 20000 } });
     expect(q<HTMLSelectElement>('select[data-field="decider-model"]').value).toBe("");
-    expect(q('[data-role="decider-note"]').textContent).toContain("модель не выбрана — спорное спросит вас");
+    expect(q('[data-role="decider-note"]').textContent).toContain("модель не выбрана — спорное пройдёт с записью в лог");
     // the shipped default: "" is no model chosen (P38)
     show({ decider: { mode: "decider-then-me", model: "", timeoutMs: 20000 } });
     expect(q<HTMLSelectElement>('select[data-field="decider-model"]').value).toBe("");
-    expect(q('[data-role="decider-note"]').textContent).toContain("модель не выбрана — спорное спросит вас");
+    expect(q('[data-role="decider-note"]').textContent).toContain("модель не выбрана — спорное пройдёт с записью в лог");
     // a model no connection offers any more is still shown as the current one
     show({ decider: { mode: "decider-then-me", model: "gone/model", timeoutMs: 20000 } });
     expect(q<HTMLSelectElement>('select[data-field="decider-model"]').value).toBe("gone/model");

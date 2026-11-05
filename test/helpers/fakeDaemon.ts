@@ -13,6 +13,8 @@ export interface HandlerResult {
   data?: unknown;
   error?: string;
   errorCode?: string;
+  /** The refusal's own `errorData`: who holds a path, when to ask again. */
+  errorData?: Record<string, unknown>;
   frames?: Frame[];
   delayMs?: number;
   silent?: boolean;
@@ -193,7 +195,15 @@ export class FakeDaemon {
     this.write(
       socket,
       result.error !== undefined || result.errorCode !== undefined
-        ? { id, type: "response", command: type, success: false, error: result.error ?? "error", errorCode: result.errorCode }
+        ? {
+            id,
+            type: "response",
+            command: type,
+            success: false,
+            error: result.error ?? "error",
+            errorCode: result.errorCode,
+            ...(result.errorData !== undefined ? { errorData: result.errorData } : {}),
+          }
         : { id, type: "response", command: type, success: true, data: result.data },
     );
   }

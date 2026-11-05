@@ -2,6 +2,8 @@ import type { AgentStatus, Block, ChatState, ModelRef } from "../chat/model";
 import type { PendingView } from "../guard/admin";
 import type { RewindItem } from "../rewind/plan";
 import type { AnswerOutcome, CommandRow, DialogAnswer, NextMode, OutgoingImage, TabState, UnwedgeOutcome } from "../sessions/controller";
+import type { LadderView } from "../sessions/ladder";
+import type { ReconnectView } from "../sessions/reconnect";
 import type { LoginEvent } from "../settings/accounts";
 import { isSettingsSection, type FieldError, type SettingsSection, type SettingsState } from "../settings/protocol";
 
@@ -85,12 +87,17 @@ export type GuardStep = {
   at: string;
   /** Only for a session no tab shows: the step names where it ran. */
   cwd?: string;
+  /** The session that owns it, when the task registry named one whose tab is not open here; absent: not attributable. */
+  owner?: string;
 };
 
 /** Host → webview: the guard's approval cards and decider steps (src/guard/approvals.ts). */
 export type GuardHostMessage =
-  /** An open request: a card, while `human.card` is on. `elsewhere`: not this tab's session (the card names its cwd). */
-  | { type: "guardRequest"; request: PendingView; elsewhere?: true }
+  /**
+   * An open request: a card, while `human.card` is on. `elsewhere`: not this tab's session, so the card is an offer and
+   * says where it came from — `owner` is the session that owns it, and without it we could not attribute the request.
+   */
+  | { type: "guardRequest"; request: PendingView; elsewhere?: true; owner?: string }
   /** The request was answered (here, in another window, Telegram, the CLI) or timed out: the card collapses. */
   | { type: "guardResolved"; id: string; decision: "allow" | "deny"; by: string; message?: string }
   /** This tab's answer did not reach the service: the card takes answers again. */
@@ -122,11 +129,31 @@ export type RewoundMessage = { type: "rewound"; blockId: string } & ({ ok: true;
 /** Host → webview: a fork tab's composer starts with the forked message. */
 export type DraftMessage = { type: "draft"; text: string; images: OutgoingImage[] };
 
-/** Host → webview: what «Снять зависание» did — the session was unloaded and re-opened, or it was not (with the reason). */
-export type UnwedgedMessage = { type: "unwedged" } & UnwedgeOutcome;
+/**
+ * Host → webview: what an unwedge did — the session was unloaded and re-opened, or it was not (with the reason).
+ * `auto` marks the extension's own attempt after an unanswered «Стоп»; "cooldown" is that attempt declined because
+ * this session has already had one (see src/sessions/autoUnwedge.ts), so the person is offered the manual way.
+ */
+export type UnwedgedMessage = { type: "unwedged"; auto?: true } & (UnwedgeOutcome | { outcome: "cooldown" });
 
 /** Host → webview: what became of «Отозвать» / «Изменить» on a queued message (a removed one's text comes back as a `draft`). */
 export type QueueResultMessage = { type: "queueResult"; blockId: string; outcome: "removed" | "edited" | "delivered" | "failed" };
+
+/** What a failing connection was for, as the details modal names it. */
+export type ReconnectTarget = { host: string; session?: string };
+
+/**
+ * Host → webview: this tab cannot reach its session and the extension is retrying by itself (see ReconnectLoop). It is
+ * one quiet line over the composer, never the banner at the top: the person is not asked to do anything. `active:
+ * false` ends it — the session opened.
+ */
+export type ReconnectingMessage = { type: "reconnecting" } & ({ active: false } | ({ active: true; target: ReconnectTarget } & ReconnectView));
+
+/**
+ * Host → webview: the model ladder's own line over the composer — the step it is on while it walks, or the model it
+ * left the session on once it has. `null` takes the line away (the walk ended, was interrupted, or a new message came).
+ */
+export type LadderMessage = { type: "ladder"; view: LadderView | null };
 
 /** Host → webview. "sent" answers every "send": on `ok: false` the webview gives the text back to the input. */
 export type HostMessage =
@@ -151,7 +178,9 @@ export type HostMessage =
   | RewindPreviewMessage
   | RewoundMessage
   | DraftMessage
-  | UnwedgedMessage;
+  | UnwedgedMessage
+  | LadderMessage
+  | ReconnectingMessage;
 
 /** The longest deny message («Запретить и сказать агенту…») a tab may send; the service checks the same bound. */
 export const GUARD_MESSAGE_MAX = 2000;
@@ -174,14 +203,24 @@ export type WebviewMessage =
   | { type: "send"; id: string; text: string; mode: "auto" | "followUp"; images?: OutgoingImage[] }
   | { type: "stop" }
   /**
-   * «Снять зависание»: the person's own click after «Стоп» did not end the turn (or nothing came back for minutes).
-   * The host unloads the session and re-opens it in this tab; it never unloads without this message.
+   * «Снять зависание»: the host unloads the session and re-opens it in this tab; it never unloads without this
+   * message. Without `auto` it is the person's own click (after «Стоп» did not end the turn, or nothing came back for
+   * minutes). With `auto` it is the composer asking by itself, once, because «Стоп» went unanswered; the host rations
+   * those per session and may answer "cooldown" instead.
    */
-  | { type: "unwedge" }
+  | { type: "unwedge"; auto?: true }
+  /** «Прервать» on the ladder's line: the session stays on the model it is on and nothing is repeated. */
+  | { type: "ladderInterrupt" }
   | { type: "answer"; dialogId: string; answer: DialogAnswer }
   | { type: "setModel"; model: ModelRef | "auto" }
   | { type: "setMode"; mode: NextMode | null }
   | { type: "reconnect" }
+  /**
+   * «Остановить ту копию» on the quiet line: the second copy of our own host that holds this tab's session file is
+   * stopped on the person's say-so, after the extension refused to by itself. It carries nothing — which process that
+   * is, is the host's own record of the refusal, never the webview's word.
+   */
+  | { type: "stopHolder" }
   | { type: "openLink"; url: string }
   /** A file a tool step names, opened in the editor (at a 1-based line). */
   | { type: "openFile"; path: string; line?: number }
@@ -260,15 +299,18 @@ function parseImages(value: unknown): OutgoingImage[] | undefined {
 export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
   if (!isObject(raw)) return undefined;
   switch (raw["type"]) {
+    case "unwedge":
+      return raw["auto"] === true ? { type: "unwedge", auto: true } : { type: "unwedge" };
     case "ready":
     case "stop":
-    case "unwedge":
     case "reconnect":
+    case "stopHolder":
     case "listSessions":
     case "newSession":
     case "restartHost":
     case "settingsGet":
     case "compact":
+    case "ladderInterrupt":
       return { type: raw["type"] };
     case "send": {
       const mode = raw["mode"];

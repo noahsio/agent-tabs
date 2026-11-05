@@ -326,3 +326,26 @@ describe("message action posts", () => {
     expect(parsed.text).not.toContain("QUJD");
   });
 });
+
+describe("StatePoster: an answer card", () => {
+  it("keeps_the_ids_the_webview_posts_back_and_redacts_the_words_around_them", () => {
+    const posted: string[] = [];
+    const poster = new StatePoster((json) => posted.push(json), ["secret-key"]);
+    const block: Block = {
+      kind: "user",
+      id: "u2",
+      text: "[Answer to question toolu_1]",
+      answer: {
+        questionId: "toolu_1",
+        forkFrom: "secret-key-block",
+        questions: [{ header: "Ключ", text: "Чем шифровать secret-key?", options: [{ label: "age", description: "secret-key тоже", chosen: true }] }],
+      },
+    };
+    poster.push({ type: "state", state: { ...initialState(), blocks: [block] }, tab: { modelMode: "auto" }, reconnectable: true });
+    const parsed = JSON.parse(posted[0] as string) as StateMessage;
+    const answer = (parsed.state.blocks[0] as Extract<Block, { kind: "user" }>).answer;
+    expect(answer?.forkFrom).toBe("secret-key-block"); // an id: it must reach the host again as it is
+    expect(answer?.questions[0]?.text).toBe("Чем шифровать ‹redacted›?");
+    expect(answer?.questions[0]?.options?.[0]?.description).toBe("‹redacted› тоже");
+  });
+});

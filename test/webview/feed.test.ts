@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Block } from "../../src/chat/model";
+import type { Answer, Block } from "../../src/chat/model";
 import type { WebviewMessage } from "../../src/panel/protocol";
 import { DataUrlCache, Feed, type FeedImage } from "../../webview/feed";
 
@@ -77,6 +77,23 @@ describe("Feed", () => {
     expect(entry("t1").querySelector(".mono")?.textContent).toBe("ls");
     feed.update([tool("t4", "ok", "ast_grep_search")], false);
     expect(entry("t4").querySelector(".tool-name")?.textContent).toBe("ast_grep_search");
+  });
+
+  it("a_notice_keeps_someone_else_s_words_behind_подробнее", () => {
+    const provider = "This request triggered cyber-related safeguards. … visit our help center: https://support.claude.com/en/articles/14604842";
+    const refusal: Block = { kind: "notice", id: "n1", level: "warn", text: "Модель отказалась отвечать на этот запрос — смените модель для этой сессии", details: provider };
+    const plain: Block = { kind: "notice", id: "n2", level: "info", text: "без подробностей" };
+    feed.update([refusal, plain], true);
+    const details = entry("n1").querySelector("details.notice-details") as HTMLDetailsElement;
+    expect(details.open).toBe(false); // the English words are folded away, not in the line
+    expect(details.querySelector("summary")?.textContent).toBe("Подробнее");
+    expect(details.querySelector("pre")?.textContent).toBe(provider);
+    expect(entry("n1").querySelector(".step.notice.warn")?.firstChild?.textContent).toBe(refusal.kind === "notice" ? refusal.text : "");
+    expect(entry("n2").querySelector("details")).toBeNull();
+
+    details.open = true;
+    feed.update([refusal, plain, { kind: "notice", id: "n3", level: "info", text: "ещё" }], true);
+    expect((entry("n1").querySelector("details.notice-details") as HTMLDetailsElement).open).toBe(true);
   });
 
   it("task_row_shows_role_and_model", () => {
@@ -158,6 +175,49 @@ describe("Feed", () => {
     expect(tiles[1]?.classList.contains("missing")).toBe(true);
     tiles[1]?.click();
     expect(opened).toEqual([{ images: [{ id: "u1:0", dataUrl: "data:image/png;base64,AAAA" }, { id: "u1:1" }], index: 1 }]);
+  });
+
+  it("a_labelled_picture_stands_in_the_line_of_the_message_where_it_was_put", () => {
+    const user: Block = {
+      kind: "user",
+      id: "u1",
+      text: "вот тут ошибка [картинка 1] а на втором экране [картинка 2] всё нормально",
+      images: [
+        { id: "u1:0", mimeType: "image/png", name: "screen1.png" },
+        { id: "u1:1", mimeType: "image/png", name: "screen2.png" },
+      ],
+    };
+    feed.update([user], false);
+    const bubble = entry("u1").querySelector(".user-bubble") as HTMLElement;
+    expect(bubble.querySelector(".uimgs")).toBeNull(); // both have a place in the text: no row above it
+    const body = bubble.querySelector(".user-text") as HTMLElement;
+    expect(body.textContent).toBe("вот тут ошибка screen1.png а на втором экране screen2.png всё нормально");
+    const chips = [...body.querySelectorAll<HTMLElement>(".uimg.att")];
+    expect(chips.map((chip) => chip.dataset["image"])).toEqual(["u1:0", "u1:1"]);
+    expect(chips[0]?.querySelector('[data-role="image-size"]')).toBeNull(); // the line has no room for a size
+
+    feed.image("u1:0", "data:image/png;base64,AAAA");
+    chips[1]?.click();
+    expect(opened).toEqual([{ images: [{ id: "u1:0", dataUrl: "data:image/png;base64,AAAA" }, { id: "u1:1" }], index: 1 }]);
+  });
+
+  it("a_picture_the_text_has_no_label_for_keeps_the_row_above_the_message", () => {
+    const user: Block = {
+      kind: "user",
+      id: "u1",
+      text: "смотри [картинка 1] и ещё [картинка 7]",
+      images: [
+        { id: "u1:0", mimeType: "image/png", name: "inline.png" },
+        { id: "u1:1", mimeType: "image/png", name: "loose.png" },
+      ],
+    };
+    feed.update([user], false);
+    const bubble = entry("u1").querySelector(".user-bubble") as HTMLElement;
+    const shelf = [...(bubble.querySelector(".uimgs") as HTMLElement).querySelectorAll('[data-role="image-name"]')];
+    expect(shelf.map((name) => name.textContent)).toEqual(["loose.png"]);
+    const body = bubble.querySelector(".user-text") as HTMLElement;
+    expect([...body.querySelectorAll(".att")].map((chip) => (chip as HTMLElement).dataset["image"])).toEqual(["u1:0"]);
+    expect(body.textContent).toBe("смотри inline.png и ещё [картинка 7]"); // a label with nothing behind it stays text
   });
 
   it("sent_images_show_as_chips_with_name_and_size_above_the_text", () => {
@@ -675,5 +735,230 @@ describe("copy buttons", () => {
     expect(button.classList.contains("copied")).toBe(false);
     expect(written).toEqual(["итог"]);
     vi.useRealTimers();
+  });
+});
+
+/**
+ * An answered question in the feed: the card, not OmO's protocol text. Both of OmO's records reach the same card —
+ * the answer's own user message (`waitForAnswer: false`) and the call's result (`waitForAnswer: true`).
+ */
+describe("an answered question", () => {
+  const ID = "toolu_01DcM9tun78v1vtux7rZDVRz";
+  const RAW = `[Answer to question ${ID}]\nКэш: Только на диске\nКлюч: (see [The user's answer to Ключ for question ${ID}] below)[The user's answer to Ключ for question ${ID}]не понимаю что это`;
+  const ANSWER: Answer = {
+    questionId: ID,
+    forkFrom: "c1",
+    questions: [
+      {
+        header: "Кэш",
+        text: "Как хранить кэш каталога?",
+        options: [
+          { label: "TTL и запасной кэш", description: "Кэш с временем жизни и запасным слоем", chosen: false },
+          { label: "Только на диске", description: "Кэш хранится в файлах на диске", chosen: true },
+          { label: "Без кэша", chosen: false },
+        ],
+      },
+    ],
+  };
+  const answerBlock = (answer: Answer, text = RAW): Block => ({ kind: "user", id: "u2", text, answer });
+  const prompt: Block = { kind: "user", id: "c1", text: "почини каталог" };
+  const card = (id: string): HTMLElement => entry(id).querySelector(".answer") as HTMLElement;
+  const options = (id: string): [string, string | undefined, boolean][] =>
+    [...entry(id).querySelectorAll(".answer .opt")].map((row) => [
+      (row.querySelector(".lbl")?.childNodes[0]?.textContent ?? "").trim(),
+      row.querySelector(".desc")?.textContent ?? undefined,
+      row.classList.contains("chosen"),
+    ]);
+
+  it("the_card_shows_the_question_its_options_and_their_descriptions", () => {
+    feed.update([prompt, answerBlock(ANSWER)], false);
+    expect(card("u2").querySelector(".answer-title")?.textContent).toBe("Вопрос агента");
+    expect(card("u2").querySelector(".tool")?.textContent).toBe("Кэш");
+    expect(card("u2").querySelector(".question-text")?.textContent).toBe("Как хранить кэш каталога?");
+    expect(options("u2")).toEqual([
+      ["TTL и запасной кэш", "Кэш с временем жизни и запасным слоем", false],
+      ["Только на диске", "Кэш хранится в файлах на диске", true],
+      ["Без кэша", undefined, false],
+    ]);
+    expect(entry("u2").querySelectorAll(".answer .box.on")).toHaveLength(1);
+  });
+
+  it("omos_own_wording_never_reaches_the_feed", () => {
+    feed.update([prompt, answerBlock(ANSWER)], false);
+    const shown = entry("u2").textContent ?? "";
+    expect(shown).not.toContain("Answer to question");
+    expect(shown).not.toContain("The user's answer to");
+    expect(shown).not.toContain(ID);
+    expect(entry("u2").querySelector(".user-bubble")?.classList.contains("answered")).toBe(true);
+  });
+
+  it("their_own_words_show_as_the_answer_and_a_question_left_alone_says_so", () => {
+    const answer: Answer = {
+      questionId: ID,
+      questions: [
+        { header: "Ключ", text: "Какой ключ использовать?", options: [{ label: "age", chosen: false }], words: "не понимаю что это" },
+        { header: "Кэш", text: "Как хранить кэш каталога?", options: [{ label: "Без кэша", chosen: false }], skipped: true },
+      ],
+    };
+    feed.update([prompt, answerBlock(answer)], false);
+    expect(card("u2").querySelector(".answer-title")?.textContent).toBe("Вопросы агента");
+    expect([...card("u2").querySelectorAll(".answer-name")].map((name) => name.textContent)).toEqual(["Ключ", "Кэш"]);
+    expect(card("u2").querySelector(".answer-words")?.textContent).toBe("не понимаю что это");
+    expect([...card("u2").querySelectorAll(".answer-q.skipped .answer-note")].map((note) => note.textContent)).toEqual(["Не ответили"]);
+  });
+
+  it("an_answer_whose_question_is_gone_says_so_instead_of_showing_the_protocol", () => {
+    feed.update([prompt, answerBlock({ questionId: ID, questions: [{ header: "age ключ", words: "не понимаю что это" }] })], false);
+    expect(card("u2").querySelector(".answer-words")?.textContent).toBe("не понимаю что это");
+    expect(card("u2").querySelector(".answer-note")?.textContent).toBe("Вопрос не сохранился");
+    expect(entry("u2").textContent).not.toContain("Answer to question");
+  });
+
+  it("a_question_the_agent_waited_on_shows_the_same_card_in_place_of_its_step", () => {
+    const waited: Block = {
+      kind: "tool",
+      id: ID,
+      name: "ask_user_question",
+      summary: "",
+      args: {},
+      output: `Кэш: Только на диске`,
+      truncated: false,
+      state: "ok",
+      answer: ANSWER,
+    };
+    feed.update([prompt, waited], false);
+    expect(entry(ID).classList.contains("user")).toBe(true);
+    expect(card(ID).querySelector(".question-text")?.textContent).toBe("Как хранить кэш каталога?");
+    expect(entry(ID).querySelector(".tool-details")).toBeNull();
+    expect(entry(ID).textContent).not.toContain("Ask_user_question");
+  });
+
+  it("a_question_still_open_shows_nothing_in_the_feed", () => {
+    feed.update([prompt, { kind: "tool", id: ID, name: "ask_user_question", summary: "", args: {}, output: "", truncated: false, state: "running" }], true);
+    expect(entry(ID).textContent).toBe("");
+  });
+
+  it("the_cards_fork_menu_goes_back_to_the_message_whose_turn_asked", () => {
+    const actions: [string, HTMLElement][] = [];
+    feed = new Feed(root, (message) => posted.push(message), { onMessageActions: (blockId, anchor) => actions.push([blockId, anchor]) });
+    feed.update([prompt, answerBlock(ANSWER)], false);
+    const button = entry("u2").querySelector('[data-role="message-actions"]') as HTMLButtonElement;
+    expect(button).not.toBeNull();
+    expect(button.getAttribute("title")).toBe("Ответвить или откатить");
+    button.click();
+    expect(actions).toEqual([["c1", button]]); // the prompt, not the answer: OmO never re-asks a question it settled
+  });
+
+  it("a_card_with_nowhere_honest_to_fork_to_offers_no_menu", () => {
+    feed.update([answerBlock({ questionId: ID, questions: ANSWER.questions })], false);
+    expect(entry("u2").querySelector('[data-role="message-actions"]')).toBeNull();
+  });
+
+  it("an_answer_waiting_in_the_queue_is_the_card_with_its_queue_label", () => {
+    feed.update([prompt, { ...(answerBlock(ANSWER) as Extract<Block, { kind: "user" }>), delivery: { state: "queued", queuedId: "q_1" } }], true);
+    expect(card("u2")).not.toBeNull();
+    expect(entry("u2").querySelector(".queued-label")?.textContent).toBe("в очереди — ждёт агента");
+    expect(entry("u2").textContent).not.toContain("Answer to question");
+  });
+});
+
+describe("the pinned copy of the last message", () => {
+  const lines = (count: number): string => Array.from({ length: count }, (_, index) => `строка ${index + 1}`).join("\n");
+  const slot = (): HTMLElement => root.querySelector(".pin-slot") as HTMLElement;
+  const pin = (): HTMLElement => root.querySelector('[data-role="pin"]') as HTMLElement;
+  const text = (): string | undefined => pin().querySelector(".user-text")?.textContent ?? undefined;
+  const toggle = (): HTMLButtonElement => pin().querySelector('[data-role="pin-toggle"]') as HTMLButtonElement;
+  const reply: Block = { kind: "assistant", id: "a1", text: "ок", thinking: "", streaming: false };
+
+  /** jsdom has no layout: the feed's viewport is 0–200, and every entry named in `above` sits over its top edge. */
+  function view(above: string[]): void {
+    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value(this: HTMLElement): DOMRect {
+        if (this === root) return { top: 0, bottom: 200, height: 200 } as DOMRect;
+        const top = above.includes(this.dataset["block"] ?? "") ? -60 : 80;
+        return { top, bottom: top + 40, height: 40 } as DOMRect;
+      },
+    });
+  }
+
+  beforeEach(() => {
+    // The pinned copy carries the message's own `.user-text`: 20 px a line, as the long-message suite measures it.
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLElement): number {
+        return this.classList.contains("user-text") ? (this.textContent ?? "").split("\n").length * 20 : 0;
+      },
+    });
+    view([]);
+  });
+
+  afterEach(() => {
+    delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+  });
+
+  it("the_copy_shows_only_while_the_message_itself_is_out_of_view", () => {
+    const blocks: Block[] = [{ kind: "user", id: "u1", text: "первый" }, reply, { kind: "user", id: "u2", text: "второй" }];
+    feed.update(blocks, false);
+    expect(slot().hidden).toBe(true); // the message is on screen: nothing to scroll back to
+
+    view(["u2"]);
+    feed.update(blocks, false);
+    expect(slot().hidden).toBe(false);
+    expect(text()).toBe("второй"); // the last one, not the first
+
+    view([]);
+    feed.update(blocks, false);
+    expect(slot().hidden).toBe(true);
+  });
+
+  it("the_copy_leads_the_feed_and_is_empty_without_a_message_of_their_own", () => {
+    feed.update([reply], false);
+    expect(slot().hidden).toBe(true);
+    expect(root.firstElementChild).toBe(slot()); // over the top of the timeline, not under it
+  });
+
+  it("a_long_copy_keeps_three_lines_until_the_person_opens_it_and_a_short_one_has_no_control", () => {
+    view(["u1"]);
+    feed.update([{ kind: "user", id: "u1", text: lines(3) }], false);
+    expect(pin().classList.contains("collapsed")).toBe(false);
+    expect(toggle().hidden).toBe(true);
+
+    view(["u2"]);
+    feed.update([{ kind: "user", id: "u2", text: lines(20) }], false);
+    expect(pin().classList.contains("collapsed")).toBe(true);
+    expect(toggle().hidden).toBe(false);
+    expect(toggle().textContent).toBe("Показать полностью");
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+
+    const scrolled = root.scrollTop;
+    toggle().click();
+    expect(pin().classList.contains("collapsed")).toBe(false);
+    expect(toggle().textContent).toBe("Свернуть");
+    expect(toggle().getAttribute("aria-expanded")).toBe("true");
+    expect(root.scrollTop).toBe(scrolled); // opening it reads in place: the feed does not move
+
+    toggle().click();
+    expect(pin().classList.contains("collapsed")).toBe(true);
+  });
+
+  it("the_next_message_is_pinned_closed_again", () => {
+    view(["u1"]);
+    feed.update([{ kind: "user", id: "u1", text: lines(20) }], false);
+    toggle().click();
+    expect(pin().classList.contains("collapsed")).toBe(false);
+
+    view(["u2"]);
+    feed.update([{ kind: "user", id: "u1", text: lines(20) }, reply, { kind: "user", id: "u2", text: lines(20) }], false);
+    expect(pin().classList.contains("collapsed")).toBe(true);
+  });
+
+  it("a_message_the_agent_does_not_have_yet_is_not_the_one_pinned", () => {
+    const sent: Block = { kind: "user", id: "u1", text: "уже у агента" };
+    const queued: Block = { kind: "user", id: "u2", text: "после хода", delivery: { state: "queued", queuedId: "q_1" } };
+    view(["u1", "u2"]);
+    feed.update([sent, reply, queued], true);
+    expect(text()).toBe("уже у агента");
   });
 });

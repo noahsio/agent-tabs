@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { initialState } from "../../src/chat/reducer";
 import type { WebviewMessage } from "../../src/panel/protocol";
 import { ChatView } from "../../webview/render";
+import { text, type } from "../helpers/composer";
 
 let root: HTMLElement;
 let posted: WebviewMessage[];
@@ -12,8 +13,8 @@ function role(name: string, scope: ParentNode = root): HTMLElement {
   return scope.querySelector(`[data-role="${name}"]`) as HTMLElement;
 }
 
-function input(): HTMLTextAreaElement {
-  return root.querySelector("textarea") as HTMLTextAreaElement;
+function input(): HTMLElement {
+  return root.querySelector(".input") as HTMLElement;
 }
 
 function shown(): string[] {
@@ -41,7 +42,7 @@ function key(target: EventTarget, name: string): KeyboardEvent {
 }
 
 function send(text: string): void {
-  input().value = text;
+  type(input(), text);
   key(input(), "Enter");
 }
 
@@ -63,7 +64,7 @@ describe("«/» button: the actions menu", () => {
   it("lists_the_actions_and_toggles_with_the_keyboard_on_the_first_one", () => {
     openActions();
     expect(shown()).toEqual(["actions"]);
-    expect(input().value).toBe(""); // no «/» typed: that is the command list's entry point
+    expect(text(input())).toBe(""); // no «/» typed: that is the command list's entry point
     expect(actions().map((row) => row.textContent)).toEqual([
       "Довести до концаАгент сам составит план, выполнит его и проверит результат, прежде чем закончить ulw",
       "Команда агентовЗадача делится на части, которые параллельно делают несколько агентов на подходящих моделях mass ulw",

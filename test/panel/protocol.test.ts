@@ -103,8 +103,13 @@ describe("parseWebviewMessage", () => {
       { type: "agentOutput", taskId: "t" },
       { type: "agentCancel", taskId: "t" },
       { type: "agentDetails", taskId: "t" },
+      { type: "unwedge" },
+      { type: "unwedge", auto: true },
+      { type: "ladderInterrupt" },
     ];
     for (const raw of cases) expect(parseWebviewMessage(raw)).toEqual(raw);
+    expect(parseWebviewMessage({ type: "ladderInterrupt", nonsense: 1 })).toEqual({ type: "ladderInterrupt" });
+    expect(parseWebviewMessage({ type: "unwedge", auto: "yes" })).toEqual({ type: "unwedge" }); // only a real flag asks for the automatic one
     expect(parseWebviewMessage({ type: "pin", durableId: "d", pinned: "yes" })).toBeUndefined();
     expect(parseWebviewMessage({ type: "archive", durableId: "d", archived: "yes" })).toBeUndefined();
     expect(parseWebviewMessage({ type: "archive", durableId: 7, archived: true })).toBeUndefined();

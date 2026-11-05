@@ -10,6 +10,7 @@ import type { EnvironmentView } from "../../src/settings/environment";
 import { envPaths } from "../../src/settings/paths";
 import { MASK, readHiddenCommands, ToolsHost, type ToolsView } from "../../src/settings/tools";
 import { ChatView } from "../../webview/render";
+import { type } from "../helpers/composer";
 
 let root: HTMLElement;
 let posted: WebviewMessage[];
@@ -88,9 +89,7 @@ describe("slash menu hidden list", () => {
   ];
   const keys = (): string[] => [...root.querySelectorAll<HTMLElement>('[data-popover="slash"] [data-role="slash-key"]')].map((node) => node.textContent ?? "");
   const typeSlash = (): void => {
-    const input = root.querySelector("textarea") as HTMLTextAreaElement;
-    input.value = "/";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    type(root.querySelector(".input") as HTMLElement, "/");
   };
 
   it("hidden_commands_round_trip_and_reach_the_slash_menu", async () => {

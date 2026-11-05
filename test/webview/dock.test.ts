@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRow, Block, ChatState, Dialog } from "../../src/chat/model";
-import { initialState } from "../../src/chat/reducer";
+import { applyEntries, initialState } from "../../src/chat/reducer";
 import type { PendingView } from "../../src/guard/admin";
 import type { WebviewMessage } from "../../src/panel/protocol";
 import { ChatView } from "../../webview/render";
+import { text } from "../helpers/composer";
 
 let root: HTMLElement;
 let posted: WebviewMessage[];
@@ -79,7 +80,7 @@ describe("docked approval", () => {
   it("the_panel_takes_the_composers_place_and_gives_the_draft_back_intact", async () => {
     view.draft({ type: "draft", text: "черновик ответа", images: [{ mimeType: "image/png", data: "iVBORw0KGgo=", name: "shot.png" }] });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    const input = root.querySelector<HTMLTextAreaElement>("footer textarea.input") as HTMLTextAreaElement;
+    const input = root.querySelector<HTMLElement>("footer .input") as HTMLElement;
     const thumbs = (root.querySelector('[data-role="thumbs"]') as HTMLElement).children.length;
     expect(thumbs).toBe(1);
     input.focus();
@@ -95,7 +96,7 @@ describe("docked approval", () => {
     view.guardResolved(REQUEST.id, "allow", "telegram");
     expect(panel()).toBeNull();
     expect(composerBox().hidden).toBe(false);
-    expect(input.value).toBe("черновик ответа");
+    expect(text(input)).toBe("черновик ответа");
     expect((root.querySelector('[data-role="thumbs"]') as HTMLElement).children.length).toBe(thumbs);
     expect(document.activeElement).toBe(input);
   });
@@ -206,28 +207,57 @@ describe("docked approval", () => {
     expect(root.querySelector(`.timeline [data-guard="${REQUEST.id}"]`)?.textContent).toContain("запрос больше не ждёт ответа");
   });
 
-  it("a_request_of_another_session_waits_in_the_feed_until_opened_here", () => {
+  it("a_request_we_could_not_attribute_says_so_and_waits_until_opened_here", () => {
     blocks("a1");
     view.guardRequest(REQUEST, true);
     expect(panel()).toBeNull();
     expect(composerBox().hidden).toBe(false);
     const notice = root.querySelector(`.timeline [data-guard="${REQUEST.id}"]`) as HTMLElement;
-    expect(notice.textContent).toBe("Решение ждёт в другой сессии: /work/proj · Открыть");
+    expect(notice.textContent).toBe("Ждёт решения: сессию определить не удалось, /work/proj · Открыть");
     (notice.querySelector('[data-role="open-elsewhere"]') as HTMLButtonElement).click();
-    expect(panel()?.textContent).toContain("Другая сессия: /work/proj");
-    expect(panel()?.querySelector(".who")?.textContent).toBe("другая сессия");
+    expect(panel()?.textContent).toContain("Не эта вкладка: сессию определить не удалось, /work/proj");
+    expect(panel()?.querySelector(".who")?.textContent).toBe("сессия не определена");
     key("1");
     view.guardResolved(REQUEST.id, "allow", "agent-tabs");
     expect(panel()).toBeNull();
     expect(timeline()).toEqual(["a1", `row:${REQUEST.id}`]);
-    expect(root.querySelector(`.timeline [data-guard="${REQUEST.id}"] .verdict`)?.textContent).toBe("Разрешено один раз · вы");
+    expect(root.querySelector(`.timeline [data-guard="${REQUEST.id}"] .verdict`)?.textContent).toBe("Разрешено один раз · вы · сессия не определена");
   });
 
-  it("another_sessions_request_answered_elsewhere_turns_its_feed_line_into_the_result", () => {
+  it("a_request_whose_owning_tab_is_closed_names_the_session_it_belongs_to", () => {
+    blocks("a1");
+    view.guardRequest(REQUEST, true, "01a1a820-96ed-7252-9a77-a73ed56ebf85");
+    const notice = root.querySelector(`.timeline [data-guard="${REQUEST.id}"]`) as HTMLElement;
+    expect(notice.textContent).toBe("Ждёт решения: сессия 01a1a820 (её вкладка не открыта), /work/proj · Открыть");
+    (notice.querySelector('[data-role="open-elsewhere"]') as HTMLButtonElement).click();
+    expect(panel()?.textContent).toContain("Не эта вкладка: сессия 01a1a820 (её вкладка не открыта), /work/proj");
+    expect(panel()?.querySelector(".who")?.textContent).toBe("сессия 01a1a820");
+    key("1");
+    view.guardResolved(REQUEST.id, "allow", "agent-tabs");
+    expect(root.querySelector(`.timeline [data-guard="${REQUEST.id}"] .verdict`)?.textContent).toBe("Разрешено один раз · вы · сессия 01a1a820");
+  });
+
+  it("another_sessions_offer_leaves_nothing_behind_when_it_is_decided_elsewhere", () => {
+    blocks("a1");
     view.guardRequest(REQUEST, true);
-    view.guardResolved(REQUEST.id, "deny", "telegram");
-    expect(root.querySelectorAll(`.timeline [data-guard="${REQUEST.id}"]`)).toHaveLength(1);
-    expect(root.querySelector(`.timeline [data-guard="${REQUEST.id}"] .verdict`)?.textContent).toMatch(/^Запрещено · Telegram/);
+    expect(root.querySelector(`.timeline [data-guard="${REQUEST.id}"]`)).not.toBeNull();
+    view.guardResolved(REQUEST.id, "allow", "agent-tabs");
+    expect(root.querySelector(`.timeline [data-guard="${REQUEST.id}"]`)).toBeNull(); // this chat decided nothing
+    expect(timeline()).toEqual(["a1"]);
+  });
+
+  it("another_sessions_offer_the_service_lost_leaves_nothing_behind", () => {
+    blocks("a1");
+    view.guardRequest(REQUEST, true);
+    view.guardClosed(REQUEST.id);
+    expect(timeline()).toEqual(["a1"]);
+  });
+
+  it("who_decided_is_read_from_the_decision_not_from_this_tabs_click", () => {
+    view.guardRequest(REQUEST, false);
+    key("1"); // this tab sent an answer…
+    view.guardResolved(REQUEST.id, "deny", "telegram"); // …but the service says Telegram got there first
+    expect(root.querySelector(`.timeline [data-guard="${REQUEST.id}"] .verdict`)?.textContent).toMatch(/^Запрещено · Telegram · \d\d:\d\d$/);
   });
 
   it("keys_right_after_the_panel_shows_decide_nothing", () => {
@@ -241,7 +271,7 @@ describe("docked approval", () => {
   });
 
   it("a_prompt_that_comes_while_the_person_types_waits_for_tab", () => {
-    const input = root.querySelector<HTMLTextAreaElement>("footer textarea.input") as HTMLTextAreaElement;
+    const input = root.querySelector<HTMLElement>("footer .input") as HTMLElement;
     input.focus();
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
     input.blur();
@@ -360,9 +390,12 @@ describe("decider line", () => {
     expect(deny.classList.contains("no")).toBe(true);
   });
 
-  it("a_decider_line_of_another_session_names_its_cwd", () => {
-    view.guardStep({ id: "d3", tool: "bash", command: "git push -f", decider: { decision: "deny", reason: "force", ms: 300 }, at: "2026-11-04T10:00:00.000Z", cwd: "/other/proj" });
-    expect((root.querySelector('[data-guard="d3"]') as HTMLElement).textContent).toContain("другая сессия: /other/proj");
+  it("a_decider_line_of_another_session_names_whose_it_was", () => {
+    const step = { tool: "bash", command: "git push -f", decider: { decision: "deny" as const, reason: "force", ms: 300 }, at: "2026-11-04T10:00:00.000Z" };
+    view.guardStep({ ...step, id: "d3", cwd: "/other/proj" });
+    expect((root.querySelector('[data-guard="d3"]') as HTMLElement).textContent).toContain("сессию определить не удалось, /other/proj");
+    view.guardStep({ ...step, id: "d4", cwd: "/other/proj", owner: "01a1a820-96ed-7252-9a77-a73ed56ebf85" });
+    expect((root.querySelector('[data-guard="d4"]') as HTMLElement).textContent).toContain("сессия 01a1a820 (её вкладка не открыта), /other/proj");
   });
 });
 
@@ -481,7 +514,7 @@ describe("docked questions", () => {
     expect(answers()).toEqual([{ type: "answer", dialogId: "q", answer: { answers: { q1: { selected: ["Только на диске"] } } } }]);
     answered();
     view.answerResult("q", "applied");
-    expect(resultText()).toEqual(["Ответ: Только на диске"]);
+    expect(resultText()).toEqual([]); // an answered question leaves the card in the feed, not a line saying the same
   });
 
   it("other_sends_the_persons_own_words_as_text", () => {
@@ -533,7 +566,45 @@ describe("docked questions", () => {
     ]);
     answered();
     view.answerResult("q", "applied");
-    expect(resultText()).toEqual(["Ответ: Кэш — TTL и запасной кэш; Проверки — Юнит-тесты, Линтер"]);
+    expect(resultText()).toEqual([]); // likewise for a set: the card carries both questions and both answers
+  });
+
+  /**
+   * The whole way round, as the person sees it: the question is asked, answered here, and OmO's record of the answer
+   * comes back in the journal. One card in the feed — the question, the options, their descriptions and what was
+   * picked — and nothing of OmO's own wording, nor a second line saying the same thing.
+   */
+  it("an_answered_question_leaves_one_card_in_the_feed_and_no_protocol_text", () => {
+    const ID = "toolu_01Ch";
+    const asked = [
+      { type: "message", id: "e1", message: { role: "user", content: "почини каталог", clientMessageId: "c1", timestamp: 1 } },
+      {
+        type: "message",
+        id: "e2",
+        message: { role: "assistant", content: [{ type: "toolCall", id: ID, name: "ask_user_question", arguments: { questions: [CACHE], waitForAnswer: false } }], timestamp: 2 },
+      },
+    ];
+    show({ blocks: applyEntries(initialState(), asked).blocks });
+    dialogs({ id: ID, method: "question", title: CACHE.question, questions: [CACHE] });
+    key("2");
+    expect(answers()).toEqual([{ type: "answer", dialogId: ID, answer: { answers: { q1: { selected: ["Только на диске"] } } } }]);
+    answered();
+    view.answerResult(ID, "applied");
+    expect(resultText()).toEqual([]);
+
+    const answer = { type: "message", id: "e4", message: { role: "user", content: [{ type: "text", text: `[Answer to question ${ID}]\nКэш: Только на диске` }], timestamp: 4 } };
+    show({ blocks: applyEntries(initialState(), [...asked, answer]).blocks });
+    const cards = [...root.querySelectorAll(".timeline .answer")];
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.querySelector(".question-text")?.textContent).toBe("Как хранить кэш каталога после смены ноды?");
+    expect([...(cards[0] as HTMLElement).querySelectorAll(".opt.chosen .lbl")].map((label) => label.childNodes[0]?.textContent)).toEqual(["Только на диске"]);
+    expect([...(cards[0] as HTMLElement).querySelectorAll(".desc")].map((desc) => desc.textContent)).toEqual([
+      "Отдавать сохранённый список до 10 минут",
+      "Список живёт до перезапуска",
+    ]);
+    const timeline = root.querySelector(".timeline")?.textContent ?? "";
+    expect(timeline).not.toContain("Answer to question");
+    expect(timeline).not.toContain(ID);
   });
 
   it("esc_cancels_a_question", () => {

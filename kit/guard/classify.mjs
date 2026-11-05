@@ -467,32 +467,6 @@ function readsStdin(words, head) {
   return rest.includes("-s") || readsStdinScript(rest) || !rest.some((word) => !word.startsWith("-") && !/^\d*[<>]/.test(word));
 }
 
-const DANGEROUS_GIT_CONFIG_RE =
-  /^(?:alias\.[^=]*=!|core\.(?:pager|sshcommand|fsmonitor|editor|hookspath|askpass)=|sequence\.editor=|diff\.external=|credential\.helper=|gpg\.program=)/i;
-const DANGEROUS_SUBCOMMAND_OPTION = {
-  grep: /^(?:-O|--open-files-in-pager)(?![\w-])|^-O./,
-  log: /^--output(?:=|$)/,
-  diff: /^--output(?:=|$)/,
-  show: /^--output(?:=|$)/,
-};
-
-/** git options that run a program or write a file: `-c alias.x=!cmd`, `-c core.pager=...`, `grep -O`, `log --output`. */
-function hasDangerousGitOption(words, head) {
-  let index = head + 1;
-  while (index < words.length && words[index].startsWith("-")) {
-    const option = words[index];
-    let config;
-    if (option === "-c" || option === "--config-env") config = words[index + 1];
-    else if (option.startsWith("--config-env=")) config = option.slice("--config-env=".length);
-    else if (option.startsWith("-c") && !option.startsWith("--")) config = option.slice(2);
-    if (config !== undefined && (DANGEROUS_GIT_CONFIG_RE.test(config) || config.includes(UNKNOWN))) return true;
-    if (option.startsWith("--exec-path=") && option.includes(UNKNOWN)) return true;
-    index += GIT_OPTIONS_WITH_VALUE.has(option) ? 2 : 1;
-  }
-  const pattern = DANGEROUS_SUBCOMMAND_OPTION[words[index]];
-  return Boolean(pattern) && words.slice(index + 1).some((word) => pattern.test(word));
-}
-
 const DECLARE = new Set(["export", "local", "readonly", "declare", "typeset"]);
 const ASSIGNMENT_RE = /^([A-Za-z_]\w*)=(.*)$/s;
 const UNRESOLVABLE_VALUE_RE = /[$`'"\\\n\u0001\u0002\u0003\u0004]/;
@@ -626,7 +600,7 @@ function containerCommand(words, head) {
   return index + 1 < words.length ? words.slice(index + 1) : null;
 }
 
-/** The command words a wrapper (ssh, `remote-exec`, `docker|kubectl exec`) runs: { inner, remote } or null. */
+/** The command words a wrapper (ssh, `remote-exec exec`, `docker|kubectl exec`) runs: { inner, remote } or null. */
 function wrappedCommand(words, head) {
   const command = basename(words[head]);
   const ssh = sshParts(words, head);
@@ -656,7 +630,7 @@ function isDataConsumer(words, head) {
 }
 
 /**
- * Who reads this segment's stdin, through ssh / `remote-exec` / `docker|kubectl exec`:
+ * Who reads this segment's stdin, through ssh / `remote-exec exec` / `docker|kubectl exec`:
  * { kind: "shell" | "code" | "data" | "other", language?, remote, login? }.
  */
 function stdinConsumer(words, head, remote = null) {
@@ -703,11 +677,14 @@ function programLeaves(text, remote, depth, ctx) {
   return [...leaves.map((leaf) => ({ ...leaf, remote: label(leaf) })), { script: true, text, remote }];
 }
 
-/** Leaves of code given to an interpreter: its literal shell commands; unreadable process calls go to `forced`. */
-function codeLeaves(language, code, remote, depth, ctx, forced) {
-  const scanned = scanCode(language, code);
-  if (scanned.unparsed) forced.push(`unparsed-code: ${language} code calls a process that cannot be read statically`);
-  return scanned.commands.flatMap((inner) => programLeaves(inner, remote, depth, ctx));
+/**
+ * Leaves of code given to an interpreter: the literal shell commands it runs. Ruling P43: a process call this cannot
+ * read is no longer a reason to interrupt — the commands it CAN read still face every pattern. The deny patterns are
+ * anchored to a whole command (rules.mjs globToRegExp), so they cannot be matched against a fragment of code either:
+ * a destructive command hidden inside an interpreter payload passes. That is the cost of turning fail-closed off.
+ */
+function codeLeaves(language, code, remote, depth, ctx) {
+  return scanCode(language, code).commands.flatMap((inner) => programLeaves(inner, remote, depth, ctx));
 }
 
 /** rm -r and find -delete / -exec rm: { destructive, texts } with one `rm -rf <t>` / `find <t> -delete` text per normalised target. */
@@ -795,7 +772,7 @@ function unknownTargets(words, head, ctx, destructive) {
   return { deleted, written, host };
 }
 
-/** Raw segment -> list of leaf commands { text, texts, matchTexts, helpOnly, dynamic, forced, remote, … }. */
+/** Raw segment -> list of leaf commands { text, texts, matchTexts, helpOnly, dynamic, remote, … }. */
 function analyzeSegment(rawSegment, depth, ctx) {
   const segment = resolveVariables(rawSegment, ctx);
   const detailed = shellWordsDetailed(segment);
@@ -803,7 +780,6 @@ function analyzeSegment(rawSegment, depth, ctx) {
   const head = headIndex(words);
   recordAssignments(words, head, ctx);
   const nested = [];
-  const forced = [];
   // Values git/ssh/editors run as commands: `GIT_SSH_COMMAND=… git`, `export GIT_PAGER=…`.
   const assignments = head >= words.length ? words : DECLARE.has(words[head]) ? words.slice(head + 1) : words.slice(0, head);
   for (const word of assignments) {
@@ -818,11 +794,10 @@ function analyzeSegment(rawSegment, depth, ctx) {
     const feeds = stdinFeeds(segment, words, ctx);
     for (const feed of feeds) {
       if (feed.quoted && feed.clean && consumer.kind === "data") continue;
-      if (consumer.kind === "code") nested.push(...codeLeaves(consumer.language, feed.text, consumer.remote, depth, ctx, forced));
+      if (consumer.kind === "code") nested.push(...codeLeaves(consumer.language, feed.text, consumer.remote, depth, ctx));
       else nested.push(...programLeaves(feed.text, consumer.remote, depth, ctx));
     }
     const readsProgram = consumer.kind === "shell" || consumer.kind === "code";
-    if (readsProgram && feeds.length === 0 && !consumer.login) forced.push(`stdin-program: ${command} runs a program read from stdin`);
     const ssh = sshParts(words, head);
     for (const local of ssh.local) nested.push(...expand(local, depth + 1, ctx));
     const wrapped = wrappedCommand(words, head);
@@ -841,24 +816,15 @@ function analyzeSegment(rawSegment, depth, ctx) {
     const codeFlag = language ? words.findIndex((word, position) => position > head && CODE_FLAGS[language].includes(word)) : -1;
     const code = codeFlag > 0 ? words[codeFlag + 1] : language === "js" && words[head + 1] === "eval" ? words[head + 2] : undefined;
     if (language && code !== undefined) {
-      // Code built by the shell (`-c "$(…)"`, `-c "$VAR"`) cannot be read; literal code is scanned like eval.
-      if (/[\u0001\u0003\u0004]/.test(code) || /^\$\{?\w+\}?$/.test(code.trim())) forced.push(`dynamic-code: ${command} runs code produced by the shell`);
       // Literal inline code: Python/JS are read like eval; other languages keep the plain text checks (`perl -pi -e 's/…/'`).
-      else if (language === "python" || language === "js") nested.push(...codeLeaves(language, code, null, depth, ctx, forced));
-    }
-    if ((SHELLS.has(command) || SOURCE_HEADS.has(command) || language) && words.slice(head + 1).some((word) => word.includes(PROC_SUBST))) {
-      forced.push("process-substitution: runs a program produced by another command");
+      // Code the shell builds (`-c "$(…)"`, `-c "$VAR"`) simply cannot be read — P43: that is not a verdict.
+      if (language === "python" || language === "js") nested.push(...codeLeaves(language, code, null, depth, ctx));
     }
   }
   const normalized = normalizeWords(words, head);
   const { destructive, texts: targetTexts } = destructiveTargetTexts(words, head, ctx.cd);
   const unknown = unknownTargets(words, head, ctx, destructive);
-  if (unknown.deleted) forced.push("unknown-target: deletes a path the eval code computes (not known statically)");
-  if (unknown.written) forced.push("unknown-target: writes to a path the eval code computes (not known statically)");
   if (command === "cd" || command === "pushd") trackDirectory(words, head, ctx);
-  if (destructive && words.slice(0, head).some((word) => basename(word) === "xargs")) {
-    forced.push("xargs: rm -r / find -delete get their targets from stdin (unknown)");
-  }
   const kept = isNonExecuting(words, head, segment)
     ? detailed.filter((word, position) => position <= head || !isProse(word, detailed[position - 1])).map((word) => word.value)
     : words;
@@ -873,7 +839,6 @@ function analyzeSegment(rawSegment, depth, ctx) {
       matchTexts: unique([matchWords.join(" "), matchWords.slice(head).join(" "), ...targetTexts]),
       raw: words.map(shellQuote).join(" "),
       helpOnly: words.includes("--help"),
-      gitDanger: command === "git" && hasDangerousGitOption(words, head),
       // An interpolated value as the command, as git's subcommand or as the command `find -exec` runs.
       dynamic:
         words[head].startsWith("$") ||
@@ -881,8 +846,6 @@ function analyzeSegment(rawSegment, depth, ctx) {
         words[head].includes(UNKNOWN) ||
         (command === "git" && (normalizeGit(words, head)[head + 1] ?? "").includes(UNKNOWN)) ||
         (command === "find" && words.some((word, at) => /^-(exec|execdir|ok|okdir)$/.test(word) && (words[at + 1] ?? "").includes(UNKNOWN))),
-      unknownHost: unknown.host,
-      forced,
       remote: null,
       dockerMount: dockerMountReason(words, head, ctx),
     },
@@ -1208,11 +1171,13 @@ function objectProperty(text, key) {
 }
 
 const CALL_RE =
-  /(?<![\w$.])(tool\.bash|Bun\.spawnSync|Bun\.spawn|Bun\.\$|(?:(?:child_process|childProcess|cp)\.)?(?:execFileSync|execFile|execSync|exec|spawnSync|spawn))\s*([(`])|(?<![\w$.])\$`|\.(execFileSync|execSync|spawnSync)\s*\(/g;
+  /(?<![\w$.])(tool\.bash|tool\.monitor|Bun\.spawnSync|Bun\.spawn|Bun\.\$|(?:(?:child_process|childProcess|cp)\.)?(?:execFileSync|execFile|execSync|exec|spawnSync|spawn))\s*([(`])|(?<![\w$.])\$`|\.(execFileSync|execSync|spawnSync)\s*\(/g;
 // A process API is in use (a regex `.exec(` is not one).
 const PROCESS_HINT_RE =
-  /child_process|\bBun\.(?:spawn|spawnSync|\$)|\btool\.bash\b|(?<![\w$.])\$`|(?<![\w$.])(?:spawn|spawnSync|exec|execSync|execFile|execFileSync)\s*\(|\.(?:spawn|spawnSync|execSync|execFile|execFileSync)\s*\(/;
-const FALLBACK_DANGER_RE = /\bgit\s+push\b|\brm\s+(?:-[A-Za-z]*r[A-Za-z]*f|-[A-Za-z]*f[A-Za-z]*r|-r\s+-f|-f\s+-r)\b/;
+  /child_process|\bBun\.(?:spawn|spawnSync|\$)|\btool\.(?:bash|monitor)\b|(?<![\w$.])\$`|(?<![\w$.])(?:spawn|spawnSync|exec|execSync|execFile|execFileSync)\s*\(|\.(?:spawn|spawnSync|execSync|execFile|execFileSync)\s*\(/;
+// P45: `git push` is retired as an ask everywhere, this fallback included — being inside code the scanner could not
+// read does not make it destructive, and leaving it here would have produced exactly the surprise ask the policy ends.
+const FALLBACK_DANGER_RE = /\brm\s+(?:-[A-Za-z]*r[A-Za-z]*f|-[A-Za-z]*f[A-Za-z]*r|-r\s+-f|-f\s+-r)\b/;
 
 /**
  * The directory a call runs in: `{ cwd: … }` among its arguments or Bun's `` $`…`.cwd(…) `` -> its value (UNKNOWN when
@@ -1255,7 +1220,9 @@ function callCommand(code, match, resolve) {
   const args = splitArgs(code, position);
   if (args.length === 0) return null;
   const first = args[0];
-  if (callee === "tool.bash") {
+  // `tool.bash({command})` and `tool.monitor({command})` both hand one shell line to the same runner (P42): the eval
+  // that calls one is the same action as the tool call it makes, so both read the same `command` property.
+  if (callee === "tool.bash" || callee === "tool.monitor") {
     const value = first.startsWith("{") ? objectProperty(first, "command") : first;
     const literal = value === undefined ? null : literalValue(value, resolve);
     return literal && { text: literal.value, dynamic: literal.dynamic };
@@ -1390,23 +1357,207 @@ function allLiterals(code) {
 }
 
 const PY_CALL_RE = /(?<![\w.])(subprocess\.(?:run|call|check_call|check_output|Popen|getoutput|getstatusoutput)|os\.(?:system|popen)|os\.(?:exec|spawn)\w*)\s*\(/g;
-const PY_HINT_RE = /\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*)\b|\bpty\.spawn\b|\bcommands\.getoutput\b/;
+// `from os import system` binds a process call under a bare name, so the call site reads only `system(…)` and the
+// dotted hints below never fire. The import itself is the only place the process is visible, so it counts as the hint.
+// Only the spawning names of the stdlib process modules: `from os import path` starts nothing and must stay quiet.
+const PY_FROM_IMPORT_HINT =
+  "^[ \\t]*from[ \\t]+(?:os|pty|posix|subprocess|commands)[ \\t]+import[ \\t]+[^\\n#]*(?<![\\w.])" +
+  "(?:system|popen|exec\\w*|spawn\\w*|fork\\w*|run|call|check_call|check_output|Popen|getoutput|getstatusoutput)(?![\\w])";
+const PY_HINT_RE = new RegExp(
+  `\\bsubprocess\\b|\\bos\\.(?:system|popen|exec\\w*|spawn\\w*)\\b|\\bpty\\.spawn\\b|\\bcommands\\.getoutput\\b|${PY_FROM_IMPORT_HINT}`,
+  "m",
+);
+// A plain `import a, subprocess, c` line, with no `as` alias: it binds the module under its own name and nothing else.
+// Ruling P38: such a line starts no process, and every way of reaching the module through it (`subprocess.run`,
+// `getattr(subprocess, …)`, passing `subprocess` on) has to spell the name again, so the hint still has something to
+// find. `import subprocess as sp` and `from subprocess import run` bind another name and are NOT stripped.
+const PY_PLAIN_IMPORT_RE = /^[ \t]*import[ \t]+[\w.]+(?:[ \t]*,[ \t]*[\w.]+)*[ \t]*(?=;|$)/gm;
+// Python keywords and constants that are never a resolvable name.
+const PY_KEYWORDS = new Set([
+  "False", "None", "True", "and", "as", "assert", "async", "await", "break", "case", "class", "continue", "def", "del", "elif", "else", "except",
+  "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "match", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+  "while", "with", "yield",
+]);
+// What a name is doing where it stands: a write or a second binding, never a plain read.
+const PY_AUGMENTED_RE = /^[ \t]*(?::|\+|-|\*\*?|\/\/?|%|@|>>|<<|&|\||\^)=(?!=)/;
+const PY_MUTATOR_RE = /^[ \t]*\.[ \t]*(?:append|extend|insert|remove|pop|clear|sort|reverse|update|add|discard|setdefault|__setitem__)[ \t]*\(/;
+const PY_ATTRIBUTE_WRITE_RE = /^[ \t]*\.[ \t]*\w+[ \t]*=(?!=)/;
+const PY_BINDER_BEFORE_RE = /(?<![\w.])(?:as|global|nonlocal|def|class|import|del)[ \t]+(?:[\w.]+[ \t]*,[ \t]*)*$/;
+// Code that can bind a name the scan below cannot see (the new value lives in a string, or in the namespace itself):
+// nothing in such a program is read as a constant. The JS side refuses the same way for eval / Function / with.
+const PY_REBINDABLE_RE = /(?<![\w.])(?:exec|eval|compile|globals|locals|vars|setattr|__import__)[ \t]*\(|__dict__/;
+// Calls that cannot change a list they are handed, so a name is still what we read after one. The person's own shape
+// needs `' '.join(command)` and `print(command)`; anything NOT named here may mutate its argument, so a name passed to
+// it stops being readable (`other = cmd` aliasing is refused the same way, below).
+const PY_READONLY_CALLS = new Set([
+  "all", "any", "bool", "dumps", "enumerate", "filter", "float", "format", "int", "isinstance", "iter", "join", "len", "list", "map", "next",
+  "print", "quote", "repr", "reversed", "set", "sorted", "str", "sum", "tuple", "type", "zip",
+  // the process calls themselves: this is the argument we are reading
+  "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput", "popen", "run", "system",
+]);
+
+/**
+ * `code` with every string body and `#` comment blanked to spaces (newlines and the quotes themselves kept), so a name
+ * can be found by index and a string still reads as a string when an expression is sliced back out of the code.
+ */
+function pythonSkeleton(code) {
+  const blanked = code.split("");
+  const blank = (from, to) => {
+    for (let at = from; at < to && at < code.length; at += 1) if (blanked[at] !== "\n") blanked[at] = " ";
+  };
+  for (let index = 0; index < code.length; index += 1) {
+    const char = code[index];
+    if (char === "#") {
+      const newline = code.indexOf("\n", index);
+      const end = newline < 0 ? code.length : newline;
+      blank(index, end);
+      index = end;
+    } else if (char === '"' || char === "'") {
+      const quote = code.startsWith(char.repeat(3), index) ? char.repeat(3) : char;
+      let end = index + quote.length;
+      while (end < code.length && !code.startsWith(quote, end)) {
+        if (code[end] === "\\") end += 2;
+        else if (quote.length === 1 && code[end] === "\n") break;
+        else end += 1;
+      }
+      blank(index + quote.length, end);
+      index = Math.min(end + quote.length, code.length) - 1;
+    }
+  }
+  return blanked.join("");
+}
+
+/** The expression text at `at`: to the end of its logical line, following brackets across newlines. */
+function pythonExpression(text, skeleton, at) {
+  let index = at;
+  while (index < text.length && /[ \t]/.test(skeleton[index])) index += 1;
+  const start = index;
+  let depth = 0;
+  for (; index < text.length; index += 1) {
+    const char = skeleton[index];
+    if ("([{".includes(char)) depth += 1;
+    else if (")]}".includes(char)) {
+      if (depth === 0) break;
+      depth -= 1;
+    } else if (depth === 0 && (char === "\n" || char === ";" || char === ":")) break;
+    else if (char === "\\" && skeleton[index + 1] === "\n") index += 1;
+  }
+  return text.slice(start, index).trim();
+}
+
+/**
+ * Which Python names hold a value we can read: `name -> [expression text, …]`, or null when it cannot be proved.
+ * A name is read only when the program binds it EXACTLY once — `name = <expr>` at the start of a logical line, or
+ * `for name in <expr>` with a single target — and never changes it afterwards: a second binding, an augmented
+ * assignment, a subscript or attribute write, a list mutation, a `global`/`as`/parameter binding or a walrus all make
+ * it unknown. Everything is judged on the skeleton, so a name inside a string or a comment binds nothing.
+ *
+ * The two halves have to disagree in the safe direction: only an assignment that starts its own logical line is
+ * collected as THE binding (so `a, b = …` binds neither), while the scan below treats EVERY other plain `name =` as a
+ * rebinding — `if x: cmd = […]`, `a; cmd = […]`, a tuple target — so a value that changes is never read as a constant.
+ */
+function pythonNames(code) {
+  const skeleton = pythonSkeleton(code);
+  const text = code.replace(/#[^\n]*/g, (comment) => " ".repeat(comment.length));
+  const assigned = new Map(); // name -> [expression text] from `name = …`
+  const assignedAt = new Map(); // name -> index of the one assignment above, so any other `name =` is a rebinding
+  const looped = new Map(); // name -> expression text from `for name in …`
+  const unsafe = new Set();
+  for (const match of skeleton.matchAll(/(?:^|\n)[ \t]*([A-Za-z_]\w*)[ \t]*=(?!=)/g)) {
+    const name = match[1];
+    if (assigned.has(name)) unsafe.add(name);
+    assigned.set(name, pythonExpression(text, skeleton, match.index + match[0].length));
+    assignedAt.set(name, match.index + match[0].indexOf(name));
+  }
+  for (const match of skeleton.matchAll(/(?<![\w.])for[ \t]+([A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*)[ \t]+in[ \t]+/g)) {
+    const targets = match[1].split(",").map((target) => target.trim());
+    // More than one target unpacks the item: the name does not hold it.
+    if (targets.length > 1) targets.forEach((target) => unsafe.add(target));
+    else if (looped.has(targets[0])) unsafe.add(targets[0]);
+    else looped.set(targets[0], pythonExpression(text, skeleton, match.index + match[0].length));
+  }
+  // A parameter or a lambda target shadows the name wherever the call sits.
+  for (const match of skeleton.matchAll(/(?<![\w.])def[ \t]+\w+[ \t]*\(|(?<![\w.])lambda[ \t]+/g)) {
+    const from = match.index + match[0].length;
+    const to = match[0].endsWith("(") ? skipBalanced(skeleton, from, "(", ")") : (skeleton.indexOf(":", from) + 1 || skeleton.length) - 1;
+    for (const name of skeleton.slice(from, to).matchAll(/(?<![\w.])([A-Za-z_]\w*)(?![\w])/g)) unsafe.add(name[1]);
+  }
+  // A list handed to anything that might change it is no longer the list we read.
+  for (const match of skeleton.matchAll(/(?<![\w.])([A-Za-z_][\w.]*)[ \t]*\(/g)) {
+    if (PY_READONLY_CALLS.has(match[1].split(".").at(-1))) continue;
+    const from = match.index + match[0].length;
+    for (const name of skeleton.slice(from, skipBalanced(skeleton, from, "(", ")")).matchAll(/(?<![\w.])([A-Za-z_]\w*)(?![\w(])/g)) unsafe.add(name[1]);
+  }
+  // `other = cmd` keeps one list under two names, and a mutation through either reaches both.
+  for (const expression of assigned.values()) if (/^[A-Za-z_]\w*$/.test(expression)) unsafe.add(expression);
+  for (const match of skeleton.matchAll(/(?<![\w.])([A-Za-z_]\w*)(?![\w])/g)) {
+    const name = match[1];
+    if (PY_KEYWORDS.has(name)) continue;
+    const after = skeleton.slice(match.index + name.length);
+    const before = skeleton.slice(Math.max(0, match.index - 96), match.index);
+    if (PY_AUGMENTED_RE.test(after) || PY_MUTATOR_RE.test(after) || PY_ATTRIBUTE_WRITE_RE.test(after)) unsafe.add(name);
+    else if (/^[ \t]*=(?!=)/.test(after) && assignedAt.get(name) !== match.index) unsafe.add(name);
+    else if (PY_BINDER_BEFORE_RE.test(before)) unsafe.add(name);
+    else if (after.startsWith("[")) {
+      const close = skipBalanced(skeleton, match.index + name.length + 1, "[", "]");
+      if (/^[ \t]*=(?!=)/.test(skeleton.slice(close + 1))) unsafe.add(name);
+    }
+  }
+  const rebindable = PY_REBINDABLE_RE.test(skeleton);
+  const resolving = new Set();
+  /** The expression texts the name may hold at the call, or null. `for name in <list>` yields one text per item. */
+  const valuesOf = (name) => {
+    const bindings = (assigned.has(name) ? 1 : 0) + (looped.has(name) ? 1 : 0);
+    if (rebindable || unsafe.has(name) || bindings !== 1 || resolving.has(name)) return null;
+    if (assigned.has(name)) return [assigned.get(name)];
+    const iterable = looped.get(name);
+    if (iterable.startsWith("[")) return splitArgs(iterable, 0);
+    if (!/^[A-Za-z_]\w*$/.test(iterable)) return null;
+    resolving.add(name);
+    try {
+      const outer = valuesOf(iterable);
+      return outer?.length === 1 && outer[0].startsWith("[") ? splitArgs(outer[0], 0) : null;
+    } finally {
+      resolving.delete(name);
+    }
+  };
+  // A name used inside another expression (`cmd = prefix + '/run.sh'`) stands for its own literal; it is read without a
+  // resolver, so a chain of names never recurses and an unknown part stays the unknown-value marker.
+  const resolve = (name) => {
+    const values = valuesOf(name);
+    return values?.length === 1 ? (literalValue(values[0])?.value ?? undefined) : undefined;
+  };
+  return { valuesOf, resolve };
+}
+
+/** The commands one `subprocess.run(x, …)` argument stands for, or null when x cannot be read. */
+function pythonCommands(argument, names) {
+  const read = (expression) => {
+    const literal = literalValue(expression, names.resolve);
+    return arrayCommand(expression, names.resolve) ?? (literal && { text: literal.value, dynamic: literal.dynamic });
+  };
+  const direct = read(argument);
+  if (direct) return [direct];
+  const bound = /^[A-Za-z_]\w*$/.test(argument.trim()) ? names.valuesOf(argument.trim()) : null;
+  const found = bound?.map(read) ?? [];
+  return found.length > 0 && found.every(Boolean) ? found : null;
+}
 
 /** Python code -> { commands, unparsed }: literal subprocess / os.system calls; os.exec… and os.spawn… are never read. */
 function scanPython(code) {
   const commands = [];
+  const names = pythonNames(code);
   let confident = true;
   for (const match of code.matchAll(PY_CALL_RE)) {
     const first = splitArgs(code, match.index + match[0].length - 1)[0] ?? "";
     const readable = !/^os\.(?:exec|spawn)/.test(match[1]);
-    const literal = readable ? literalValue(first) : null;
-    const found = readable ? (arrayCommand(first) ?? (literal && { text: literal.value, dynamic: literal.dynamic })) : null;
+    const found = readable ? pythonCommands(first, names) : null;
     if (found) {
-      commands.push(found.text);
-      if (found.dynamic) confident = false;
+      commands.push(...found.map((item) => item.text));
+      if (found.some((item) => item.dynamic)) confident = false;
     } else confident = false;
   }
-  return { commands, unparsed: PY_HINT_RE.test(code) && (!confident || commands.length === 0) };
+  return { commands, unparsed: PY_HINT_RE.test(code.replace(PY_PLAIN_IMPORT_RE, "")) && (!confident || commands.length === 0) };
 }
 
 const JS_LANGUAGES = new Set(["", "js", "javascript", "ts", "typescript", "jsx", "tsx", "bun", "node"]);
@@ -1445,6 +1596,12 @@ export const READ_TOOLS = new Set([
   "ask_user_question", "request_user_input", "bash_output", "kill_bash", "bash_resize",
   "task", "task_output", "task_send", "task_cancel", "task_create", "task_get", "task_list", "task_update",
   "memory", "create_goal", "update_goal", "get_goal",
+  // Ruling P41: the facts / agreements tools (plugin/extensions/omo.js, missing from the first pinned snapshot). Like
+  // `memory` under P29 they run nothing and take no path from the model — the whole input is the fact's own text and
+  // the ids of the message it came from — and OmO writes them into the agent's own runtime/facts tree, never the
+  // project and never the guard's. Unknown to the guard, they escalated: the person got two cards of raw protocol
+  // JSON for one saved fact. They steer the agent, as `memory` does; they cannot reach the guard's decision.
+  "record_agreement", "record_fact",
   // ruling P30: agent orchestration and session tools (no shell, no project file writes)
   "team_create", "team_delete", "workflow", "workpool",
   "thread_answer", "thread_bind", "thread_bindings", "thread_create", "thread_handoff", "thread_interrupt", "thread_list",
@@ -1453,17 +1610,14 @@ export const READ_TOOLS = new Set([
   "mcp_list_resources", "mcp_read_resource", "session_entries", "lsp_prepare_rename",
   "onboarding_memory_apply", "onboarding_session_history", "onboarding_understand", "nudge",
 ]);
-// MCP tools register as mcp_<server>_<tool> (docs/mcp.md SERVER_NAMESPACE). MCP servers are the user's own choice: a
-// tool is allowed unless its name has a write verb (then it escalates); read names (get, list, search, query, docs…)
-// and names with neither are allowed. codegraph_explore is read-only by its own declaration.
+// MCP tools register as mcp_<server>_<tool> (docs/mcp.md SERVER_NAMESPACE). MCP servers are the user's own choice, so
+// P45 allows every one of them whatever its name says. codegraph_explore is read-only by its own declaration.
 const MCP_TOOL_RE = /^mcp_/i;
 export const MCP_READ_TOOLS = new Set(["mcp_codegraph_codegraph_explore"]);
-const MCP_WRITE_VERBS = new Set([
-  "create", "delete", "remove", "update", "write", "edit", "put", "post", "patch", "push", "send", "publish", "deploy", "merge",
-  "exec", "execute", "run", "shell", "kill", "drop", "insert", "upload", "move", "rename", "transfer", "pay", "approve",
-  "comment", "close", "reopen", "assign", "rewrite", "replace", "apply", "add", "set", "save",
-]);
-// Any other tool with one of these words in its name is denied, not asked (spec §4.3; powershell: commands not parsed).
+// P45: the MCP write-verb list is gone with the ask it fed. An MCP server is the person's own choice, and a verb in
+// its tool's name is neither a destructive form nor a route to the guard — `mcp_github_create_issue` was a question
+// about filing an issue.
+// A tool with one of these words in its name asks, because its input is not a command line anything here can read.
 const WRITE_LIKE_WORDS = new Set(["write", "edit", "patch", "exec", "shell", "powershell", "bash", "eval", "run", "spawn", "monitor"]);
 
 /** Name words: split on `_`, `-`, `.` and camelCase humps, lower-cased (`runCommand` -> run, command). */
@@ -1474,17 +1628,34 @@ const nameWords = (name) =>
     .filter(Boolean)
     .map((word) => word.toLowerCase());
 
-/** The write verbs in an MCP tool's own name (the part after mcp_<server>_), camelCase humps kept as word breaks. */
-const mcpWriteVerbs = (name) => {
-  const raw = String(name ?? "");
-  const own = /^mcp_([^_]+)_(.+)$/i.exec(raw)?.[2] ?? raw.replace(/^mcp_+/i, "");
-  return [...new Set(nameWords(own).filter((word) => MCP_WRITE_VERBS.has(word)))];
-};
-
 const COMMAND_TOOLS = new Set(["bash", "bash_input", "monitor", "eval"]);
 const EVAL_CELL_ACTIONS = new Set(["list", "peek", "stop"]);
 // bash_input keys that submit the line: with no `input` they replay whatever the terminal holds (history recall).
 const SUBMIT_KEY_RE = /\b(?:enter|return)\b|[\r\n]/i;
+
+/**
+ * A bash call written as argv (`{program, args}`) instead of `{command}` -> the one shell line that parses back to
+ * exactly those words, or null when any part of the shape is not a plain string.
+ *
+ * Ruling P39. The uncensored fallback model spells the bash tool this way, and a call shape the classifier could not
+ * read fell into `invalid-call` and denied the lot — `curl --version` with it. A deny nobody can approve is the worst
+ * outcome there is, and `{program:"bash", args:["-c","rm -rf /"]}` was being denied by accident, so it would have
+ * sailed past the day the model spelled the shape differently again.
+ *
+ * Reading this is NOT trusting a tool's description of itself: nothing here believes a name, a flag or a schema. The
+ * argv is re-quoted into the single shell line equivalent to it (shellQuote, exactly as the container-argv path does)
+ * and then faces the whole rule set, deny rules first — so the shell form denies for its real reason. Quoting also
+ * keeps execve's semantics honest: `args: ["$(rm -rf /)"]` is one literal word, because execve runs no shell.
+ * Do NOT widen this into "parse whatever the model sends". Every part has to be a plain string; anything else — a
+ * number, a nested array, an object, a missing program — still fails closed to a deny, and a tool shape nobody has
+ * seen in the journals gets no reader at all.
+ */
+function argvCommandText(input) {
+  if (typeof input.program !== "string" || input.program === "") return null;
+  const args = input.args === undefined ? [] : input.args;
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string")) return null;
+  return [input.program, ...args].map(shellQuote).join(" ");
+}
 
 /**
  * Tool call -> { commands, unparsedCode } | "write" | "read" | "mcp" (judged by its name) | "unknown-write" | "invalid" (a
@@ -1494,7 +1665,11 @@ function extractCalls(toolName, toolInput) {
   const isObject = toolInput !== null && typeof toolInput === "object" && !Array.isArray(toolInput);
   if (COMMAND_TOOLS.has(toolName) && !isObject && toolInput !== undefined) return "invalid";
   const input = isObject ? toolInput : {};
-  if (toolName === "bash") return typeof input.command === "string" ? { commands: [input.command], unparsedCode: "" } : "invalid";
+  if (toolName === "bash") {
+    // Both spellings are judged when both are there: whichever one the runtime picks, the rules have seen it.
+    const commands = [typeof input.command === "string" ? input.command : null, argvCommandText(input)].filter((text) => text !== null);
+    return commands.length > 0 ? { commands, unparsedCode: "" } : "invalid";
+  }
   if (toolName === "bash_input") {
     if (typeof input.input === "string") return { commands: [input.input], unparsedCode: "" };
     if (input.input !== undefined) return "invalid";
@@ -1543,7 +1718,7 @@ export function commandsOf(toolName, toolInput) {
 const show = (text) => text.replaceAll(UNKNOWN, "${…}").replaceAll(SUBST, "$(…)").replaceAll(PROC_SUBST, "<(…)").replace(HEREDOC_TOKEN_RE, "<<…");
 const hashKey = (normalized, cwd) => createHash("sha256").update(`${normalized}\0${cwd}`).digest("hex").slice(0, 32);
 
-// The editable allow rule that trusts `remote-exec` (its remote commands still meet REMOTE_CHECKS and hardDeny).
+// The editable allow rule that trusts `remote-exec exec` (its remote commands still meet REMOTE_CHECKS and hardDeny).
 const REMOTE_EXEC_RULE_ID = "remote-exec";
 // An allow-tier match never switches off the secrets check (remote command or not, a key path is a key path).
 const ALWAYS_CHECKED_ID = "secrets-access";
@@ -1573,19 +1748,20 @@ export function classify(input, rules) {
   const key = (source) => hashKey(source || toolName, cwd);
   if (calls === "unknown-write") {
     if (isUnknownWriteTool(input.tool_name)) {
-      return { tier: "deny", reasons: [`unknown-write-tool: неизвестный инструмент записи «${toolName}»`], normalized: `${toolName}:`, key: key(`${toolName}:${JSON.stringify(input.tool_input ?? {})}`) };
+      // P45: a deny the person cannot approve is the failure we already fixed once, and denying a write-sounding name
+      // while allowing every other unknown tool is asymmetric. The name is a reason to ask, not a reason to refuse.
+      return { tier: "escalate", reasons: [`unknown-write-tool: неизвестный инструмент записи «${toolName}»`], normalized: `${toolName}:`, key: key(`${toolName}:${JSON.stringify(input.tool_input ?? {})}`) };
     }
-    return { tier: "escalate", reasons: [`unknown-tool: инструмент «${toolName}» неизвестен защите`], normalized: `${toolName}:`, key: key(`${toolName}:${JSON.stringify(input.tool_input ?? {})}`) };
+    // P45: a tool the guard has not been taught is not, by itself, a destructive form or a way to reach the guard.
+    // A name that reads like writing is still denied above, which is the half that stays.
+    return { tier: "allow", reasons: [], normalized: `${toolName}:`, key: key(`${toolName}:${JSON.stringify(input.tool_input ?? {})}`) };
   }
-  if (calls === "mcp") {
-    const verbs = mcpWriteVerbs(input.tool_name);
-    if (verbs.length > 0) {
-      return { tier: "escalate", reasons: [`mcp-write: MCP-инструмент «${toolName}» может менять данные (${verbs.join(", ")})`], normalized: `${toolName}:`, key: key(`${toolName}:${JSON.stringify(input.tool_input ?? {})}`) };
-    }
-  }
+  // P45: an MCP server is the person's own choice, and a write verb in its name is neither a destructive form nor a
+  // route to the guard. The `calls === "mcp"` branch now falls through to allow.
   if (calls === "invalid") return { tier: "deny", reasons: ["invalid-call: некорректный вызов инструмента"], normalized: `${toolName}:`, key: key(`${toolName}:invalid`) };
   if (calls === "replay") {
-    return { tier: "escalate", reasons: ["history-replay: повтор команды из истории (bash_input без текста отправляет строку терминала)"], normalized: `${toolName}:replay`, key: key(`${toolName}:${JSON.stringify(input.tool_input ?? {})}`) };
+    // P45: replaying whatever the terminal holds cannot be read, and unreadability stopped being a verdict in P43.
+    return { tier: "allow", reasons: [], normalized: `${toolName}:replay`, key: key(`${toolName}:${JSON.stringify(input.tool_input ?? {})}`) };
   }
   if (typeof calls === "string") return { tier: "allow", reasons: [], normalized: "", key: key("") };
 
@@ -1617,7 +1793,7 @@ export function classify(input, rules) {
     if (escalatedText) escalated.push(`remote-escalate: ${show(escalatedText)}`);
     return Boolean(deniedText || escalatedText);
   };
-  // Commands under `remote-exec` are trusted like the command itself only while the remote-exec allow rule exists (fail closed).
+  // Commands under `remote-exec exec` are trusted like the command itself only while the remote-exec allow rule exists (fail closed).
   const remoteExecTrusted = matchers.allow.some((entry) => entry.id === REMOTE_EXEC_RULE_ID);
   // A whole remote script: cd + rm across lines, etc.
   for (const script of scripts) remoteCheck([script.text], script.remote);
@@ -1629,12 +1805,10 @@ export function classify(input, rules) {
       continue;
     }
     if (leaf.helpOnly) continue;
-    escalated.push(...leaf.forced);
     if (globText) escalated.push(`hard-deny-elsewhere: ${show(globText[0])} matches ${globText[1].glob} (${leaf.remote})`);
     if (leaf.remote && (remoteCheck(leaf.texts, leaf.remote) || globText)) continue;
     if (leaf.remote === "remote-exec" && remoteExecTrusted) {
       // The remote checks match text: they cannot see behind a value the eval code computes.
-      if (leaf.texts.some((text) => text.includes(UNKNOWN))) escalated.push("remote-unknown: удалённая команда содержит значение, вычисляемое кодом eval");
       for (const text of leaf.texts) escalated.push(...escalationReasons(text, matchers, true));
       continue;
     }
@@ -1645,20 +1819,16 @@ export function classify(input, rules) {
       else escalated.push(...escalationReasons(leaf.text, matchers, true));
       continue;
     }
-    if (leaf.gitDanger) escalated.push("git-dangerous-option: git: опасная опция (executes a program or writes a file)");
-    if (leaf.dynamic) escalated.push("dynamic-command: динамическая команда (head word is a variable or substitution)");
     if (leaf.dockerMount) escalated.push(leaf.dockerMount);
-    if (leaf.unknownHost && matchers.ipCheck) escalated.push("ip-egress: network target is not known statically (a value the eval code computes)");
     for (const text of leaf.matchTexts) escalated.push(...escalationReasons(text, matchers));
   }
   if (unparsedCode) {
-    escalated.push("unparsed-eval: код вызывает процесс, команду которого не прочитать статически");
     const literals = allLiterals(unparsedCode);
     // Arguments may be assembled out of order (["git", ...args]): also pair "git" with every other literal.
     const gitPairs = literals.includes("git") ? literals.map((literal) => `git ${literal}`) : [];
     const haystack = [literals.join(" "), ...gitPairs, unparsedCode].join("\n");
     escalated.push(...escalationReasons(haystack, matchers).map((reason) => `unparsed eval: ${reason}`));
-    if (FALLBACK_DANGER_RE.test(haystack)) escalated.push("unparsed eval: git push or rm -rf in process-spawning code");
+    if (FALLBACK_DANGER_RE.test(haystack)) escalated.push("unparsed eval: rm -rf in process-spawning code");
   }
 
   const unique = (items) => [...new Set(items)];

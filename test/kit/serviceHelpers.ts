@@ -109,14 +109,17 @@ export function send(sock: string, message: unknown): Promise<any> {
   });
 }
 
-/** Subscribes on the admin socket; resolves after the acknowledgement. */
+/**
+ * Subscribes on the admin socket; resolves after the acknowledgement. A claim round is answered «no» — a window with no
+ * tab for the session — so the request falls through to every window and `events` holds only the events themselves.
+ */
 export function subscribe(sock: string): Promise<{ events: any[]; close(): void }> {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(sock);
     const events: any[] = [];
     let buffer = "";
     let acked = false;
-    socket.on("connect", () => socket.write(`${JSON.stringify({ op: "subscribe" })}\n`));
+    socket.on("connect", () => socket.write(`${JSON.stringify({ op: "subscribe", protocol: 2 })}\n`));
     socket.on("data", (chunk) => {
       buffer += chunk;
       for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
@@ -125,6 +128,8 @@ export function subscribe(sock: string): Promise<{ events: any[]; close(): void 
         if (!acked) {
           acked = true;
           resolve({ events, close: () => socket.destroy() });
+        } else if (message?.event === "claim") {
+          socket.write(`${JSON.stringify({ op: "claim", id: message.id, verdict: "no" })}\n`);
         } else events.push(message);
       }
     });
@@ -145,3 +150,5 @@ export async function until<T>(predicate: () => T | undefined | false, timeoutMs
 export const bash = (command: string, session = SESSION) => ({ tool: "bash", input: { command }, cwd: CWD, session });
 export const evalCall = (code: string, session = SESSION) => ({ tool: "eval", input: { language: "js", summary: "x", code }, cwd: CWD, session });
 export const evaluate = (command: string, session = SESSION) => ({ op: "evaluate", call: bash(command, session) });
+export const monitorCall = (command: string, session = SESSION) => ({ tool: "monitor", input: { type: "command", command }, cwd: CWD, session });
+export const evaluateMonitor = (command: string, session = SESSION) => ({ op: "evaluate", call: monitorCall(command, session) });

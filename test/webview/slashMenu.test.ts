@@ -4,6 +4,7 @@ import { initialState } from "../../src/chat/reducer";
 import type { CommandRow } from "../../src/sessions/controller";
 import type { WebviewMessage } from "../../src/panel/protocol";
 import { ChatView } from "../../webview/render";
+import { text, type } from "../helpers/composer";
 
 let root: HTMLElement;
 let posted: WebviewMessage[];
@@ -26,8 +27,8 @@ function show(commands?: CommandRow[]): void {
   view.update({ type: "state", state: initialState(), tab: { modelMode: "auto" }, reconnectable: true, ...(commands !== undefined ? { commands } : {}) });
 }
 
-function input(): HTMLTextAreaElement {
-  return root.querySelector("textarea") as HTMLTextAreaElement;
+function input(): HTMLElement {
+  return root.querySelector(".input") as HTMLElement;
 }
 
 function menu(): HTMLElement {
@@ -35,9 +36,24 @@ function menu(): HTMLElement {
 }
 
 function typeInput(value: string): void {
-  input().value = value;
-  input().setSelectionRange(value.length, value.length);
-  input().dispatchEvent(new Event("input", { bubbles: true }));
+  type(input(), value);
+  caretEnd();
+}
+
+/** Puts the caret at the end of the typed text, where a person's would be. */
+function caretEnd(): void {
+  const node = input().lastChild;
+  const selection = window.getSelection() as Selection;
+  const range = document.createRange();
+  if (node === null) range.selectNodeContents(input());
+  else range.setStart(node, node.nodeType === Node.TEXT_NODE ? (node as Text).length : 0);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function caretOffset(): number {
+  return (window.getSelection() as Selection).focusOffset;
 }
 
 function press(name: string): KeyboardEvent {
@@ -81,7 +97,7 @@ describe("slash menu", () => {
     expect(selected()).toBe(rows[2]?.querySelector("[data-role='slash-key']")?.textContent);
     expect(menu().querySelectorAll("[data-row].sel")).toHaveLength(1);
     press("Enter"); // the keyboard picks up where the pointer left
-    expect(input().value).toBe(`${rows[2]?.querySelector("[data-role='slash-key']")?.textContent} `);
+    expect(text(input())).toBe(`${rows[2]?.querySelector("[data-role='slash-key']")?.textContent} `);
   });
 
   it("slash_menu_keyboard_insert", () => {
@@ -121,8 +137,8 @@ describe("slash menu", () => {
     press("ArrowUp");
     expect(selected()).toBe("/resume");
     expect(press("Enter").defaultPrevented).toBe(true);
-    expect(input().value).toBe("/resume ");
-    expect(input().selectionStart).toBe("/resume ".length);
+    expect(text(input())).toBe("/resume ");
+    expect(caretOffset()).toBe("/resume ".length);
     expect(menu().hidden).toBe(true);
     expect(posted.filter((message) => message.type === "send")).toEqual([]);
 
@@ -135,7 +151,7 @@ describe("slash menu", () => {
     expect(outline()).toEqual(["# Команды и навыки", "Довести до конца", "Команда агентов"]);
     press("ArrowDown");
     expect(press("Tab").defaultPrevented).toBe(true);
-    expect(input().value).toBe("mass ulw ");
+    expect(text(input())).toBe("mass ulw ");
 
     typeInput("/re");
     typeInput("/re x"); // the token ended
@@ -144,7 +160,7 @@ describe("slash menu", () => {
     press("Escape");
     expect(menu().hidden).toBe(true);
     expect(document.activeElement).toBe(input());
-    expect(input().value).toBe("/re");
+    expect(text(input())).toBe("/re");
 
     typeInput("/zzz");
     expect(menu().hidden).toBe(true); // nothing matches: no empty box
@@ -168,15 +184,15 @@ describe("slash menu", () => {
     typeInput("/rec");
     expect(outline()).toEqual(["# Команды и навыки", "$receiving-code-review"]); // the canonical «$name», not «$skill:name»
     (menu().querySelector("[data-row]") as HTMLElement).click();
-    expect(input().value).toBe("$receiving-code-review ");
+    expect(text(input())).toBe("$receiving-code-review ");
     expect(menu().hidden).toBe(true);
   });
 
   it("the_slash_button_opens_the_actions_menu_not_the_command_list", () => {
-    input().value = "почини кэш";
+    type(input(), "почини кэш");
     (root.querySelector('[data-role="slash"]') as HTMLButtonElement).click();
     expect(menu().hidden).toBe(true);
-    expect(input().value).toBe("почини кэш"); // nothing typed for the person
+    expect(text(input())).toBe("почини кэш"); // nothing typed for the person
     expect((root.querySelector('[data-popover="actions"]') as HTMLElement).hidden).toBe(false);
   });
 });

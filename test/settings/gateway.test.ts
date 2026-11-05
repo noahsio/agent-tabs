@@ -207,8 +207,18 @@ describe("model capabilities", () => {
     expect(await entry({ id: "m-flat", capabilities: { thinking: { supported: false } } })).toEqual({ id: "m-flat", name: "m-flat", reasoning: false });
   });
 
-  it("a_model_with_no_hint_invents_nothing", async () => {
-    expect(await entry({ id: "gpt-6-astra", object: "model", created: 1, owned_by: "x" })).toEqual({ id: "gpt-6-astra", name: "gpt-6-astra" });
+  /**
+   * A bare `/models` list says nothing about reasoning, and OmO reads a missing `reasoning` as «cannot think»: such a
+   * model was then offered the single level `off` and could not be asked to think at all. Silence is not a denial.
+   */
+  it("a_model_with_no_hint_is_left_for_omo_to_judge", async () => {
+    expect(await entry({ id: "gpt-6-astra", object: "model", created: 1, owned_by: "x" })).toEqual({ id: "gpt-6-astra", name: "gpt-6-astra", reasoning: true });
+  });
+
+  it("an_entry_that_already_denies_thinking_is_not_overruled_by_the_default", async () => {
+    fs.mkdirSync(paths.agentDir, { recursive: true });
+    fs.writeFileSync(paths.modelsJson, JSON.stringify({ providers: { "gw-test": { models: [{ id: "m-quiet", reasoning: false }] } } }));
+    expect(await entry({ id: "m-quiet" })).toEqual({ id: "m-quiet", name: "m-quiet", reasoning: false }); // a hand-edited «no» survives
   });
 
   it("junk_types_are_ignored", async () => {
@@ -222,7 +232,7 @@ describe("model capabilities", () => {
       max_tokens: -1,
       cost: { input: "free", output: null },
     });
-    expect(written).toEqual({ id: "m-junk", name: "m-junk" });
+    expect(written).toEqual({ id: "m-junk", name: "m-junk", reasoning: true }); // junk reads as silence, and silence is OmO's call
   });
 
   it("a_levels_list_naming_nothing_omo_knows_leaves_omos_defaults", async () => {
@@ -323,7 +333,7 @@ describe("saveGateway", () => {
     expect(provider?.models[0]?.reasoning).toBe(true); // the server's word on a capability wins
     expect(provider?.models[0]?.name).toBe("Claude A");
     expect(provider?.models.map((model) => model.id)).toEqual(["claude-a", "claude-b"]);
-    expect(provider?.models[1]).toEqual({ id: "claude-b", name: "claude-b" });
+    expect(provider?.models[1]).toEqual({ id: "claude-b", name: "claude-b", reasoning: true });
     expect(provider?.note).toBe("keep");
     expect(provider?.baseUrl).toBe(base);
     expect(models().providers["unrelated"]).toEqual({ baseUrl: "x", models: [] });

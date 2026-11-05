@@ -19,7 +19,7 @@ async function withPending() {
   const agentDir = makeSvcDir({ decider: { mode: "ask-me" } });
   const paths = servicePaths(agentDir);
   svc = await start(agentDir);
-  const { id, ticket } = await send(paths.hookSock, evaluate("git push origin main"));
+  const { id, ticket } = await send(paths.hookSock, evaluate("rm -rf $U/main"));
   return { agentDir, paths, id: id as string, ticket: ticket as string };
 }
 
@@ -44,7 +44,7 @@ describe("guardctl", () => {
     const waiting = send(paths.hookSock, { op: "wait", id, ticket });
     const result = await guardctl(agentDir, ["allow", id], true);
     expect(result.status).toBe(0);
-    expect(result.questions[0]).toContain("git push origin main");
+    expect(result.questions[0]).toContain("rm -rf $U/main");
     expect((await waiting).decision).toBe("allow");
     expect(await until(() => sub.events.find((event) => event.event === "resolved"))).toMatchObject({ id, decision: "allow", by: "cli" });
     sub.close();
@@ -69,7 +69,7 @@ describe("guardctl", () => {
     const listed = await guardctl(agentDir, ["pending"]);
     expect(listed.status).toBe(0);
     expect(listed.output).toContain(id);
-    expect(listed.output).toContain("git push origin main");
+    expect(listed.output).toContain("rm -rf $U/main");
     expect((await guardctl(agentDir, ["deny", "ffffffffffff"])).status).toBe(1);
     expect((await guardctl(agentDir, ["deny", id])).status).toBe(0);
     expect((await send(paths.adminSock, { op: "pending" })).items).toEqual([]);
@@ -80,13 +80,13 @@ describe("guardctl", () => {
     const agentDir = makeSvcDir({ decider: { mode: "ask-me" } });
     const paths = servicePaths(agentDir);
     svc = await start(agentDir);
-    const { id } = await send(paths.hookSock, { op: "evaluate", call: evalCall('const where = "origin";\nawait tool.bash("git push");') });
+    const { id } = await send(paths.hookSock, { op: "evaluate", call: evalCall('const where = "origin";\nawait tool.bash("rm -rf $U");') });
     const listed = (await guardctl(agentDir, ["pending"])).output;
-    expect(listed.indexOf("    git push")).toBeGreaterThan(listed.indexOf(id));
-    expect(listed.indexOf("код eval:")).toBeGreaterThan(listed.indexOf("    git push"));
+    expect(listed.indexOf("    rm -rf $U")).toBeGreaterThan(listed.indexOf(id));
+    expect(listed.indexOf("код eval:")).toBeGreaterThan(listed.indexOf("    rm -rf $U"));
     expect(listed).toContain('      const where = "origin";');
     const asked = (await guardctl(agentDir, ["deny", id], false)).questions[0] ?? "";
-    expect(asked.indexOf("код eval:")).toBeGreaterThan(asked.indexOf("git push"));
+    expect(asked.indexOf("код eval:")).toBeGreaterThan(asked.indexOf("rm -rf $U"));
   });
 
   it("no_service_is_a_clear_error", async () => {

@@ -44,14 +44,18 @@ export function guardHookEntry({ node, kitDir, agentDir }) {
 const isGuardCommand = (command, home) =>
   isKitCommand(command, home) && [`${path.sep}guard${path.sep}hook.mjs`, `${path.sep}guard${path.sep}agent-guard.mjs`].some((script) => command.includes(script));
 
-/** Every kit guard handler in hooks.json as { event, command }, in EVENTS order; throws when hooks.json cannot be used. */
+/**
+ * Every kit guard handler in hooks.json as { event, command, timeout }, in EVENTS order; throws when hooks.json cannot
+ * be used. The timeout is there so a caller can tell an entry an older version wrote from the one guardHookEntry
+ * writes now.
+ */
 export function guardHandlers(paths) {
   const hooksFile = path.join(paths.agentDir, "hooks.json");
   if (!fs.existsSync(hooksFile)) return [];
   const config = loadConfig(hooksFile, validateHooks);
   return EVENTS.flatMap((event) =>
     (Array.isArray(config.hooks?.[event]) ? config.hooks[event] : []).flatMap((group) =>
-      (Array.isArray(group?.hooks) ? group.hooks : []).filter((handler) => isGuardCommand(handler?.command, paths.home)).map((handler) => ({ event, command: handler.command })),
+      (Array.isArray(group?.hooks) ? group.hooks : []).filter((handler) => isGuardCommand(handler?.command, paths.home)).map((handler) => ({ event, command: handler.command, timeout: handler.timeout })),
     ),
   );
 }

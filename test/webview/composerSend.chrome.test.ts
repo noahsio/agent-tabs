@@ -70,13 +70,13 @@ describe.skipIf(!hasChrome)("the send button in the composer's bar (headless Chr
   });
 
   it("a_typed_message_lights_it_up_and_a_real_click_sends_that_message", async () => {
-    await page.evaluate(`(() => { const input = document.querySelector("textarea.input"); input.value = "поехали"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+    await page.evaluate(`(() => { const input = document.querySelector(".input"); input.textContent = "поехали"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
     expect(await page.evaluate<boolean>(`document.querySelector('${SEND}').disabled`)).toBe(false);
 
     await page.click(await centre(page));
     await waitFor(page, `window.__posted.some((message) => message.type === "send")`);
     expect(await page.evaluate<string>(`window.__posted.find((message) => message.type === "send").text`)).toBe("поехали");
-    expect(await page.evaluate<string>(`document.querySelector("textarea.input").value`)).toBe("");
+    expect(await page.evaluate<string>(`document.querySelector(".input").textContent`)).toBe("");
     expect(await page.evaluate<boolean>(`document.querySelector('${SEND}').disabled`)).toBe(true);
   });
 

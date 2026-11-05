@@ -27,6 +27,8 @@ let daemon: FakeDaemon;
 let manager: DaemonManager | undefined;
 
 const FAKE_PID = 4242;
+/** `ps -o lstart=` for the fake host: the other half of a holder's identity. */
+const FAKE_STARTED = "Thu Nov  5 14:48:53 2026";
 
 const lstatOrUndefined = (file: string): ReturnType<typeof lstatSync> | undefined => {
   try {
@@ -68,6 +70,14 @@ const protect = async (agentDir: string): Promise<void> => {
 async function settle(done: () => boolean): Promise<void> {
   for (let tick = 0; tick < 200 && !done(); tick++) await new Promise((resolve) => setImmediate(resolve));
   expect(done()).toBe(true);
+}
+
+/**
+ * Real I/O ticks with nothing to wait for: a failed start arms its next retry only once its own file work has settled
+ * (the start lock closed and removed), and the fake clock must not be moved before that.
+ */
+async function drain(): Promise<void> {
+  for (let tick = 0; tick < 50; tick++) await new Promise((resolve) => setImmediate(resolve));
 }
 
 function noSpawn(): SpawnFn {
@@ -114,6 +124,10 @@ function fakeProcesses(
       }
     }),
     commandLine: async (pid: number) => (pid === FAKE_PID && alive ? `/x/omo --mode rpc --listen unix://${socket}` : undefined),
+    hostPids: async (file: string) => (alive && file === socket ? [FAKE_PID] : []),
+    startedAt: async (pid: number) => (pid === FAKE_PID && alive ? FAKE_STARTED : undefined),
+    socketFds: async (pid: number, file: string) => (pid === FAKE_PID && alive && file === socket && ownsPath(file) ? 1 : 0),
+    cpuSeconds: async (pid: number) => (pid === FAKE_PID && alive ? 0 : undefined),
   };
 }
 
@@ -247,6 +261,7 @@ describe("DaemonManager", () => {
       expect(spawnFn).toHaveBeenCalledTimes(index);
       await vi.advanceTimersByTimeAsync(1);
       await settle(() => vi.mocked(spawnFn).mock.calls.length === index + 1);
+      await drain(); // the attempt must finish failing before the clock moves on to its retry
     }
     await settle(() => reasons.length === 1);
     expect(reasons[0]).not.toContain("sekret-key-123");
@@ -266,7 +281,7 @@ describe("DaemonManager", () => {
     await settle(() => vi.mocked(spawnFn).mock.calls.length === 1);
     for (let step = 0; step < 40; step++) {
       await vi.advanceTimersByTimeAsync(1_000);
-      await settle(() => true);
+      await drain(); // each attempt must finish failing before the clock reaches its retry
     }
     await settle(() => reasons.length >= 1);
     expect(reasons).toHaveLength(1);
@@ -352,6 +367,57 @@ describe("DaemonManager", () => {
     expect(processes.kill).not.toHaveBeenCalled();
   });
 
+  /**
+   * Two windows cold-starting together used to be able to make two hosts on one socket path, one of which no client
+   * could reach while it kept its sessions' files (measured live: host-race case r6). The start lock decides one
+   * winner before anything is spawned; the loser finds the host the winner started.
+   */
+  it("two_windows_starting_together_make_one_host", async () => {
+    const spawnFn = fakeSpawn();
+    const second = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn, processes: fakeProcesses(hostSocketPath(daemon.agentDir)) });
+    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn, processes: fakeProcesses(hostSocketPath(daemon.agentDir)) });
+    try {
+      const [first, other] = await Promise.all([manager.client(), second.client()]);
+      expect(spawnFn).toHaveBeenCalledTimes(1); // one winner: the other window connected to its host
+      expect(first.instanceId).toBe(daemon.instanceId);
+      expect(other.instanceId).toBe(daemon.instanceId);
+      expect(await readFile(hostPidPath(daemon.agentDir), "utf8")).toBe(String(FAKE_PID));
+    } finally {
+      second.dispose();
+    }
+  });
+
+  /**
+   * The person's own machine: the pid file was lost while a host kept running. The window must join that host, not
+   * unlink it from its path and start another — the unlink is what left a working host unreachable.
+   */
+  it("a_live_host_of_ours_is_joined_not_unbound_when_the_pid_file_is_gone", async () => {
+    await protect(daemon.agentDir);
+    const sock = protectedHostSocketPath(daemon.agentDir);
+    await mkdir(join(sock, ".."), { recursive: true });
+    await symlink(daemon.socketPath, sock); // our host, serving the path, with nothing recording it
+    const spawnFn = fakeSpawn();
+    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn, processes: fakeProcesses(sock) });
+    const client = await manager.client();
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(client.instanceId).toBe(daemon.instanceId);
+    expect(ownsPath(sock)).toBe(true); // never unbound from under it
+    expect(await readFile(protectedHostPidPath(daemon.agentDir), "utf8")).toBe(String(FAKE_PID)); // and recorded again
+  });
+
+  /** A host that died before it answered must not be what the pid file names, or a restart signals the wrong process. */
+  it("the_pid_file_never_names_a_host_that_died_before_it_answered", async () => {
+    const spawnFn = fakeSpawn((child) => {
+      void linkSocket(); // another window's host is already there, as it is when our omo loses the bind
+      setTimeout(() => child.emit("exit", 1, null), 30);
+    });
+    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn, readyTimeoutMs: 2_000 });
+    const client = await manager.client();
+    expect(client.instanceId).toBe(daemon.instanceId); // joined the host that was there
+    await settle(() => true);
+    expect(existsSync(hostPidPath(daemon.agentDir))).toBe(false);
+  });
+
   it("a_protected_env_spawns_the_host_under_sandbox_exec", async () => {
     const agentDir = daemon.agentDir;
     await protect(agentDir);
@@ -429,6 +495,10 @@ describe("DaemonManager", () => {
       },
       commandLine: async (pid) => table.get(pid)?.command,
       listensOn: async (pid, file) => table.get(pid)?.socket === file,
+      hostPids: async (file) => [...table].filter(([, entry]) => entry.socket === file).map(([pid]) => pid),
+      startedAt: async (pid) => (table.has(pid) ? FAKE_STARTED : undefined),
+      socketFds: async (pid, file) => (table.get(pid)?.socket === file ? 1 : 0),
+      cpuSeconds: async (pid) => (table.has(pid) ? 0 : undefined),
     };
     const spawnFn = vi.fn((file: string, args: string[]) => {
       const pid = nextPid++;
@@ -614,6 +684,10 @@ describe("DaemonManager", () => {
       kill: (pid, signal) => process.kill(pid, signal),
       commandLine: async () => undefined,
       listensOn: async (_pid, file) => ownsPath(file),
+      hostPids: async () => [],
+      startedAt: async () => FAKE_STARTED,
+      socketFds: async (_pid, file) => (ownsPath(file) ? 1 : 0),
+      cpuSeconds: async () => 0,
     };
     manager = new DaemonManager({ ...env, omoPath: script, env: childEnv }, { readyTimeoutMs: 3_000, processes });
     try {

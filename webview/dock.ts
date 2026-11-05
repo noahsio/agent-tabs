@@ -89,7 +89,9 @@ type GuardItem = Base & {
   request: PendingView;
   elsewhere: boolean;
   answeredHere: boolean;
-  /** Another session's request: its line in the feed («Решение ждёт в другой сессии»), where its result goes too. */
+  /** The session that owns an `elsewhere` request, when the host could name one; absent: it was not attributable. */
+  owner?: string;
+  /** Another session's request: its line in the feed («Ждёт решения: …»), where its result goes too. */
   notice?: HTMLElement;
 };
 type DialogItem = Base & {
@@ -111,6 +113,8 @@ export type DockOptions = {
   anchor: () => string | undefined;
   /** A result line into the feed, after `after`. */
   addRow: (id: string, element: HTMLElement, after: string | undefined) => void;
+  /** Takes a row back out of the feed (an offer this chat never took up). */
+  dropRow: (id: string) => void;
   /** Who asks for a request of `session` («главный агент», or a subagent's name and model). */
   who: (session: string) => string;
   /** The prompts changed (one came, went or is shown instead of another). */
@@ -200,10 +204,10 @@ export class Dock {
     }
   }
 
-  /** A request of this tab's session docks; another session's gets a line in the feed with «Открыть» instead. */
-  addGuard(request: PendingView, elsewhere: boolean): void {
+  /** A request of this tab's session docks; one that is not this tab's gets a line in the feed with «Открыть» instead. */
+  addGuard(request: PendingView, elsewhere: boolean, owner?: string): void {
     if (this.items.some((item) => item.id === request.id) || this.away.has(request.id)) return;
-    const item: GuardItem = { ...this.base(request.id), kind: "guard", request, elsewhere, answeredHere: false };
+    const item: GuardItem = { ...this.base(request.id), kind: "guard", request, elsewhere, answeredHere: false, ...(owner !== undefined ? { owner } : {}) };
     if (!elsewhere) {
       this.replace([...this.items, item]);
       return;
@@ -217,7 +221,7 @@ export class Dock {
       this.focus();
       this.options.onChange();
     });
-    item.notice = el("div", { class: "step ask-elsewhere", "data-guard": request.id }, `Решение ждёт в другой сессии: ${request.cwd} · `, open);
+    item.notice = el("div", { class: "step ask-elsewhere", "data-guard": request.id }, `Ждёт решения: ${whoseRequest(request.cwd, owner)} · `, open);
     this.away.set(item.id, item);
     this.options.addRow(item.id, item.notice, item.after);
   }
@@ -231,11 +235,16 @@ export class Dock {
     else this.stop.remove();
   }
 
-  /** Answered (here, elsewhere) or timed out: the panel lets it go and the feed keeps one line at the call. */
+  /**
+   * Answered (here, elsewhere) or timed out: the panel lets it go and the feed keeps one line at the call. Who decided
+   * is the service's word (`by`); «вы» only when this tab is the Agent Tabs tab whose answer it took.
+   */
   resolveGuard(id: string, decision: "allow" | "deny", by: string, message?: string): boolean {
     const item = this.guard(id) ?? this.away.get(id);
     if (item === undefined) return false;
-    const who = item.answeredHere && by === "agent-tabs" ? "вы" : `${ANSWERED_BY[by] ?? by} · ${clock(Date.now())}`;
+    if (this.withdraw(item)) return true;
+    const decided = item.answeredHere && by === "agent-tabs" ? "вы" : `${ANSWERED_BY[by] ?? by} · ${clock(Date.now())}`;
+    const who = item.elsewhere ? `${decided} · ${whoseSession(item.owner)}` : decided;
     const verdict = decision === "allow" ? "Разрешено один раз" : "Запрещено";
     const line = resultLine(toolLabel(item.request.tool), oneLine(item.request.command), verdict, decision === "allow" ? "ok" : "error", who);
     if (message !== undefined) line.append(el("p", { class: "quote" }, message));
@@ -247,7 +256,18 @@ export class Dock {
   closeGuard(id: string): boolean {
     const item = this.guard(id) ?? this.away.get(id);
     if (item === undefined) return false;
+    if (this.withdraw(item)) return true;
     this.settle(item, resultLine(toolLabel(item.request.tool), oneLine(item.request.command), "Закрыт", "muted", "запрос больше не ждёт ответа"));
+    return true;
+  }
+
+  /**
+   * Another session's request this chat was only offered («Открыть») and never took up: its end is not this chat's
+   * event, so the offer goes and no verdict is left behind here. One the person opened keeps its line, named.
+   */
+  private withdraw(item: GuardItem): boolean {
+    if (!this.away.delete(item.id)) return false;
+    this.options.dropRow(item.id);
     return true;
   }
 
@@ -328,10 +348,15 @@ export class Dock {
     this.render();
   }
 
-  private answerDialog(item: DialogItem, answer: DialogAnswer, result: Result): void {
+  /**
+   * `result` is the one line the feed keeps at the call. A `question` answered leaves none: OmO records that answer in
+   * the session itself, and the feed shows it as the answer card — the question, the options and their descriptions —
+   * where a line would only say the same thing with less.
+   */
+  private answerDialog(item: DialogItem, answer: DialogAnswer, result?: Result): void {
     if (item.sending) return;
     item.sending = true;
-    this.results.set(item.id, { result, after: item.after });
+    if (result !== undefined) this.results.set(item.id, { result, after: item.after });
     this.options.post({ type: "answer", dialogId: item.id, answer });
     this.render();
   }
@@ -439,13 +464,7 @@ export class Dock {
       if (given !== undefined && (given.selected.length > 0 || given.text !== undefined)) answers[question.id] = given;
     }
     if (Object.keys(answers).length === 0) return; // nothing to say yet
-    const parts = item.questions.flatMap((question, index) => {
-      const given = answers[question.id];
-      if (given === undefined) return [];
-      const words = [...given.selected, ...(given.text !== undefined ? [given.text] : [])].join(", ");
-      return [item.questions.length > 1 ? `${question.header ?? `Вопрос ${index + 1}`} — ${words}` : words];
-    });
-    this.answerDialog(item, { answers }, { name: item.questions.length > 1 ? "Вопросы" : "Вопрос", verdict: `Ответ: ${parts.join("; ")}`, ok: true });
+    this.answerDialog(item, { answers }); // the answer card in the feed is its record (see answerDialog)
   }
 
   private goTo(item: DialogItem, active: number): void {
@@ -618,10 +637,10 @@ export class Dock {
   private drawGuard(panel: HTMLElement, item: GuardItem): void {
     const { request } = item;
     // an eval stays «eval» on its chip: it names code, not a command (the mockup's spelling)
-    panel.append(this.head("Разрешить команду?", request.tool === "eval" ? "eval" : toolLabel(request.tool), item.elsewhere ? "другая сессия" : this.options.who(request.session)));
+    panel.append(this.head("Разрешить команду?", request.tool === "eval" ? "eval" : toolLabel(request.tool), item.elsewhere ? whoseSession(item.owner) : this.options.who(request.session)));
     const body = el("div", { class: "ask-body" });
     if (this.silent) body.append(el("p", { class: "meta ask-silent", role: "status" }, "Служба защиты не отвечает"));
-    if (item.elsewhere) body.append(el("p", { class: "meta where" }, `Другая сессия: ${request.cwd}`));
+    if (item.elsewhere) body.append(el("p", { class: "meta where" }, `Не эта вкладка: ${whoseRequest(request.cwd, item.owner)}`));
     body.append(...commandBlock(request));
     if (request.reasons.length > 0) body.append(el("p", { class: "meta" }, `Причина: ${request.reasons.join(", ")}`));
     const decider = request.decider;
@@ -766,6 +785,21 @@ export function deciderStep(step: GuardStep): HTMLElement {
   const state = decider.decision === "deny" ? "decider no" : decider.decision === "ask" ? "decider ask" : "decider";
   const title = `${decider.model !== undefined ? `${decider.model}: ` : ""}${decider.reason}`;
   const line = el("div", { class: `step ${state}`, "data-guard": step.id, title }, el("span", { class: "verb" }, verdict), " · ", el("code", {}, oneLine(step.command)), ` · ${deciderTime(decider.ms)}`);
-  if (step.cwd !== undefined) line.append(` · другая сессия: ${step.cwd}`);
+  if (step.cwd !== undefined) line.append(` · ${whoseRequest(step.cwd, step.owner)}`);
   return line;
+}
+
+/** A session by the first block of its id: enough to tell two chats apart without a line of uuid. */
+function shortSession(session: string): string {
+  return session.split("-")[0] ?? session;
+}
+
+/** Whose request this is, where the window could not put it in its own tab: the owning session, or that we cannot tell. */
+function whoseSession(owner: string | undefined): string {
+  return owner !== undefined ? `сессия ${shortSession(owner)}` : "сессия не определена";
+}
+
+/** The same with the directory it ran in, for a line that has room for both. */
+function whoseRequest(cwd: string, owner: string | undefined): string {
+  return owner !== undefined ? `сессия ${shortSession(owner)} (её вкладка не открыта), ${cwd}` : `сессию определить не удалось, ${cwd}`;
 }

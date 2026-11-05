@@ -6,8 +6,10 @@ import type {
   DraftMessage,
   GuardStep,
   HostMessage,
+  LadderMessage,
   MessageActionsMessage,
   QueueResultMessage,
+  ReconnectingMessage,
   RewindPreviewMessage,
   RewoundMessage,
   SessionItem,
@@ -30,6 +32,8 @@ import { Lightbox } from "./lightbox";
 import { MessageMenu } from "./messageMenu";
 import { ModelPopover } from "./modelPopover";
 import { Popovers } from "./popover";
+import { ReconnectDetails, ReconnectLine } from "./reconnectLine";
+import { installRefocusGuard } from "./refocus";
 import { RewindConfirm } from "./rewindConfirm";
 import { SessionsPopover } from "./sessionsPopover";
 import { SettingsModal } from "./settings/modal";
@@ -56,6 +60,9 @@ export class ChatView {
   private readonly settingsModal: SettingsModal;
   private readonly messageMenu: MessageMenu;
   private readonly rewindConfirm: RewindConfirm;
+  /** The connection's own line, over the composer, and the modal that carries the whole failure. */
+  private readonly reconnectLine: ReconnectLine;
+  private readonly reconnectDetails: ReconnectDetails;
   private readonly banner: HTMLElement;
   private readonly bannerText: HTMLElement;
   private readonly reconnect: HTMLButtonElement;
@@ -74,6 +81,7 @@ export class ChatView {
     root: HTMLElement,
     private readonly post: Post,
   ) {
+    installRefocusGuard(); // the click that brings the window (or the panel) back only focuses it
     this.popovers = new Popovers(root, () => this.composer.input.focus());
     const close = (): void => this.popovers.close();
     /** A choice made in a popover: it closes and typing continues in the composer. */
@@ -86,6 +94,10 @@ export class ChatView {
     this.modelPopover = new ModelPopover(post, choose);
     this.rewindConfirm = new RewindConfirm(post);
     this.messageMenu = new MessageMenu(post, this.rewindConfirm, close);
+    this.reconnectDetails = new ReconnectDetails(post, () => ({ notice: this.reconnectLine.current, wait: this.reconnectLine.wait }), choose);
+    this.reconnectLine = new ReconnectLine(post, () =>
+      this.popovers.open(this.reconnectDetails, { anchor: this.reconnectDetails.element, side: "center" }),
+    );
 
     const headerRoot = el("header");
     this.header = new Header(headerRoot, post, {
@@ -138,7 +150,7 @@ export class ChatView {
     });
     const slashButton = composerRoot.querySelector('[data-role="slash"]') as HTMLElement;
     this.slashMenu = new SlashMenu({
-      input: this.composer.input,
+      input: this.composer.field,
       show: () => this.popovers.open(this.slashMenu, { ...above(slashButton), inside: [this.composer.input], stretch: true }), // the model picker's edges
       hide: close,
     });
@@ -150,11 +162,13 @@ export class ChatView {
       done: choose,
     });
 
+    composerRoot.insertBefore(this.reconnectLine.element, this.composer.box); // directly over the input, like the wedge under it
     composerRoot.prepend(this.todoStrip.element); // inside the floating footer: the feed's inset grows with it
     this.dock = new Dock({
       post,
       anchor: () => this.feed.anchor(),
       addRow: (id, element, after) => this.feed.addGuardRow(id, element, after),
+      dropRow: (id) => this.feed.removeGuardRow(id),
       who: (session) => {
         const agent = this.last?.state.agents.find((row) => row.childSession === session);
         if (agent === undefined) return "главный агент";
@@ -177,7 +191,7 @@ export class ChatView {
     root.replaceChildren(headerRoot, this.banner, feedRoot, composerRoot, this.composer.overlay, this.lightbox.element, this.rewindConfirm.element);
     // The composer floats over the feed's bottom (CSS); the feed keeps room for it as it grows with text and attachments.
     new ResizeObserver(() => this.feed.setBottomInset(composerRoot.offsetHeight)).observe(composerRoot);
-    for (const popover of [this.sessionsPopover, this.agentMap, this.modelPopover, this.slashMenu, this.actionsMenu, this.settingsModal, this.messageMenu])
+    for (const popover of [this.sessionsPopover, this.agentMap, this.modelPopover, this.slashMenu, this.actionsMenu, this.settingsModal, this.messageMenu, this.reconnectDetails])
       this.popovers.register(popover);
   }
 
@@ -239,6 +253,7 @@ export class ChatView {
   image(id: string, dataUrl: string): void {
     this.feed.image(id, dataUrl);
     this.lightbox.image(id, dataUrl);
+    this.composer.image(id, dataUrl); // a message brought back by ↑ waits for its pictures
   }
 
   /** The host's answer to a send: an accepted message is the host's to show from now on; a refused one stays, as not sent. */
@@ -312,6 +327,17 @@ export class ChatView {
     this.composer.unwedged(message);
   }
 
+  /** The model ladder's line over the composer: the step it is walking, or the model it left the session on. */
+  ladder(message: LadderMessage): void {
+    this.composer.ladder(message.view);
+  }
+
+  /** The host is getting the connection back by itself: the line over the input, and the open modal follows it. */
+  reconnecting(message: ReconnectingMessage): void {
+    this.reconnectLine.update(message);
+    this.reconnectDetails.refresh();
+  }
+
   /** The project's sessions (this tab's own pin comes with the state, not from here). */
   sessions(items: SessionItem[]): void {
     this.sessionsPopover.update(items);
@@ -320,8 +346,8 @@ export class ChatView {
   // ---------- guard ----------
 
   /** An open request: a panel in the composer's place (once, however often the host sends it). */
-  guardRequest(request: PendingView, elsewhere: boolean): void {
-    this.dock.addGuard(request, elsewhere);
+  guardRequest(request: PendingView, elsewhere: boolean, owner?: string): void {
+    this.dock.addGuard(request, elsewhere, owner);
   }
 
   /** Answered or timed out: the panel lets it go, one line stays where it was asked. */

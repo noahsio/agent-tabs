@@ -105,7 +105,7 @@ declare module "*/kit/guard/lifecycle.mjs" {
   /** Where installGuardFiles puts `source`; writes nothing. */
   export function guardFilesDir(home: string, source: string): string;
   /** Every kit guard handler in hooks.json; throws when hooks.json cannot be used. */
-  export function guardHandlers(paths: Paths): { event: string; command: string }[];
+  export function guardHandlers(paths: Paths): { event: string; command: string; timeout?: number }[];
   export function guardHookEntry(spec: { node: string; kitDir: string; agentDir: string }): Group;
   /** Adds or removes our group under PreToolUse and SessionStart; returns the files written. */
   export function setGuardHook(paths: Paths, on: boolean, entry: Group): string[];
@@ -127,6 +127,8 @@ declare module "*/kit/guard/sockets.mjs" {
   export function request(file: string, message: unknown, timeoutMs?: number): Promise<unknown>;
   /** True while a decision service may own rules.json: a socket answers or its lock is fresh (starting). */
   export function serviceMayRun(agentDir: string): Promise<boolean>;
+  /** The most bytes a unix socket path may hold (macOS); a longer one cannot be bound at all. */
+  export const MAX_SOCKET_PATH: number;
 }
 
 declare module "*/kit/guard/rules.mjs" {

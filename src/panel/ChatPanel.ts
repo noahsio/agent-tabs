@@ -8,8 +8,14 @@ import { redact } from "../env";
 import type { ApprovalPanel, GuardApprovals } from "../guard/approvals";
 import type { Checkpointer } from "../rewind/checkpointer";
 import type { ForkDraft } from "../rewind/fork";
+import { claimAutoUnwedge } from "../sessions/autoUnwedge";
 import { SessionController, normalizeSessionName, type CommandRow, type TabState } from "../sessions/controller";
+import type { ReapOutcome } from "../sessions/reapHost";
+import { heldPause, ReconnectLoop } from "../sessions/reconnect";
+import { classifyOpen, giveUpText, heldByAnotherHostCopy, type Holder } from "../sessions/refusal";
+import { levelToApply } from "../sessions/rememberedLevels";
 import type { LoginEvent } from "../settings/accounts";
+import type { Ladder } from "../settings/ladder";
 import { SETTINGS_UNAVAILABLE, type SettingsResult } from "../settings/protocol";
 import type { SettingsService } from "../settings/service";
 import type { Catalog } from "./catalog";
@@ -56,6 +62,8 @@ export type PanelHost = {
   onCatalogChange(listener: () => void): () => void;
   /** The window's models without any session (through the settings' accounts service); absent while the environment is incomplete. */
   fetchModels?: () => Promise<ModelInfo[]>;
+  /** The level this model was last set to, from OmO's own per-model memory; absent while the environment is incomplete. */
+  rememberedLevel?: (model: ModelRef) => string | undefined;
   secrets: readonly string[];
   /** Redacting Output-channel logger. */
   log(text: string): void;
@@ -82,12 +90,21 @@ export type PanelHost = {
   firstRun?: () => Promise<boolean>;
   /** The «/» menu's hidden commands (the same array until they change); absent while the environment is incomplete. */
   hiddenCommands?: () => readonly string[];
+  /** This environment's model ladder, read on demand so an edit in the modal counts from the next failure on. */
+  ladder?: () => Ladder;
   /** The window's approval cards (one guard subscription for every tab); absent while the environment is incomplete. */
-  guard?: Pick<GuardApprovals, "answer" | "replay">;
+  guard?: Pick<GuardApprovals, "answer" | "replay" | "panelsChanged">;
   /** Snapshots and the checkpoint log; absent when the environment is incomplete. */
   checkpointer?: Checkpointer;
   /** Opens a forked session in a new tab whose composer starts with `draft`; the tab names the session `name` once it is open. */
   openFork(sessionPath: string, draft: ForkDraft, column?: vscode.ViewColumn, name?: string): void;
+  /**
+   * Stops a second copy of this environment's own host that holds a session file, when every proof of safety holds —
+   * `force` is the person's own say-so, which skips the proofs of idleness and keeps those of attribution. One attempt
+   * per holder for the whole window, and every tab blocked by that holder gets this same answer. Absent while the
+   * environment is incomplete (there is no host to have a second copy of).
+   */
+  stopDuplicateHost?: (holder: Holder | undefined, options?: { force?: boolean }) => Promise<ReapOutcome>;
 };
 
 export type Opening =
@@ -99,6 +116,15 @@ export type Opening =
 const COMMANDS_DEBOUNCE_MS = 500;
 const LEVELS_DEBOUNCE_MS = 300;
 const NOT_OPEN = "Сессия не открыта";
+/** The feed's own words for the restart the extension did without being asked. */
+const AUTO_UNWEDGE_DONE = "Агент не ответил на «Стоп» — перезапустил сессию";
+const AUTO_UNWEDGE_FAILED = "Не удалось перезапустить сессию";
+const CONNECTION_LOST = "Связь с omo потеряна — переподключаюсь…";
+/** The confirming word of the dialog «Остановить ту копию» opens. */
+const STOP_HOLDER = "Остановить";
+/** What the line says between the duplicate host going away and the session being open again. */
+const REOPENING = "Файл сессии освободился — открываю заново";
+const NOT_REOPENED = "Сессию не удалось открыть заново";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -125,7 +151,22 @@ export class ChatPanel implements ApprovalPanel {
   private commandsFetch = 0;
   private levelsFetch = 0;
   private banner: string | undefined;
+  /**
+   * The tab's own retry of a connection it cannot reach: it waits out the schedule's pause and attempts again by
+   * itself, and the webview shows that as one line over the composer. The top banner is left to what is not about this
+   * session's connection (an incomplete environment, the session's own errors).
+   */
+  private readonly retry = new ReconnectLoop(
+    () => void this.runAttempt(),
+    () => this.postRetry(),
+  );
   private reconnectable = true;
+  /** Attempts this tab has spent on a held session file: its own budget, apart from the connection schedule. */
+  private heldAttempt = 0;
+  /** Who the host last said holds this session file: what the line names once it stops trying. */
+  private heldBy: Holder | undefined;
+  /** The feed's line about a duplicate host this tab stopped, waiting for the session it unblocked to open. */
+  private stopped: string | undefined;
   private key: string | undefined;
   private disposed = false;
   /** Set once the webview asked for the settings: from then on every change is posted to it. */
@@ -246,14 +287,23 @@ export class ChatPanel implements ApprovalPanel {
     this.reconnectable = false;
   }
 
-  /** Daemon connection news, fanned out by the extension to every tab. */
+  /**
+   * Daemon connection news, fanned out by the extension to every tab. Every one of these is about the connection, so
+   * it goes to the line over the composer, not the banner: while the daemon manager runs its own retries the line
+   * spins, and once it gives up this tab's own loop takes over and keeps trying with growing pauses.
+   */
   onDaemon(event: "connected" | "disconnected" | "gave_up", reason?: string): void {
     if (event === "connected") {
       this.banner = undefined;
       this.poster.reset(); // a new connection re-opens the session: the webview gets it whole
-      if (this.controller === undefined && this.reconnectable && !this.noSession) this.open(); // a tab that failed to open retries
-    } else if (event === "disconnected") this.banner = "Связь с omo потеряна — переподключаюсь…";
-    else this.banner = `Не удалось переподключиться к omo: ${reason ?? "причина неизвестна"}`;
+      if (this.controller === undefined && this.reconnectable && !this.noSession) {
+        // A new connection may be a new host process, so whoever held the file may be gone: the budget starts over.
+        this.heldAttempt = 0;
+        this.retry.trying(); // a tab that failed to open retries; `start` reports the outcome
+        this.open();
+      } else this.retry.stop(); // the connection was all that was missing
+    } else if (event === "disconnected") this.retry.trying(CONNECTION_LOST);
+    else this.retry.failed(`Не удалось переподключиться к omo: ${reason ?? "причина неизвестна"}`);
     this.publish();
   }
 
@@ -267,6 +317,7 @@ export class ChatPanel implements ApprovalPanel {
   private async start(): Promise<void> {
     const daemon = this.host.daemon();
     if (!daemon.ok) {
+      this.retry.stop(); // no environment to connect to: retrying would change nothing
       this.banner = daemon.error;
       this.reconnectable = false;
       this.publish();
@@ -277,19 +328,21 @@ export class ChatPanel implements ApprovalPanel {
       // No «open elsewhere» guess from list_sessions: `attachments` also counts OmO's own holds (subagent task hosts,
       // retained sessions after a reload), so it warned about sessions nobody had open. A real conflict is OmO's own
       // `session_path_in_use` on attach, which the controller reports.
+      const log = (text: string): void => this.host.log(text);
       controller =
         this.opening.kind === "new"
-          ? await SessionController.create(daemon.value, this.opening.cwd, undefined, this.host.checkpointer)
-          : await SessionController.attach(daemon.value, this.opening.sessionPath, this.opening.saved, undefined, this.host.checkpointer); // no saved state: mode inferred
+          ? await SessionController.create(daemon.value, this.opening.cwd, undefined, this.host.checkpointer, log)
+          : await SessionController.attach(daemon.value, this.opening.sessionPath, this.opening.saved, undefined, this.host.checkpointer, log); // no saved state: mode inferred
       // A draft's choices go in before its first message (a refused one shows in the state; the message still goes).
       if (this.pending.model !== undefined && this.pending.model !== "auto") await controller.setModel(this.pending.model);
       controller.setStickyMode(this.tab.stickyMode);
       if (this.pending.level !== undefined) await controller.setThinkingLevel(this.pending.level);
+      else if (this.opening.kind === "new") await this.applyRememberedLevel(controller);
       if (this.pending.name !== undefined) await this.nameCreated(controller, this.pending.name);
       if (this.opening.kind === "attach" && this.opening.name !== undefined) await this.nameCreated(controller, this.opening.name); // a fork
     } catch (error) {
       this.host.log(`Не удалось открыть сессию: ${errorText(error)}`);
-      this.banner = `Не удалось открыть сессию: ${errorText(error)}`;
+      this.openFailed(error, daemon.value);
       this.publish();
       return;
     }
@@ -298,6 +351,8 @@ export class ChatPanel implements ApprovalPanel {
       return;
     }
     this.controller = controller;
+    const ladder = this.host.ladder;
+    if (ladder !== undefined) controller.setLadder({ ladder, view: (view) => this.poster.send({ type: "ladder", view: view ?? null }) });
     const checkpointer = this.host.checkpointer;
     if (checkpointer !== undefined) {
       const manager = daemon.value;
@@ -309,6 +364,9 @@ export class ChatPanel implements ApprovalPanel {
       });
     }
     this.banner = undefined;
+    this.heldBy = undefined;
+    this.heldAttempt = 0;
+    this.retry.stop(); // the session is open: the line goes and the schedule starts over
     controller.on("change", () => this.publish());
     controller.on("surfaces", () => this.scheduleCommands());
     controller.on("model", () => this.scheduleLevels()); // the levels belong to the model
@@ -319,8 +377,29 @@ export class ChatPanel implements ApprovalPanel {
       void this.refreshLevels();
       void this.refreshCommands();
     });
+    // The duplicate host this tab had stopped: said once, in the session it unblocked, so the person can audit it.
+    const stopped = this.stopped;
+    this.stopped = undefined;
+    if (stopped !== undefined) controller.note("info", stopped);
     this.publish();
     void this.loadLists(controller); // messages need not wait for the pickers' lists
+  }
+
+  /**
+   * A session the person just created starts at the level its model is remembered at. OmO records that level itself
+   * and restores it on a model switch, but the model a session *starts* on takes its level from the profile, whose
+   * `model:level` pin outranks that memory — so the level the person picked was lost in every new session. See
+   * `levelToApply`: only OmO's own `explicit` stamp gives way, and only here, once, before the first message. What the
+   * host reports is also the session's level, so the composer never shows a step of the profile's own startup.
+   */
+  private async applyRememberedLevel(controller: SessionController): Promise<void> {
+    const model = controller.state.model;
+    if (model === undefined) return;
+    const reported = await controller.modelThinkingLevel(model);
+    if (reported === undefined) return; // a host that cannot say leaves the session exactly as it opened
+    const level = levelToApply(reported, this.host.rememberedLevel?.(model));
+    if (level !== undefined) await controller.setThinkingLevel(level);
+    else controller.noteThinkingLevel(reported.level); // nothing to restore: show the level the session is really on
   }
 
   /**
@@ -467,6 +546,7 @@ export class ChatPanel implements ApprovalPanel {
       case "ready":
         this.poster.reset(); // a (re)loaded webview has no state to apply a delta to
         this.publish();
+        this.postRetry(); // a reloaded webview is told again that a retry is running
         this.host.guard?.replay(this);
         void this.offerFirstRun();
         if (this.forkDraft !== undefined) {
@@ -475,10 +555,13 @@ export class ChatPanel implements ApprovalPanel {
         }
         return;
       case "send": {
-        if (controller === undefined && this.banner === undefined) {
+        // The line over the composer already says the connection is being got back: no second word about it up top.
+        if (controller === undefined && this.banner === undefined && this.retry.view === undefined) {
           this.banner = "Сессия не открыта — сообщение не отправлено";
           this.publish();
         }
+        // The one place a person's own message enters, and so the one place the ladder is ever armed.
+        controller?.watchForLadder(message.id, message.text, message.images ?? []);
         await sendAndAck(controller, message, (reply) => this.poster.send(reply));
         return;
       }
@@ -496,12 +579,18 @@ export class ChatPanel implements ApprovalPanel {
       case "stop":
         await controller?.stop();
         return;
-      // Only ever reaches here from the person's own click on «Снять зависание»; always answered, a refusal included.
+      // The person's click on «Снять зависание», or the composer's own single attempt after an unanswered «Стоп».
+      // Always answered, a refusal included.
       case "unwedge":
-        this.poster.send({
-          type: "unwedged",
-          ...(controller === undefined ? { outcome: "failed" as const, reason: NOT_OPEN } : await controller.unwedgeSession()),
-        });
+        if (message.auto === true) await this.autoUnwedge(controller);
+        else
+          this.poster.send({
+            type: "unwedged",
+            ...(controller === undefined ? { outcome: "failed" as const, reason: NOT_OPEN } : await controller.unwedgeSession()),
+          });
+        return;
+      case "ladderInterrupt":
+        controller?.interruptLadder();
         return;
       case "compact":
         await controller?.compact();
@@ -525,6 +614,9 @@ export class ChatPanel implements ApprovalPanel {
         return;
       case "reconnect":
         await this.reconnect();
+        return;
+      case "stopHolder":
+        await this.stopHolderOnRequest();
         return;
       case "openLink":
         if (isExternalLink(message.url)) await vscode.env.openExternal(vscode.Uri.parse(message.url));
@@ -649,6 +741,27 @@ export class ChatPanel implements ApprovalPanel {
     }
   }
 
+  /**
+   * «Стоп» went unanswered, so the extension restarts the session itself instead of asking. Rationed per durable
+   * session (src/sessions/autoUnwedge.ts): the second time within the cooldown nothing is unloaded and the webview
+   * falls back to offering «Снять зависание». Whatever happens is said once in the feed, where it stays.
+   */
+  private async autoUnwedge(controller: SessionController | undefined): Promise<void> {
+    const durableId = controller?.sessionUuid;
+    if (controller === undefined || durableId === undefined) {
+      this.poster.send({ type: "unwedged", auto: true, outcome: "failed", reason: NOT_OPEN });
+      return;
+    }
+    if (!claimAutoUnwedge(durableId)) {
+      this.poster.send({ type: "unwedged", auto: true, outcome: "cooldown" });
+      return;
+    }
+    const result = await controller.unwedgeSession("агент не ответил на «Стоп»");
+    if (result.outcome === "unloaded") controller.note("info", AUTO_UNWEDGE_DONE);
+    else controller.note("warn", `${AUTO_UNWEDGE_FAILED}: ${result.reason}`);
+    this.poster.send({ type: "unwedged", auto: true, ...result });
+  }
+
   /** Never holds the tab: asked in the background, and only the first tab of the window ever gets a yes. */
   private async offerFirstRun(): Promise<void> {
     try {
@@ -741,19 +854,158 @@ export class ChatPanel implements ApprovalPanel {
     void vscode.window.showWarningMessage(redact(reason, this.host.secrets));
   }
 
+  /**
+   * An open the host (or the lack of one) refused. A failure waiting fixes goes to the quiet line over the composer
+   * with its countdown — the connection, and a session file still held a moment after a reload, which is the common
+   * case and heals in milliseconds. A failure the person has to act on goes to the banner at the top. When the fast
+   * schedule for a held file runs out, the line stops counting and says who holds it instead of spinning for ever.
+   */
+  private openFailed(error: unknown, daemon: DaemonManager): void {
+    if (!daemon.connected) {
+      // The host is not there, or died before it was ready: the connection's own schedule, which never gives up.
+      this.retry.failed(`Не удалось открыть сессию: ${errorText(error)}`);
+      return;
+    }
+    const host = { socket: daemon.socketPath, ...(daemon.hostInstance !== undefined ? { instance: daemon.hostInstance } : {}) };
+    const failure = classifyOpen(error, host);
+    if (failure.kind === "banner") {
+      this.retry.stop();
+      this.banner = `Не удалось открыть сессию: ${failure.text}`;
+      return;
+    }
+    this.banner = undefined;
+    this.heldBy = failure.holder ?? this.heldBy;
+    // A budget of its own, not the connection loop's count: a tab that spent attempts on a host that was down still
+    // gets the whole fast schedule at a held path, and a path that frees resets it.
+    this.heldAttempt += 1;
+    const pause = heldPause(this.heldAttempt);
+    if (pause !== undefined) {
+      this.retry.failed(failure.text, pause);
+      return;
+    }
+    // The schedule is out: asking again will not move a second copy of our own host. Before saying so, the extension
+    // tries to prove that copy is safe to stop and stops it — which is the only thing that can free the path.
+    if (!heldByAnotherHostCopy(this.heldBy, host)) {
+      this.retry.giveUp(giveUpText(this.heldBy, host, failure.text));
+      return;
+    }
+    // The proofs and the grace take seconds, and this open must not hold the tab for them: the line spins meanwhile and
+    // the reopen is armed by the attempt that ends, exactly as every other outcome here is.
+    this.retry.trying(failure.text);
+    void this.stopHolder(giveUpText(this.heldBy, host, failure.text));
+  }
+
+  /**
+   * Stops the second copy of our host that holds this tab's session file, with `force` only when the person said so,
+   * and either re-opens the session or leaves the honest line standing with what is really going on over there.
+   */
+  private async stopHolder(fallback: string, force = false): Promise<void> {
+    const stop = this.host.stopDuplicateHost;
+    if (stop === undefined) {
+      this.retry.giveUp(fallback);
+      return;
+    }
+    let outcome: ReapOutcome;
+    try {
+      outcome = await stop(this.heldBy, { force });
+    } catch (error) {
+      this.retry.giveUp(`${fallback} (остановить её не удалось: ${errorText(error)})`);
+      return;
+    }
+    if (this.disposed) return;
+    if (outcome.verdict === "refused") {
+      this.host.log(`Вторую копию хоста не останавливаю: ${outcome.reason}`);
+      this.retry.giveUp(outcome.reason, outcome.offerStop);
+      return;
+    }
+    if (outcome.verdict === "stopped") {
+      this.host.log(outcome.note);
+      // Said in the feed of the session it unblocked: now if that session is somehow already open, else when it opens.
+      if (this.controller !== undefined) this.controller.note("info", outcome.note);
+      else this.stopped = outcome.note;
+    } else this.host.log(`Держатель файла сессии исчез сам: ${outcome.reason}`);
+    // The path should be free, so the fast schedule starts over. The attempt is ARMED rather than made: this may be
+    // running inside the failed open's own stack, where `open` would refuse because that open has not unwound yet.
+    this.heldAttempt = 0;
+    this.retry.failed(REOPENING, heldPause(1) as number);
+  }
+
+  /**
+   * «Остановить ту копию»: the extension refused to stop that holder by itself, so the person decides. The dialog
+   * repeats the line's own words — the facts the refusal was made on — and the stop that follows keeps every proof of
+   * attribution: a process that is not a host of ours on our socket path is not signalled even here.
+   */
+  private async stopHolderOnRequest(): Promise<void> {
+    const view = this.retry.view;
+    if (view?.offerStop !== true) return; // the line is not offering it: nothing was refused
+    const answer = await vscode.window.showWarningMessage(
+      "Остановить вторую копию хоста OmO?",
+      { modal: true, detail: `${redact(view.error, this.host.secrets)}\n\nЕй будет послан TERM. Если там идёт работа, она прервётся.` },
+      STOP_HOLDER,
+    );
+    if (answer !== STOP_HOLDER || this.disposed) return;
+    this.retry.trying(view.error);
+    await this.stopHolder(view.error, true);
+    this.publish();
+  }
+
+  /** «Переподключить» / «Повторить сейчас»: the same attempt the loop makes, without waiting out its pause. */
   private async reconnect(): Promise<void> {
     if (!this.reconnectable) return;
     this.banner = undefined;
     this.publish();
-    if (this.controller !== undefined) {
-      const daemon = this.host.daemon();
-      if (!daemon.ok) return;
-      // A live connection brings no new "connected" event: re-open on it ourselves.
-      if (daemon.value.connected && !this.controller.attached) await this.controller.reattach();
-      else daemon.value.reconnectNow();
+    if (this.retry.waiting) this.retry.now(); // the pause is cut short; the attempt is the loop's
+    else await this.runAttempt();
+  }
+
+  /**
+   * One attempt to reach this tab's session, automatic or asked for. Its outcome always comes back to the loop — from
+   * `start` for a session that never opened, from `onDaemon` for a connection the daemon manager is re-establishing —
+   * so the next pause is armed by the attempt that ended and two are never in flight.
+   */
+  private async runAttempt(): Promise<void> {
+    if (this.disposed || this.starting !== undefined) return; // an open in flight will report for itself
+    const daemon = this.host.daemon();
+    if (!daemon.ok) {
+      this.retry.stop();
+      this.banner = daemon.error;
+      this.reconnectable = false;
+      this.publish();
       return;
     }
-    if (!this.noSession) this.open(); // the session never opened: try again (a draft opens on send)
+    const controller = this.controller;
+    if (controller === undefined) {
+      if (this.noSession) this.retry.stop(); // a draft's session is created by its first message, not here
+      else this.open();
+      return;
+    }
+    // A live connection brings no new "connected" event: re-open on it ourselves.
+    if (daemon.value.connected && !controller.attached) {
+      await controller.reattach();
+      if (controller.attached) this.retry.stop();
+      else this.retry.failed(controller.state.error ?? NOT_REOPENED);
+      return;
+    }
+    if (daemon.value.connected) this.retry.stop(); // live and attached: this tab's connection is not what is wrong
+    daemon.value.reconnectNow(); // a fresh connection; "connected" or "gave_up" reports back
+  }
+
+  /** The line over the composer: what the retry is doing now, and the whole failure for its details modal. */
+  private postRetry(): void {
+    if (this.disposed) return;
+    const view = this.retry.view;
+    if (view === undefined) {
+      this.poster.send({ type: "reconnecting", active: false });
+      return;
+    }
+    const daemon = this.host.daemon();
+    const session = this.controller?.tabState.sessionPath ?? this.tab.sessionPath;
+    this.poster.send({
+      type: "reconnecting",
+      active: true,
+      ...view,
+      target: { host: daemon.ok ? daemon.value.agentDir : "omo", ...(session !== undefined ? { session } : {}) },
+    });
   }
 
   private publish(): void {
@@ -761,12 +1013,14 @@ export class ChatPanel implements ApprovalPanel {
     const draft = this.noSession;
     const chosen = draft && this.pending.model !== undefined && this.pending.model !== "auto" ? this.pending.model : undefined;
     const base = this.controller?.state ?? initialState();
+    // Without a choice of its own a draft shows the level its model is remembered at: the level its session will start at.
+    const level = this.pending.level ?? (chosen !== undefined ? this.host.rememberedLevel?.(chosen) : undefined);
     // A draft shows its pending choices as if they were the session's.
     const state = draft
       ? {
           ...base,
           ...(chosen !== undefined ? { model: chosen } : {}),
-          ...(this.pending.level !== undefined ? { thinkingLevel: this.pending.level } : {}),
+          ...(level !== undefined ? { thinkingLevel: level } : {}),
           ...(this.pending.name !== undefined ? { title: this.pending.name } : {}),
         }
       : base;
@@ -804,8 +1058,10 @@ export class ChatPanel implements ApprovalPanel {
     this.disposed = true;
     if (this.commandsTimer !== undefined) clearTimeout(this.commandsTimer);
     if (this.levelsTimer !== undefined) clearTimeout(this.levelsTimer);
+    this.retry.dispose(); // the tab is gone: nothing retries for it any more
     this.poster.dispose();
     this.host.panels.delete(this);
+    this.host.guard?.panelsChanged(); // a request this tab was showing goes back to the service, not to the deadline
     this.host.settings?.off("changed", this.onSettingsChanged);
     this.host.settings?.off("login", this.onSettingsLogin);
     this.host.settings?.off("models", this.onModelsChanged);

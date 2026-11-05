@@ -1,5 +1,5 @@
 /** The settings modal's sections, in the order the modal lists them. */
-export const SETTINGS_SECTIONS = ["connections", "models", "security", "tools", "environment"] as const;
+export const SETTINGS_SECTIONS = ["connections", "models", "ladder", "security", "tools", "environment"] as const;
 
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 

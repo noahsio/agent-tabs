@@ -61,7 +61,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
       view.agentDetails(message);
       return;
     case "guardRequest":
-      view.guardRequest(message.request, message.elsewhere === true);
+      view.guardRequest(message.request, message.elsewhere === true, message.owner);
       return;
     case "guardResolved":
       view.guardResolved(message.id, message.decision, message.by, message.message);
@@ -92,6 +92,12 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
       return;
     case "unwedged":
       view.unwedged(message);
+      return;
+    case "ladder":
+      view.ladder(message);
+      return;
+    case "reconnecting":
+      view.reconnecting(message);
       return;
     case "state":
       tab = message.tab;

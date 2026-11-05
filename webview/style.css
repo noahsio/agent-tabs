@@ -245,9 +245,12 @@ button.icon-btn:disabled {
 /* ---------- feed: a timeline of steps ---------- */
 
 .feed {
+  /* The timeline's insets; the pinned copy of the last message bleeds past them to dock to the feed's own edges. */
+  --feed-side: 24px;
+  --feed-top: 8px;
   flex: 1;
   overflow-y: auto;
-  padding: 8px 24px 20px;
+  padding: var(--feed-top) var(--feed-side) 20px;
 }
 
 .empty {
@@ -315,6 +318,43 @@ button.icon-btn:disabled {
 
 .user-bubble button.message-toggle:hover {
   color: var(--fg);
+}
+
+/* ---------- the last message, pinned over the feed ----------
+   A sticky slot of no height at the top of the scroll content: the copy floats over the timeline without taking any of
+   the feed's height, so it can come and go without moving the line the person is reading. */
+
+.pin-slot {
+  position: sticky;
+  top: 0;
+  height: 0;
+  z-index: 2; /* over the rows, under the composer (which comes after the feed) */
+}
+
+/* Docked to the top edge rather than another entry in the timeline: the full width, square corners and a shadow over
+   the rows that slide under it. The fill and the frame are a sent message's — it is the person's own message. */
+.pin {
+  position: absolute;
+  top: calc(-1 * var(--feed-top)); /* the slot sticks inside the feed's padding: the copy covers it */
+  left: calc(-1 * var(--feed-side));
+  right: calc(-1 * var(--feed-side));
+  padding: 8px var(--feed-side) 7px;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  box-shadow: 0 6px 12px -6px var(--pop-shadow);
+}
+
+/* Three lines, and the fade starts later than a message's in the timeline so the third one still reads. */
+.user-bubble.pin.collapsed .user-text {
+  max-height: calc(3 * 1.55em);
+  -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent);
+  mask-image: linear-gradient(to bottom, #000 80%, transparent);
+}
+
+/* Opened: the whole message, and never more than a third of the feed — a longer one scrolls inside the copy. */
+.pin.long:not(.collapsed) .user-text {
+  max-height: 33vh;
+  overflow-y: auto;
 }
 
 .queued-label {
@@ -529,6 +569,21 @@ button.thumb-view:hover {
 
 .step.notice.warn {
   color: var(--run);
+}
+
+/* Someone else's words under a notice (a provider's refusal): folded away, never wider than the rail. */
+.notice-details > summary {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  width: fit-content;
+}
+
+.notice-details > pre {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  color: var(--muted);
 }
 
 /* todo steps: the plan as a checklist (no box, no OmO's echo), an update as one muted line. */
@@ -1075,7 +1130,10 @@ button.copy-btn .icon {
   .indicator .star,
   button.ctx[data-level="busy"] svg,
   .streaming .markdown > :last-child::after,
-  .thumb[data-status="pending"] .thumb-mark {
+  .thumb[data-status="pending"] .thumb-mark,
+  .att[data-status="pending"] .thumb-mark,
+  .reconnect-spin,
+  .drop-caret {
     animation: none;
   }
 }
@@ -1655,6 +1713,7 @@ button.qtab.on {
 
 /* Inset like the mockup (60 px a side at ~916 px), never closer than 28 px to the edges, capped on wide tabs. */
 .composer-box {
+  position: relative; /* the drop mark is placed against this box */
   width: min(860px, calc(100% - 2 * clamp(28px, 6.55%, 60px)));
   margin: 0 auto;
   background: var(--surface);
@@ -1665,6 +1724,74 @@ button.qtab.on {
 
 .composer-box:focus-within {
   border-color: var(--accent);
+}
+
+/*
+ * The connection's line, directly over the box — the quiet row the wedge is under it. A spinner and the countdown to
+ * the next automatic attempt; one row always, because the message is truncated and the modal holds it whole, so a long
+ * error never pushes the composer around.
+ */
+.reconnect {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px;
+  width: min(860px, calc(100% - 2 * clamp(28px, 6.55%, 60px)));
+  max-height: 20px;
+  margin: 0 auto 6px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: auto;
+}
+
+.reconnect-spin {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--line-2);
+  border-top-color: var(--run);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+/* It has stopped trying: the dot stands still, because nothing is in flight for it to spin for. */
+.reconnect[data-phase="held"] .reconnect-spin {
+  border-top-color: var(--line-2);
+  animation: none;
+}
+
+.reconnect button.reconnect-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.reconnect button.reconnect-text:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+/* The countdown keeps its own room at the end of the row: however long the message is, it is never pushed out. */
+.reconnect-progress {
+  flex: none;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.reconnect button.link {
+  flex: none;
+  font-size: 12px;
 }
 
 /* A quiet line under the box when a turn wedges: one sentence and the way out, no card and no colour of its own. */
@@ -1692,25 +1819,43 @@ button.qtab.on {
   color: var(--fg);
 }
 
+/* The model ladder's line, above the wedge's and in the same quiet register. While it walks the step is the one
+   thing on the line worth reading, so that part alone takes the foreground colour. */
+.wedge.ladder[data-state="walking"] .wedge-text {
+  color: var(--fg);
+}
+
+/* Inline pills need a looser line than plain prose: 1.9 keeps a 20 px chip from touching the line above. */
 .input {
   display: block;
   width: 100%;
   min-height: 46px;
   max-height: 40vh;
-  resize: none;
+  overflow-y: auto;
   font: inherit;
+  line-height: 1.9;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   color: var(--fg-strong);
   background: transparent;
   border: none;
   padding: 13px 16px;
+  cursor: text;
 }
 
 .input:focus {
   outline: none;
 }
 
-.input::placeholder {
+/* Nothing in it at all — no words, no pill: the prompt shows and the line goes back to prose spacing. */
+.input[data-empty] {
+  line-height: 1.55;
+}
+
+.input[data-empty]::before {
+  content: attr(data-placeholder);
   color: var(--vscode-input-placeholderForeground, #8a8a8a);
+  pointer-events: none;
 }
 
 .bar {
@@ -1915,8 +2060,17 @@ button.stop {
   background: var(--fg-strong);
 }
 
-button.stop:hover {
+button.stop:hover:not(:disabled) {
   background: var(--fg);
+}
+
+button.stop:disabled {
+  background: var(--chip);
+  cursor: default;
+}
+
+button.stop:disabled i {
+  background: var(--muted);
 }
 
 button.stop i {
@@ -1950,7 +2104,8 @@ button.stop i {
   color: var(--err);
 }
 
-.thumb[data-status="pending"] .thumb-mark {
+.thumb[data-status="pending"] .thumb-mark,
+.att[data-status="pending"] .thumb-mark {
   animation: pulse 1.2s infinite;
 }
 
@@ -1983,11 +2138,152 @@ button.stop i {
   color: var(--bg);
 }
 
-.attach-errors {
-  padding: 6px 16px 0;
+/* ---------- a picture standing in the line of text (docs/design/2026-11-06-inline-attachments-mockup.html) ---------- */
+
+/* The shelf's chip, shrunk to sit on a text line; it wraps whole, like a long word. */
+.att {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  vertical-align: -4px;
+  margin: 0 1px;
+  height: 20px;
+  max-width: 220px;
+  padding: 0 4px 0 3px;
+  border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent);
+  border-radius: 5px;
+  background: var(--chip);
+  color: var(--fg-strong);
+  font-size: 12.5px;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.att .tn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--code-bg);
+}
+
+.att .tn img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.att .lbl {
+  min-width: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+/* The ✕ keeps its space at all times: appearing on hover must not re-wrap the line. */
+.att .xx {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 9px;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.att:hover {
+  background: var(--chip-hover);
+  border-color: color-mix(in srgb, var(--fg) 30%, transparent);
+}
+
+.att:hover .xx {
+  opacity: 1;
+}
+
+.att .xx:hover {
+  color: var(--fg-strong);
+}
+
+/* Still being prepared: no picture yet, so the chip holds a pulsing mark instead. */
+.att[data-status="pending"] {
+  color: var(--muted);
+}
+
+.att[data-status="pending"] .tn {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+/* Refused: the chip stays where it was put, so it is clear which line lost its picture. */
+.att[data-status="error"] {
+  border-color: var(--err);
   color: var(--err);
+}
+
+.att[data-status="error"] .tn {
+  background: color-mix(in srgb, var(--err) 18%, transparent);
+}
+
+.att[data-status="error"] .thumb-mark {
+  color: var(--err);
+}
+
+/* The same pill in a sent message: a click opens the picture, and there is no ✕ — nothing is left to remove. */
+button.uimg.att {
+  height: 20px;
+  padding: 0 7px 0 3px;
+  border-radius: 5px;
+  background: var(--chip);
+  cursor: zoom-in;
+}
+
+/* A message that carries pills needs the looser line the composer wrote it on. */
+.user-text:has(.att) {
+  line-height: 1.9;
+}
+
+/* Carrying a file over the input: the words stay visible and a mark says which gap it will fall into. */
+.drop-caret {
+  position: absolute;
+  z-index: 5;
+  width: 2px;
+  height: 19px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  animation: caret 1s steps(1) infinite alternate;
+}
+
+.drop-hint {
+  position: absolute;
+  z-index: 5;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: var(--vscode-button-foreground, #ffffff);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.attach-notes {
+  padding: 4px 16px 0;
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.attach-note {
+  color: var(--muted);
+}
+
+.attach-note.error {
+  color: var(--err);
 }
 
 .attach-notice {
@@ -3493,6 +3789,93 @@ button.pill.mode-chip {
   }
 }
 
+/* ---------- settings · «Лесенка моделей» (one row per rung: its number, its action, the failures it answers) ---------- */
+
+.st-rungs {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.st-rung {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1.3fr) auto auto;
+  align-items: center;
+  gap: 6px 14px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.st-rung:first-child {
+  border-top: 0;
+}
+
+/* A row being carried shows where it is; the rest keep still. */
+.st-rung[draggable="true"] {
+  cursor: grab;
+}
+
+.st-rung-n {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.st-rung-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.st-rung-body select,
+.st-rung-body input[type="text"] {
+  width: 100%;
+}
+
+/* The four failures read as one group of plain words, not as four controls. */
+.st-rung-on {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.st-rung-on label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.st-rung-on input:disabled + * ,
+.st-rung[data-top="true"] .st-rung-on {
+  opacity: 0.5;
+}
+
+.st-rung-handles {
+  display: flex;
+  gap: 2px;
+}
+
+.st-rung-handles button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* On a phone-sized body the rung's words take the full width and its controls sit under them. */
+@container st-body (max-width: 640px) {
+  .st-rung {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .st-rung-on {
+    grid-column: 2 / -1;
+  }
+}
+
 /* ---------- settings · «Инструменты» and «Среда» (switch rows, skill list, line editors after the mockup) ---------- */
 
 .st-tools > .st-h3:first-child {
@@ -3937,4 +4320,115 @@ button.pill.mode-chip {
 .rc-actions button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* ---------- an answered question: one quiet card where the answer's own bubble would be ----------
+   The shape of the panel it was answered in (docs/design/2026-11-05-dialogs-mockup.html), muted: it is history.
+   The `.user-bubble` / `.user-text` shell is the sent message's, so a long card collapses the same way. */
+
+.user-bubble.answered {
+  background: transparent;
+  border-color: var(--line);
+}
+
+.answer {
+  white-space: normal;
+}
+
+.answer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.answer-title {
+  font-weight: 600;
+  color: var(--fg-strong);
+}
+
+.answer-head .tool {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 18px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--chip);
+  color: var(--fg);
+}
+
+.answer-mark {
+  margin-left: auto;
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.answer-q {
+  margin-top: 8px;
+}
+
+.answer-q.skipped {
+  opacity: 0.65;
+}
+
+.answer-name {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.answer .question-text {
+  margin: 0;
+  color: var(--fg-strong);
+  overflow-wrap: anywhere;
+}
+
+.answer .opts {
+  margin: 5px 0 0;
+}
+
+/* No numbers here: nothing is chosen by a digit any more, the tick alone says what was. */
+.answer .opt {
+  grid-template-columns: 16px 1fr;
+  column-gap: 8px;
+  padding: 3px 0;
+  color: var(--muted);
+}
+
+.answer .opt:hover {
+  background: none;
+}
+
+.answer .opt.chosen {
+  color: var(--fg-strong);
+}
+
+/* Only what they picked is marked: an empty gutter, not a row of empty boxes to read past. */
+.answer .opt .box {
+  border-color: transparent;
+}
+
+.answer .opt .box.on {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.answer .opt .box.on .icon {
+  color: var(--bg);
+}
+
+/* Their own words, when no option says it. */
+.answer-words {
+  margin: 5px 0 0;
+  color: var(--fg-strong);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-left: 2px solid var(--rail);
+  padding-left: 10px;
+}
+
+.answer-note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }

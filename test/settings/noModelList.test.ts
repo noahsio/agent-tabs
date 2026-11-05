@@ -24,8 +24,15 @@ function filesMatching(dirs: string[], pattern: RegExp, options: { exclude?: str
 
 describe("no hard-coded model lists", () => {
   it("no_model_ids_in_plugin_source", () => {
-    // webview/dev: the sample state of the dev page; kit/verify-omo-live.mjs: a dev-only live check, never shipped
-    expect(filesMatching(["src", "webview", "kit"], MODEL_ID, { exclude: ["webview/dev", "kit/verify-omo-live.mjs"] })).toEqual([]);
+    // webview/dev: the sample state of the dev page; kit/verify-omo-live.mjs: a dev-only live check, never shipped.
+    // src/settings/ladderDefault.ts: the frozen spec's default model ladder — not a catalogue a picker offers, but the
+    // first value of one editable per-environment preference (<agentDir>/agent-tabs/ladder.json), whose rungs the walk
+    // skips when the environment does not serve them. A stale id there costs a skipped step, never a wrong picker.
+    expect(
+      filesMatching(["src", "webview", "kit"], MODEL_ID, {
+        exclude: ["webview/dev", "kit/verify-omo-live.mjs", "src/settings/ladderDefault.ts"],
+      }),
+    ).toEqual([]);
   });
 
   it("the_scan_itself_finds_a_model_id", () => {

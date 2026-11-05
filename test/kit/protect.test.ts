@@ -60,4 +60,100 @@ describe("guard state: paths, not words", () => {
     ]) expect([code, evalJs(code)]).toEqual([code, expect.any(String)]);
     expect(guardStateReason("ls", { ...where, cwd: path.join(agentDir, "guard") })).toEqual(expect.any(String));
   });
+
+  it("a_bash_call_written_as_argv_is_still_seen_touching_the_guard", () => {
+    // P39 made `{program, args}` readable to the classifier. This check reads the call separately and falls back to
+    // the whole input as JSON, which still carries the paths — so the protection must not regress if commandText is
+    // ever tidied up. Every one of these has to name a reason.
+    for (const input of [
+      { program: "cat", args: [path.join(agentDir, "guard", "rules.json")] },
+      { program: "rm", args: ["-rf", path.join(agentDir, "guard")] },
+      { program: "tee", args: [path.join(agentDir, "hooks.json")] },
+      { program: "nc", args: ["-U", path.join(agentDir, "guard", "admin.sock")] },
+      { program: "bash", args: ["-c", `echo '{}' > ${path.join(agentDir, "guard", "rules.json")}`] },
+    ]) expect([input, reasonOf("bash", input)]).toEqual([input, expect.any(String)]);
+    expect(reasonOf("bash", { program: "curl", args: ["--version"] })).toBeNull();
+  });
+});
+
+describe("guard state is the decision surface, not the whole tree (P40)", () => {
+  const skill = path.join(home, ".omo", "binary-runtime", "5.1.59", "plugin", "skills", "coding-agent-sessions", "scripts", "find-agent-sessions.py");
+
+  it("the_two_photographed_cards_are_ordinary_tooling", () => {
+    // OmO ships this script inside its own versioned runtime and the person runs it to list sessions. It used to ask
+    // only because the command names a path under the agent dir — the sessions it is pointed at.
+    const command = `python3 -B ${skill} find --query zec-sweep --include-subagents --platform senpi --root ${path.join(agentDir, "projects")} --limit 8`;
+    expect(reasonOf("monitor", { command })).toBeNull();
+    expect(evalJs(`display(await tool.monitor({description:'Locate transcript', command:${JSON.stringify(command)}, timeout_ms:120000}));`)).toBeNull();
+  });
+
+  it.each([
+    // The agent's own data under the agent dir: its transcripts, projects, memory, the runtime it was unpacked from.
+    `ls ${path.join(agentDir, "sessions")}`,
+    `cat ${path.join(agentDir, "sessions", "s1", "x.jsonl")}`,
+    `grep -rn zec ${path.join(agentDir, "projects")}`,
+    `rg --files ${path.join(home, ".omo", "binary-runtime", "5.1.59")}`,
+    `wc -l ${path.join(agentDir, "memory", "MEMORY.md")}`,
+    `python3 ${skill} find --query x`,
+    `cd ${path.join(agentDir, "sessions")} && ls`,
+    `tar -czf /tmp/t.tgz ${path.join(agentDir, "projects")}`,
+  ])("the_agents_own_data_is_not_the_guards_state: %s", (command) => {
+    expect(bash(command), command).toBeNull();
+  });
+
+  it.each([
+    // The guard's own decision surface, whatever the tool: its state, its keys, its wiring, the kit it runs from.
+    `cat ${path.join(agentDir, "guard", "rules.json")}`,
+    `ls ${path.join(agentDir, "keys")}`,
+    `cat ${path.join(agentDir, "keys", "gw.key")}`,
+    `cat ${path.join(agentDir, "hooks.json")}`,
+    `cat ${path.join(agentDir, "hooks-state.json")}`,
+    // settings.json carries permissionPreset and models.json the provider keys: both decide what the agent may do
+    `echo '{}' > ${path.join(agentDir, "settings.json")}`,
+    `cat ${path.join(agentDir, "models.json")}`,
+    `node ${path.join(home, ".omo", "kit", "abc", "guard", "service.mjs")}`,
+    `rm -rf ${path.join(home, ".omo", "kit")}`,
+    `cat ${path.join(home, ".omo", "omo.jsonc")}`,
+    // the LaunchAgent that starts the service, and the launchctl calls that would stop it
+    `cp /tmp/x.plist ${path.join(home, "Library", "LaunchAgents", "com.agent-tabs.guard.plist")}`,
+    "launchctl bootout gui/501/com.agent-tabs.guard",
+    "launchctl unload ~/Library/LaunchAgents/com.agent-tabs.guard.plist",
+    "guardctl pending",
+    "agent-guard answer abc allow-once",
+  ])("the_decision_surface_still_asks: %s", (command) => {
+    expect(bash(command), command).toEqual(expect.any(String));
+  });
+
+  it.each([
+    // Answering its own request, reading the ticket it would need, or reaching the sockets that take answers.
+    `cat ${path.join(agentDir, "guard", "pending.json")}`,
+    `cat ${path.join(agentDir, "guard", "answers.json")}`,
+    `cat ${path.join(agentDir, "guard", "used.json")}`,
+    `nc -U ${path.join(agentDir, "guard", "admin.sock")}`,
+    `node -e "require('net').createConnection('${path.join(agentDir, "guard", "hook.sock")}')"`,
+    // Switching the guard off: its rules, its profile, its lock, the kit, the plist, the launchd job.
+    `echo '{"version":2,"hardDeny":[]}' > ${path.join(agentDir, "guard", "rules.json")}`,
+    `rm -f ${path.join(agentDir, "guard", "service.lock")}`,
+    `cp /tmp/open.sb ${path.join(agentDir, "guard", "sandbox.sb")}`,
+    `sed -i '' s/deny/allow/ ${path.join(home, ".omo", "kit", "abc", "guard", "classify.mjs")}`,
+    `defaults write ${path.join(home, "Library", "LaunchAgents", "com.agent-tabs.guard.plist")} x 1`,
+    "launchctl stop com.agent-tabs.guard",
+    "launchctl kickstart -k gui/501/com.agent-tabs.guard",
+    // Taking the credentials the decider authenticates with.
+    `cat ${path.join(agentDir, "keys", "gw.key")}`,
+    `cp -r ${path.join(agentDir, "keys")} /tmp/stolen`,
+    // Re-pointing the hook wiring or the permission preset.
+    `echo '{"hooks":{}}' > ${path.join(agentDir, "hooks.json")}`,
+    `jq '.permissionPreset="full-access"' ${path.join(agentDir, "settings.json")}`,
+  ])("nothing_that_could_disable_or_forge_a_decision_became_allowed: %s", (command) => {
+    expect(bash(command), command).toEqual(expect.any(String));
+  });
+
+  it("running_inside_the_guard_or_keys_dir_still_asks_but_not_the_whole_agent_dir", () => {
+    expect(guardStateReason("ls", { ...where, cwd: path.join(agentDir, "guard") })).toEqual(expect.any(String));
+    expect(guardStateReason("ls", { ...where, cwd: path.join(agentDir, "keys") })).toEqual(expect.any(String));
+    expect(guardStateReason("ls", { ...where, cwd: path.join(home, ".omo", "kit", "abc") })).toEqual(expect.any(String));
+    expect(guardStateReason("ls", { ...where, cwd: path.join(agentDir, "sessions") })).toBeNull();
+    expect(guardStateReason("ls", { ...where, cwd: agentDir })).toBeNull();
+  });
 });

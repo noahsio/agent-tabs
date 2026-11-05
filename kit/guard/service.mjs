@@ -12,9 +12,19 @@
 //     becomes «[guard] Человек: <message>».
 //   {op:"rules.get"} -> {rules, errors?};  {op:"rules.set", rules} -> {ok} | {ok:false, errors: FieldError[]} | {ok:false, error}
 //   {op:"status"} -> {version, rulesOk}
-//   {op:"subscribe"} -> {ok:true}, the open requests as "pending" events, then
-//     {event:"pending", item} | {event:"resolved", id, decision:"allow"|"deny", by, session, decider?, item?, message?}
+//   {op:"subscribe"} -> {ok:true}, then the open requests, routed as below, and from then on
+//     {event:"pending", item, only?:true, outside?:{owner}} | {event:"claim", id, session}
+//     | {event:"resolved", id, decision:"allow"|"deny", by, session, decider?, item?, message?}
 //     (by: agent-tabs | cli | telegram | timeout | decider; a decider's final verdict carries `item`, there was no card)
+//   {op:"claim", id, verdict:"own"|"knows"|"no", owner?} -> no reply; the answer to a "claim" event.
+//     WHO SHOWS A REQUEST IS DECIDED HERE, once, because only the service sees every window: a new request goes out to
+//     the subscribers as "claim", and the first window that has the asking session open («own») gets the request alone
+//     («only»). Failing that, the first window that knows whose session it is but has no tab for it («knows») is asked
+//     to raise it outside the chats («outside»), so no unrelated chat shows a card. If nobody claims it within
+//     `claimMs`, every window gets it — the only case where a chat sees a request it did not ask for. Nothing is held
+//     for the round: the hook is already waiting on its ticket, and the human deadline runs from when the request
+//     opened. A window that subscribes later is asked to claim the requests that are already placed, and joins a
+//     request that went out to everyone.
 // PendingView = {id, session, cwd, tool, command (redacted, <= 4096 chars; an eval: its shell commands, one per line),
 //   code? (an eval's code when commands were extracted, redacted, <= 4096), reasons, decider?: {model, decision, reason, ms}, createdAt}
 // Everything the sandbox can reach is bounded: open requests per session and in total, concurrent decider calls (identical
@@ -34,6 +44,14 @@ import { createTelegram, DEFAULT_TG_ENV, httpTransport, loadTelegramConfig, reso
 
 export { servicePaths };
 export const SERVICE_VERSION = 1;
+/**
+ * The admin protocol this service speaks. 2 added the claim round (who shows a request). A window that subscribes
+ * without `protocol` cannot take part in a round, so it is never shown a request the round placed elsewhere — it would
+ * decide locally and put a card in whatever chat it has open, which is the whole bug the round exists to stop.
+ */
+export const SERVICE_PROTOCOL = 2;
+/** The least protocol a subscriber must speak to be routed to rather than broadcast at. */
+const CLAIM_PROTOCOL = 2;
 export const LIMITS = {
   openPerSession: 10,
   openTotal: 50,
@@ -54,6 +72,9 @@ const CLOSE_GRACE_MS = 500;
 const SECRETS_TTL_MS = 30_000;
 // A human answer serves the same call (key, session) again for this long.
 const ANSWER_REUSE_MS = 60_000;
+
+/** The kit directory this service was loaded from: its content hash is the extension build that installed it. */
+const ownGuardDir = () => path.dirname(fileURLToPath(import.meta.url));
 
 const allow = (reason) => ({ decision: "allow", reason });
 const deny = (reason) => ({ decision: "deny", reason });
@@ -276,6 +297,7 @@ export async function startService({
   omoPath = DEFAULT_OMO_PATH,
   home = os.homedir(),
   tickMs = 500,
+  claimMs = 400,
   telegramPollMs = 2000,
   telegramSendMs = 2000,
   requestDeadlineMs = 5000,
@@ -288,9 +310,13 @@ export async function startService({
   const lockToken = await takeLock(paths.lock, paths.hookSock);
 
   let rulesState = loadRulesState(paths.rules);
+  // One line to stderr, which the LaunchAgent captures (src/guard/launchAgent.ts StandardErrorPath): the place a
+  // failure of ours is recorded instead of being put to the person as a question (P44).
+  const log = (line) => console.error(`[guard ${iso(now())}] ${line}`);
   // id -> { id, key, session, view, deadline, waitSeconds, answer, used, tickets: Map<ticket, {tool, waiting}>, waiters, telegramSent }
   const requests = new Map();
-  const subscribers = new Set();
+  /** socket -> { protocol }: what each connected window can be asked. */
+  const subscribers = new Map();
   const connections = new Set();
   const deciderSlots = semaphore(LIMITS.deciderConcurrent, LIMITS.deciderQueue);
   const deciderInFlight = new Map(); // key -> Promise<{answer, ms} | null>
@@ -308,9 +334,101 @@ export async function startService({
     return secretsCache.redact;
   }
 
+  /** Every window, whatever it speaks: an end (`resolved`) must reach an old window too, or its card never closes. */
   const broadcast = (event) => {
-    for (const socket of subscribers) writeLine(socket, event);
+    for (const socket of subscribers.keys()) writeLine(socket, event);
   };
+  /** The windows that answer claim rounds. */
+  const claimers = () => [...subscribers].filter(([, who]) => who.protocol >= CLAIM_PROTOCOL).map(([socket]) => socket);
+  /** Who a request goes to when nobody claimed it: the windows that could have, or — if there are none — everybody. */
+  const fallbackAudience = () => (claimers().length > 0 ? "claimers" : "everyone");
+  /** The sockets of an audience, now. */
+  const audienceOf = (audience) => (audience === "everyone" ? [...subscribers.keys()] : audience === "claimers" ? claimers() : Array.isArray(audience) ? audience : []);
+
+  /**
+   * The claim round for one request: every window is asked whose session it is, and the answers decide who shows it.
+   * `record.audience` is the sockets that were given it («all» = every window, the unattributable fan-out), so a window
+   * that subscribes later can be slotted in without handing it somebody else's request.
+   */
+  function route(record) {
+    if (subscribers.size === 0) return; // no window to ask; a later subscriber picks it up from openRecords()
+    const asked = claimers();
+    if (asked.length === 0) return give(record, "everyone", {}); // only old windows: they decide for themselves, as always
+    const claims = new Map();
+    const timer = setTimeout(() => settleRoute(record), claimMs);
+    if (typeof timer.unref === "function") timer.unref();
+    record.routing = { claims, timer };
+    for (const socket of asked) writeLine(socket, { event: "claim", id: record.id, session: record.session });
+  }
+
+  /** A window's answer to a claim. The owner ends the round at once; anything else waits for the rest or the timer. */
+  function claimed(record, socket, verdict, owner) {
+    if (!record.routing || !subscribers.has(socket)) return;
+    record.routing.claims.set(socket, { verdict, owner: typeof owner === "string" && owner !== "" ? owner : undefined });
+    if (verdict === "own" || record.routing.claims.size >= claimers().length) settleRoute(record);
+  }
+
+  function settleRoute(record) {
+    const routing = record.routing;
+    if (!routing) return;
+    clearTimeout(routing.timer);
+    record.routing = undefined;
+    if (record.answer || !requests.has(record.id)) return; // answered or timed out while the windows were answering
+    const live = [...routing.claims].filter(([socket]) => subscribers.has(socket));
+    const own = live.find(([, claim]) => claim.verdict === "own");
+    if (own) return give(record, [own[0]], { only: true });
+    const knows = live.find(([, claim]) => claim.verdict === "knows");
+    if (knows) return give(record, [knows[0]], { outside: { owner: knows[1].owner ?? null } });
+    give(record, fallbackAudience(), {});
+  }
+
+  /** Hands a request to the windows that will show it, and remembers which those are. */
+  function give(record, audience, extra) {
+    record.audience = audience;
+    const event = { event: "pending", item: record.view, ...extra };
+    for (const socket of audienceOf(audience)) writeLine(socket, event);
+  }
+
+  /**
+   * A new subscriber and the requests already waiting: it joins one that went out to everyone, is asked to claim one
+   * that is placed with another window, and starts the round for one that opened while no window was connected.
+   */
+  function offerOpen(socket, protocol) {
+    const claims = protocol >= CLAIM_PROTOCOL;
+    for (const record of openRecords()) {
+      if (record.audience === "everyone") writeLine(socket, { event: "pending", item: record.view });
+      else if (record.audience === "claimers" && claims) writeLine(socket, { event: "pending", item: record.view });
+      else if (record.audience === undefined && !record.routing) route(record);
+      else if (claims) writeLine(socket, { event: "claim", id: record.id, session: record.session });
+      // an old window is never handed a request a round placed elsewhere: it would decide for itself and show it
+    }
+  }
+
+  /**
+   * A claim on a request already placed: an owner is added (a window that opened the tab since), and a window that
+   * gives one up is dropped — if that leaves nobody, the round runs again, so the request never goes quiet while a
+   * window could still show it.
+   */
+  function reclaim(record, socket, verdict) {
+    if (!Array.isArray(record.audience) || !subscribers.has(socket)) return;
+    const audience = Array.isArray(record.audience) ? record.audience : [];
+    if (verdict === "own") {
+      if (audience.includes(socket)) return;
+      record.audience = [...audience, socket];
+      writeLine(socket, { event: "pending", item: record.view, only: true });
+      return;
+    }
+    if (!audience.includes(socket)) return;
+    dropFromAudience(record, socket);
+  }
+
+  /** Takes a window off a request's audience; with nobody left the request is routed again. */
+  function dropFromAudience(record, socket) {
+    if (!Array.isArray(record.audience)) return; // a shared audience follows the subscribers by itself
+    const left = record.audience.filter((other) => other !== socket && subscribers.has(other));
+    record.audience = left;
+    if (left.length === 0 && !record.routing) route(record);
+  }
   const newId = () => {
     let id;
     do id = randomBytes(6).toString("hex");
@@ -346,13 +464,21 @@ export async function startService({
     }
   }
 
-  /** "Allow once": one call, or exactly the eval -> its bash pair (ANSWER_REUSE_MS window, checked by the caller). */
+  /**
+   * "Allow once": one call, or exactly the eval -> the one tool call it makes (ANSWER_REUSE_MS, checked by the caller).
+   *
+   * Ruling P42: one action costs one question. An eval that runs `tool.bash({command})` or `tool.monitor({command})`
+   * reaches the hook twice — once as the eval, once as the inner call — and the person was paying for both. The pair
+   * is proved by the request key: a hash of the command the CLASSIFIER read, plus the heredoc bodies and the cwd. The
+   * model cannot choose it, and a different inner command hashes differently and asks for itself. Exactly one inner
+   * call is covered, so an eval that runs the same command twice still asks again for the second.
+   */
   function consume(record, tool) {
     if (record.used.length === 0) {
       record.used.push(tool);
       return true;
     }
-    if (record.used.length === 1 && record.used[0] === "eval" && tool === "bash") {
+    if (record.used.length === 1 && record.used[0] === "eval" && (tool === "bash" || tool === "monitor")) {
       record.used.push(tool);
       return true;
     }
@@ -401,6 +527,18 @@ export async function startService({
     return null;
   }
 
+  /**
+   * Ruling P44: our own infrastructure failing is not evidence about the command. A decider that is not configured,
+   * unreachable, slow, broken or off-contract, and a service shutting down mid-decision, all end in an allow we log —
+   * never in a question. A call that matched a
+   * deny pattern never gets here (deny returns above), and a guard-state call never consults the decider at all, so
+   * nothing this covers is a verdict about the command itself.
+   */
+  function deciderFailed(view, reason) {
+    log(`decider-failed session=${view.session || "-"} tool=${view.tool} reason=${reason}`);
+    return allow(`[guard] разрешено: решатель недоступен (${reason})`);
+  }
+
   /** A decider allow (the only verdict it can make final). */
   function decided(view, decider) {
     const id = newId();
@@ -418,9 +556,9 @@ export async function startService({
     const createdAt = now();
     const item = { id, ...view, ...(decider ? { decider } : {}), createdAt: iso(createdAt) };
     const waitSeconds = rules.human.waitSeconds;
-    const record = { id, key, session: view.session, view: item, deadline: createdAt + waitSeconds * 1000, waitSeconds, answer: null, used: [], tickets: new Map(), waiters: new Set(), telegramSent: false };
+    const record = { id, key, session: view.session, view: item, deadline: createdAt + waitSeconds * 1000, waitSeconds, answer: null, used: [], tickets: new Map(), waiters: new Set(), telegramSent: false, audience: undefined, routing: undefined };
     requests.set(id, record);
-    broadcast({ event: "pending", item });
+    route(record);
     if (telegramFor(rules)) {
       telegramQueue.push(id);
       pumpTelegram();
@@ -492,7 +630,8 @@ export async function startService({
     if (rules.decider.mode === "deny") return deny("[guard] спорная команда запрещена настройками защиты");
 
     const model = rules.decider.model;
-    if (!model) return openRequest(rules, verdict.key, tool, view); // none chosen: the person decides, no old verdicts
+    // No model chosen is a configuration gap, not a verdict (P44): allow and log, as with any other decider failure.
+    if (!model) return deciderFailed(view, "модель решателя не выбрана");
     const cached = readCache(paths.cache, verdict.key, now());
     if (cached) {
       const decider = { model, decision: cached.decision, reason: shown(cached.reason), ms: 0, cached: true };
@@ -500,16 +639,18 @@ export async function startService({
       return cached.decision === "allow" ? decided(view, decider) : openRequest(rules, verdict.key, tool, view, decider);
     }
     const transport = resolveDeciderTransport(model, agentDir, { omoPath });
-    if (!transport) return openRequest(rules, verdict.key, tool, view);
+    if (!transport) return deciderFailed(view, `нет транспорта для модели ${model}`);
     const result = await askShared(
       verdict.key,
       { command: view.command, ...(view.code !== undefined ? { code: view.code } : {}), normalized: redact(verdict.normalized), cwd: view.cwd, reasons },
       { ...transport, agentDir, timeoutMs: rules.decider.timeoutMs, rules, fetchFn, ...(spawnFn ? { spawnFn } : {}) },
     );
-    if (closed) return deny("[guard] служба защиты остановлена — команда не выполнена");
-    if (!result) return openRequest(rules, verdict.key, tool, view);
+    if (closed) return deciderFailed(view, "служба защиты остановлена во время решения");
+    if (!result) return deciderFailed(view, "решатель не вернул ответ");
     const { answer, ms } = result;
     const decider = { model, decision: answer.decision, reason: shown(answer.reason), ms };
+    // Our failure, not its verdict: allow and log (P44).
+    if (answer.failed) return deciderFailed(view, shown(answer.reason));
     // A decider deny is never final: the person decides, with the decider's verdict on the card (rule denies are above).
     if (answer.decision !== "allow") return reuse(verdict.key, call.session, tool) ?? openRequest(rules, verdict.key, tool, view, decider);
     writeCache(paths.cache, verdict.key, answer, now());
@@ -629,13 +770,28 @@ export async function startService({
         return { ok: true };
       }
       case "status":
-        return { version: SERVICE_VERSION, rulesOk: rulesState.ok };
-      case "subscribe":
-        subscribers.add(socket);
-        socket.on("close", () => subscribers.delete(socket));
-        writeLine(socket, { ok: true });
-        for (const item of openViews()) writeLine(socket, { event: "pending", item });
+        // `protocol` and `kit` let a window tell whether the service running is the one its own build installed:
+        // a service older than the extension cannot route, and the window says so instead of pretending it is routed.
+        return { version: SERVICE_VERSION, protocol: SERVICE_PROTOCOL, kit: ownGuardDir(), rulesOk: rulesState.ok };
+      case "subscribe": {
+        const protocol = Number.isInteger(message.protocol) && message.protocol > 0 ? message.protocol : 1;
+        subscribers.set(socket, { protocol });
+        socket.on("close", () => {
+          subscribers.delete(socket);
+          // a window that went away shows nothing: its requests are routed again rather than waiting out the deadline
+          for (const record of openRecords()) if (Array.isArray(record.audience) && record.audience.includes(socket)) dropFromAudience(record, socket);
+        });
+        writeLine(socket, { ok: true, protocol: SERVICE_PROTOCOL });
+        offerOpen(socket, protocol);
         return undefined;
+      }
+      case "claim": {
+        const record = typeof message.id === "string" ? requests.get(message.id) : undefined;
+        if (!record || record.answer) return undefined;
+        if (record.routing) claimed(record, socket, message.verdict, message.owner);
+        else reclaim(record, socket, message.verdict);
+        return undefined;
+      }
       default:
         return { error: "unknown op" };
     }
@@ -687,7 +843,7 @@ export async function startService({
       deciderSlots.drain();
       for (const record of requests.values()) if (!record.answer) release(record, () => deny("[guard] служба защиты остановлена — команда не выполнена"));
       requests.clear();
-      for (const socket of subscribers) socket.destroy();
+      for (const socket of subscribers.keys()) socket.destroy();
       const servers = [hookServer, adminServer].map((server) => new Promise((resolve) => server.close(resolve)));
       const grace = setTimeout(() => {
         for (const socket of connections) socket.destroy();

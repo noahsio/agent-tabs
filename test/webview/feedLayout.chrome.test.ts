@@ -123,8 +123,8 @@ describe.skipIf(!hasChrome)("tool boxes and the floating composer (headless Chro
 
   it("the_feed_keeps_room_for_a_growing_composer_and_stays_at_the_bottom", async () => {
     await page.evaluate(`(() => {
-      const input = document.querySelector("textarea");
-      input.value = "one\\ntwo\\nthree\\nfour\\nfive\\nsix";
+      const input = document.querySelector(".input");
+      input.textContent = "one\\ntwo\\nthree\\nfour\\nfive\\nsix";
       input.dispatchEvent(new Event("input", { bubbles: true }));
     })()`);
     await waitFor(page, `parseFloat(document.querySelector("main.feed").style.paddingBottom) === document.querySelector("footer.composer").offsetHeight`);
@@ -132,7 +132,7 @@ describe.skipIf(!hasChrome)("tool boxes and the floating composer (headless Chro
     const box = await rect(page, ".composer-box");
     expect(last.bottom).toBeLessThanOrEqual(box.top);
     await shot(page, "4-grown-composer");
-    await page.evaluate(`(() => { const input = document.querySelector("textarea"); input.value = ""; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+    await page.evaluate(`(() => { const input = document.querySelector(".input"); input.textContent = ""; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
     await waitFor(page, `parseFloat(document.querySelector("main.feed").style.paddingBottom) === document.querySelector("footer.composer").offsetHeight`);
   });
 

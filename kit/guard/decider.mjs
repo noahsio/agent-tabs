@@ -1,7 +1,9 @@
 // Decider: a cheap model (a gateway or API key over HTTP, or an account through `omo -p`) judges escalated commands.
 // It sees only the command (an eval's code apart), cwd and matched reasons; it must answer {"decision":"allow|ask","reason":"..."}.
-// Any failure (network, timeout, HTTP error, off-contract text) is "ask": a human decides. A "deny" it still sends is parsed
-// and shown, but the service treats it as "ask" (the decider can never refuse on its own).
+// Ruling P44: a failure of OURS is not evidence about the command. Every failure here — no transport, network error,
+// timeout, HTTP error, off-contract text — comes back marked `failed`, and the service turns that into an allow it
+// logs, instead of a question the person has to answer. Only the model's own considered "ask" still reaches them.
+// A "deny" it sends is parsed and shown, but the service treats it as "ask" (the decider can never refuse on its own).
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -89,7 +91,8 @@ const BUILTIN_PROVIDERS = {
 };
 export const DEFAULT_OMO_PATH = path.join(os.homedir(), ".local", "bin", "omo");
 
-const ask = (reason) => ({ decision: "ask", reason });
+/** A failure of ours, not a verdict: the service allows and logs it (P44). */
+const failed = (reason) => ({ decision: "ask", reason, failed: true });
 
 function readJsonObject(file) {
   try {
@@ -184,15 +187,15 @@ function replyText(api, data) {
 }
 
 async function askHttp(request, { api = "anthropic-messages", baseUrl, key, model, timeoutMs, rules, fetchFn = fetch }) {
-  if (!baseUrl || !key) return ask("решатель не настроен (нет адреса шлюза или ключа)");
+  if (!baseUrl || !key) return failed("решатель не настроен (нет адреса шлюза или ключа)");
   const [url, headers, body] = httpRequest({ api, baseUrl, key, model }, buildSystemPrompt(rules), buildUserContent(request));
   try {
     const response = await fetchFn(url, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
-    if (!response.ok) return ask(`решатель недоступен (HTTP ${response.status})`);
-    return parseVerdict(replyText(api, await response.json())) ?? ask("решатель ответил не по формату");
+    if (!response.ok) return failed(`решатель недоступен (HTTP ${response.status})`);
+    return parseVerdict(replyText(api, await response.json())) ?? failed("решатель ответил не по формату");
   } catch (error) {
     const timedOut = error?.name === "TimeoutError" || error?.name === "AbortError";
-    return ask(timedOut ? `решатель не ответил за ${timeoutMs} мс` : "решатель недоступен (ошибка сети)");
+    return failed(timedOut ? `решатель не ответил за ${timeoutMs} мс` : "решатель недоступен (ошибка сети)");
   }
 }
 
@@ -221,7 +224,7 @@ function askOmo(request, { omoPath, model, agentDir, timeoutMs, rules, spawnFn =
       // Its own process group, so a timeout kills omo and everything it started.
       child = spawnFn(omoPath, args, { stdio: ["ignore", "pipe", "pipe"], env, detached: true });
     } catch {
-      resolve(ask("решатель недоступен (omo не запустился)"));
+      resolve(failed("решатель недоступен (omo не запустился)"));
       return;
     }
     let stdout = "";
@@ -238,17 +241,17 @@ function askOmo(request, { omoPath, model, agentDir, timeoutMs, rules, spawnFn =
       } catch {
         child.kill("SIGKILL");
       }
-      finish(ask(`решатель не ответил за ${timeoutMs} мс`));
+      finish(failed(`решатель не ответил за ${timeoutMs} мс`));
     }, timeoutMs);
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => {
       if (stdout.length < MAX_STDOUT) stdout += chunk;
     });
     child.stderr?.resume();
-    child.on("error", () => finish(ask("решатель недоступен (omo не запустился)")));
+    child.on("error", () => finish(failed("решатель недоступен (omo не запустился)")));
     child.on("close", (code) => {
-      if (code !== 0) finish(ask(`решатель недоступен (omo завершился с кодом ${code})`));
-      else finish(parseVerdict(stdout) ?? ask("решатель ответил не по формату"));
+      if (code !== 0) finish(failed(`решатель недоступен (omo завершился с кодом ${code})`));
+      else finish(parseVerdict(stdout) ?? failed("решатель ответил не по формату"));
     });
   });
 }

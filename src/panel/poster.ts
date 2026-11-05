@@ -32,6 +32,8 @@ const VERBATIM_KEYS: ReadonlySet<string> = new Set([
   // The settings modal names the window's environment by its agent dir.
   "agentDir",
   "blockId",
+  // an answer card's way back to the message whose turn asked the question: the webview posts it back as a blockId
+  "forkFrom",
   "fingerprint",
   "action",
   "changed",
@@ -154,6 +156,8 @@ function structuralObjects(message: HostMessage): Set<object> {
   for (const block of message.type === "state" ? message.state.blocks : message.changed) {
     objects.add(block);
     if (block.kind === "user" && block.delivery !== undefined) objects.add(block.delivery);
+    // the answer card's ids must round-trip; its questions, options and the person's words are free text below it
+    if ((block.kind === "user" || block.kind === "tool") && block.answer !== undefined) objects.add(block.answer);
   }
   for (const dialog of state.dialogs) objects.add(dialog);
   for (const agent of state.agents) objects.add(agent);

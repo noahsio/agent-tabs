@@ -45,8 +45,18 @@ export type PendingView = {
   createdAt: string;
 };
 
+/** How this window answers «whose session is this»: it has the tab, it knows whose it is, or it has never heard of it. */
+export type ClaimVerdict = "own" | "knows" | "no";
+
 export type GuardEvent =
-  | { event: "pending"; item: PendingView }
+  /**
+   * A request the service placed with this window. `only`: this window claimed the session, and no other window was
+   * given it. `outside`: nobody has the session open, so this window is the one to raise it outside the chats. Neither:
+   * nobody claimed it and every window got it.
+   */
+  | { event: "pending"; item: PendingView; only?: true; outside?: { owner: string | null } }
+  /** Whose session is this? Answered with `claim()` on the subscription's own connection, before the service places it. */
+  | { event: "claim"; id: string; session: string }
   | {
       event: "resolved";
       id: string;
@@ -65,6 +75,11 @@ export type RulesSetResult = { ok: true } | { ok: false; errors: FieldError[] };
 export type GuardRulesAdmin = Pick<GuardAdmin, "rulesGet" | "rulesSet" | "close">;
 
 const REQUEST_MS = 10_000;
+/**
+ * The admin protocol this build speaks. 2 takes part in the claim round, so the service may place a request with this
+ * window alone; a service that answers `status` without a `protocol` is older than this build and cannot route at all.
+ */
+export const ADMIN_PROTOCOL = 2;
 /** A subscription that ends sooner than this after its confirmation counts as a flap; five in a row stop the retries. */
 const STABLE_MS = 5_000;
 const MAX_FLAPS = 5;
@@ -81,8 +96,15 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isEvent(value: unknown): value is GuardEvent {
-  return isObject(value) && (value["event"] === "pending" || value["event"] === "resolved");
+  return isObject(value) && (value["event"] === "pending" || value["event"] === "resolved" || value["event"] === "claim");
 }
+
+/** A live subscription: it ends with `stop`, and answers the service's claim rounds on its own connection. */
+export type GuardSubscription = {
+  stop(): void;
+  /** Who owns the session of request `id`. Dropped when the connection is down: the service's round times out instead. */
+  claim(id: string, verdict: ClaimVerdict, owner?: string): void;
+};
 
 /**
  * The extension's client of the decision service's admin socket (`<agentDir>/guard/admin.sock`, closed to the
@@ -105,6 +127,20 @@ export class GuardAdmin {
     const admin = new GuardAdmin(servicePaths(agentDir).adminSock, options.reconnectDelaysMs ?? RECONNECT_DELAYS_MS, options.stableMs ?? STABLE_MS);
     await admin.call({ op: "status" });
     return admin;
+  }
+
+  /**
+   * What the service is: its version, the admin protocol it speaks and the kit directory it was loaded from. An older
+   * service answers without `protocol` and `kit`, which is how a window knows it cannot be routed to.
+   */
+  async status(): Promise<{ version: number; protocol?: number; kit?: string; rulesOk: boolean }> {
+    const reply = await this.call({ op: "status" });
+    return {
+      version: typeof reply["version"] === "number" ? reply["version"] : 0,
+      ...(typeof reply["protocol"] === "number" ? { protocol: reply["protocol"] } : {}),
+      ...(typeof reply["kit"] === "string" ? { kit: reply["kit"] } : {}),
+      rulesOk: reply["rulesOk"] === true,
+    };
   }
 
   /** The service's rules; rejects with GuardRulesInvalid when it reports them invalid. */
@@ -137,7 +173,7 @@ export class GuardAdmin {
    * Events from now on (the open requests first); the returned function ends the subscription. `onSubscribed` runs
    * each time the service confirms, the first time and after every resubscription (before that one's replay).
    */
-  subscribe(listener: (event: GuardEvent) => void, onGiveUp?: () => void, onSubscribed?: () => void): () => void {
+  subscribe(listener: (event: GuardEvent) => void, onGiveUp?: () => void, onSubscribed?: () => void): GuardSubscription {
     let current: net.Socket | undefined;
     let timer: NodeJS.Timeout | undefined;
     let stopped = false;
@@ -158,7 +194,7 @@ export class GuardAdmin {
       const socket = net.createConnection(this.socket);
       current = socket;
       confirmedAt = undefined;
-      socket.on("connect", () => writeLine(socket, { op: "subscribe" }));
+      socket.on("connect", () => writeLine(socket, { op: "subscribe", protocol: ADMIN_PROTOCOL }));
       readLines(socket, (message) => {
         if (stopped) return;
         if (confirmedAt === undefined) {
@@ -184,7 +220,13 @@ export class GuardAdmin {
     };
     this.stops.add(stop);
     open();
-    return stop;
+    return {
+      stop,
+      claim: (id, verdict, owner) => {
+        if (stopped || current === undefined || current.destroyed) return;
+        writeLine(current, { op: "claim", id, verdict, ...(owner !== undefined ? { owner } : {}) });
+      },
+    };
   }
 
   /** Ends every subscription; calls already sent finish on their own connections. */

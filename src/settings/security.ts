@@ -28,6 +28,13 @@ export type SecurityView = {
    * computed as enabling would now (empty while protection is on or when it cannot be computed).
    */
   consent: { plist: string; kitDir: string; hooksJson: string; profile: string; writeDenies: string[] };
+  /**
+   * The guard copy that actually runs — not the extension's own files: `dir`, when it was installed there, and whether
+   * it is older than the one this extension ships (`stale`: today's rules are not the ones deciding). Absent while no
+   * protection of ours is installed. `refreshError`: why the automatic refresh at activation last failed.
+   */
+  installed?: { dir: string; installedAt?: number; stale: boolean };
+  refreshError?: string;
   text: Record<TextField, string>;
   groups: RulesV2["groups"];
   decider: RulesV2["decider"];
@@ -57,7 +64,14 @@ export interface SecurityDeps {
   /** The kit's guard dir this extension ships: the default rules, and the name of the copy enabling installs. */
   guardSource: string;
   /** Turning protection on and off (src/guard/protection.ts with the real machine; fakes in tests). */
-  protection: { status(): Promise<ProtectionStatus>; enable(): Promise<void>; disable(): Promise<void>; writeDenies(): Promise<string[]> };
+  protection: {
+    status(): Promise<ProtectionStatus>;
+    enable(): Promise<void>;
+    disable(): Promise<void>;
+    writeDenies(): Promise<string[]>;
+    /** The guard copy running now and the last failure of the activation refresh (`installedKit`, held by the window). */
+    installed(): { installed?: SecurityView["installed"]; refreshError?: string };
+  };
   /** The running service's admin socket; rejects when it does not answer. */
   admin: () => Promise<GuardRulesAdmin>;
   /** True while a service may own rules.json (a socket answers or its lock is fresh): the file is not ours then. */
@@ -166,6 +180,7 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
       ...(invalid !== undefined ? { state: "broken" as const, reason: invalid } : { state: status.state }),
       ...(invalid === undefined && status.state === "broken" ? { reason: status.reason } : {}),
       ...(status.state === "off" && status.note !== undefined ? { note: status.note } : {}),
+      ...this.deps.protection.installed(),
       consent: {
         plist: launchAgentPath(paths.home, serviceLabel(paths.agentDir)),
         kitDir: guardFilesDir(paths.home, this.deps.guardSource),

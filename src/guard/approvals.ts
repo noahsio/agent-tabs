@@ -1,5 +1,5 @@
 import type { GuardHostMessage } from "../panel/protocol";
-import type { GuardAdmin, GuardEvent, PendingView } from "./admin";
+import type { ClaimVerdict, GuardAdmin, GuardEvent, GuardSubscription, PendingView } from "./admin";
 
 /** What the window needs of the service's admin socket (GuardAdmin; a fake in tests). */
 export type GuardAdminPort = Pick<GuardAdmin, "rulesGet" | "subscribe" | "pending" | "answer" | "close">;
@@ -19,6 +19,17 @@ export type GuardApprovalsDeps = {
   /** The service's admin socket; rejects while it does not answer. */
   connect: () => Promise<GuardAdminPort>;
   panels: () => Iterable<ApprovalPanel>;
+  /**
+   * The session of the chat that owns `session` (OmO's task registry for THIS environment), or `undefined` when
+   * nothing claims it. Never asked for a session a tab already answers for.
+   */
+  rootOf: (session: string) => string | undefined;
+  /**
+   * Nobody has this request's session open anywhere: raise it where the person will see it without a chat showing a
+   * card it was never asked for — a notification in this window, and whatever else is configured. `owner` is whose
+   * session it is. The returned function takes the notification down once the request ends.
+   */
+  outside: (request: PendingView, owner: string | undefined) => (() => void) | void;
   log: (text: string) => void;
   /** Waits between failed connects (a starting service); after the last one the window gives up. */
   retryDelaysMs: readonly number[];
@@ -31,13 +42,15 @@ function errorText(error: unknown): string {
 /**
  * The window's one subscription to the decision service: open requests become approval cards in the tab whose session
  * asked (by durable id, or the tab whose agent runs that child session; no such tab → every tab, labelled with the cwd),
- * decider verdicts become «Решатель» steps in the same tabs. Cards are shown only while the rules' `human.card` is on
- * (P27; read before subscribing, so the replayed open requests obey it); steps always. Answers go over the admin
- * socket, one per request however often it is clicked, and only from a tab that was shown the card.
+ * decider verdicts become «Решатель» steps in the same tabs. A request's end — answered, timed out, or lost by the service
+ * — goes back only to the tabs its card reached, so no other chat hears of a decision it was never offered. Cards are
+ * shown only while the rules' `human.card` is on (P27; read before subscribing, so the replayed open requests obey it);
+ * steps always. Answers go over the admin socket, one per request however often it is clicked, and only from a tab that
+ * was shown the card.
  */
 export class GuardApprovals {
   private admin: GuardAdminPort | undefined;
-  private unsubscribe: (() => void) | undefined;
+  private subscription: GuardSubscription | undefined;
   /** `human.card` as last read; unknown (no card) until the service answered `rules.get`. */
   private card: boolean | undefined;
   private silent = false;
@@ -51,6 +64,8 @@ export class GuardApprovals {
   private readonly shownTo = new Map<string, Set<ApprovalPanel>>();
   /** Answers in flight: a second click, or a click in another tab, sends nothing. */
   private readonly answering = new Set<string>();
+  /** Requests this window raised outside the chats: how to take that notice down when they end. */
+  private readonly raised = new Map<string, () => void>();
 
   constructor(private readonly deps: GuardApprovalsDeps) {}
 
@@ -60,9 +75,10 @@ export class GuardApprovals {
     return this.syncing;
   }
 
-  /** The cards a (re)loaded webview should show. */
+  /** The cards a (re)loaded webview should show; one raised outside the chats is not a card of any tab. */
   replay(panel: ApprovalPanel): void {
-    if (this.card === true) for (const request of this.open.values()) this.postRequest(request, [panel]);
+    if (this.card !== true) return;
+    for (const [id, request] of this.open) if (!this.raised.has(id)) this.postRequest(request, [panel]);
   }
 
   /**
@@ -96,6 +112,25 @@ export class GuardApprovals {
       this.answering.delete(id);
       this.deps.log(`Ответ на запрос защиты не принят: ${errorText(error)}`);
       panel.postGuard({ type: "guardAnswerFailed", id, error: errorText(error) });
+    }
+  }
+
+  /**
+   * An answer given outside the chats (the notification's «Запретить»): there is no tab to hand a refusal back to, so a
+   * request that is already gone or already being answered is simply let go, with a line in the channel.
+   */
+  async answerOutside(id: string, decision: "allow-once" | "deny"): Promise<void> {
+    const admin = this.admin;
+    if (admin === undefined || !this.open.has(id) || this.answering.has(id)) {
+      this.deps.log(`Ответ вне чатов не отправлен: запрос ${id} уже не ждёт ответа`);
+      return;
+    }
+    this.answering.add(id);
+    try {
+      await admin.answer(id, decision);
+    } catch (error) {
+      this.answering.delete(id);
+      this.deps.log(`Ответ вне чатов не принят: ${errorText(error)}`);
     }
   }
 
@@ -138,7 +173,7 @@ export class GuardApprovals {
       admin.close();
       return;
     }
-    this.unsubscribe = admin.subscribe(
+    this.subscription = admin.subscribe(
       (event) => this.onEvent(event),
       () => this.gaveUp(),
       () => void this.reconcile(admin),
@@ -155,14 +190,16 @@ export class GuardApprovals {
     clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
     this.connectFailures = 0;
-    this.unsubscribe?.();
+    this.subscription?.stop();
     this.admin?.close();
-    this.unsubscribe = undefined;
+    this.subscription = undefined;
     this.admin = undefined;
     this.card = undefined;
     this.open.clear();
     this.shownTo.clear();
     this.answering.clear();
+    for (const take of this.raised.values()) take();
+    this.raised.clear();
   }
 
   /** Nothing retries until the next sync (a settings change); panels with open cards say the service is silent. */
@@ -185,7 +222,7 @@ export class GuardApprovals {
     }
     const turnedOn = card && this.card !== true;
     this.card = card;
-    if (turnedOn) for (const request of this.open.values()) this.postRequest(request);
+    if (turnedOn) for (const [id, request] of this.open) if (!this.raised.has(id)) this.postRequest(request);
   }
 
   /**
@@ -206,64 +243,133 @@ export class GuardApprovals {
     const still = new Set(current.map((request) => request.id));
     for (const id of before) {
       if (still.has(id) || !this.open.has(id)) continue;
+      const shown = this.shown(id);
       this.forget(id);
-      for (const panel of this.deps.panels()) panel.postGuard({ type: "guardClosed", id });
+      for (const panel of shown) panel.postGuard({ type: "guardClosed", id });
     }
+  }
+
+  /** The tabs a request's card was posted to: the only ones its end is news for. Read before `forget`. */
+  private shown(id: string): ApprovalPanel[] {
+    return [...(this.shownTo.get(id) ?? [])];
   }
 
   private forget(id: string): void {
     this.open.delete(id);
     this.shownTo.delete(id);
     this.answering.delete(id);
+    this.raised.get(id)?.(); // the notice outside the chats goes with the request
+    this.raised.delete(id);
   }
 
   private onEvent(event: GuardEvent): void {
+    if (event.event === "claim") {
+      const { verdict, owner } = this.claimFor(event.session);
+      this.subscription?.claim(event.id, verdict, owner);
+      return;
+    }
     if (event.event === "pending") {
       const request = event.item;
       if (this.open.has(request.id)) return; // a resubscription replays what is open
       this.open.set(request.id, request);
+      if (event.outside !== undefined) {
+        // nobody has the session open: no chat gets a card it did not ask for, the person is told outside the chats
+        const take = this.deps.outside(request, event.outside.owner ?? undefined);
+        if (typeof take === "function") this.raised.set(request.id, take);
+        return;
+      }
       if (request.decider !== undefined) this.postStep(request, request.decider);
-      if (this.card === true) this.postRequest(request);
+      if (this.card === true) this.postRequest(request, undefined, event.only === true);
       return;
     }
     const request = this.open.get(event.id);
     if (request !== undefined) {
+      const shown = this.shown(event.id);
       this.forget(event.id);
       const resolved = { type: "guardResolved" as const, id: event.id, decision: event.decision, by: event.by, ...(event.message !== undefined ? { message: event.message } : {}) };
-      for (const panel of this.deps.panels()) panel.postGuard(resolved);
+      for (const panel of shown) panel.postGuard(resolved);
     } else if (event.by === "decider" && event.decider !== undefined && event.item !== undefined) {
       this.postStep(event.item, event.decider); // a final verdict without a human: no card came before it
     }
   }
 
   /**
-   * The tabs a session's request belongs to: the tab of that session; else the tab whose agent runs it as a child
-   * session; else every tab of the window (`elsewhere`: the card names the cwd).
+   * This window's answer to «whose session is this»: «own» when one of its tabs is the session or its owner, «knows»
+   * when the task registry names an owner no tab of this window has open, «no» when nothing here claims it. The service
+   * collects the answers of every window and places the request once.
    */
-  private targets(session: string): { panels: ApprovalPanel[]; elsewhere: boolean } {
+  private claimFor(session: string): { verdict: ClaimVerdict; owner?: string } {
+    const all = [...this.deps.panels()];
+    if (all.some((panel) => panel.durableId === session || panel.runsChild(session))) return { verdict: "own" };
+    const owner = this.owner(session);
+    if (owner === undefined) return { verdict: "no" };
+    return all.some((panel) => panel.durableId === owner) ? { verdict: "own" } : { verdict: "knows", owner };
+  }
+
+  /**
+   * A tab went away: a request this window was given and can no longer show goes back to the service, which asks the
+   * windows again rather than letting it run down its deadline unseen.
+   */
+  panelsChanged(): void {
+    for (const [id, request] of this.open) {
+      if (this.raised.has(id)) continue; // not a card of ours
+      if (this.shown(id).length === 0) continue; // already nobody's here
+      if (this.claimFor(request.session).verdict === "own") continue;
+      this.subscription?.claim(id, "no");
+    }
+  }
+
+  /**
+   * The tabs of this window a session's request belongs to, in order of how well we know it: the tab of that session;
+   * the tab whose agents run it as a child session; the tab of the session that spawned it, from OmO's own task
+   * registry for this environment (`rootOf`, a chain of any depth). None of those and the request goes to every tab
+   * (`elsewhere`), because a request nobody is asked is denied at the guard's deadline, which is worse than one offered
+   * in the wrong place. `claimed` — the service placed this request here because this window said it owns the session —
+   * forbids that fan-out: the service has already decided, and an owner it cannot find now is given back (`panelsChanged`).
+   */
+  private targets(session: string, claimed = false): { panels: ApprovalPanel[]; elsewhere: boolean; owner?: string } {
     const all = [...this.deps.panels()];
     const own = all.filter((panel) => panel.durableId === session);
     if (own.length > 0) return { panels: own, elsewhere: false };
     const parents = all.filter((panel) => panel.runsChild(session));
     if (parents.length > 0) return { panels: parents, elsewhere: false };
-    return { panels: all, elsewhere: true };
+    const owner = this.owner(session);
+    const owning = owner === undefined ? [] : all.filter((panel) => panel.durableId === owner);
+    if (owning.length > 0) return { panels: owning, elsewhere: false };
+    if (claimed) return { panels: [], elsewhere: false }; // the tab went between the claim and the request
+    return { panels: all, elsewhere: true, ...(owner !== undefined ? { owner } : {}) };
   }
 
-  private postRequest(request: PendingView, only?: ApprovalPanel[]): void {
-    const { panels, elsewhere } = this.targets(request.session);
+  /** The registry's answer, never fatal: a window whose registry cannot be read falls back to the fan-out. */
+  private owner(session: string): string | undefined {
+    try {
+      return this.deps.rootOf(session);
+    } catch (error) {
+      this.deps.log(`Чья это сессия, определить не удалось: ${errorText(error)}`);
+      return undefined;
+    }
+  }
+
+  private postRequest(request: PendingView, only?: ApprovalPanel[], claimed = false): void {
+    const { panels, elsewhere, owner } = this.targets(request.session, claimed);
+    if (claimed && panels.length === 0) {
+      this.subscription?.claim(request.id, "no"); // we claimed it and lost the tab: the service asks the others
+      return;
+    }
     for (const panel of panels) {
       if (only !== undefined && !only.includes(panel)) continue;
       const shown = this.shownTo.get(request.id) ?? new Set<ApprovalPanel>();
       shown.add(panel);
       this.shownTo.set(request.id, shown);
-      panel.postGuard({ type: "guardRequest", request, ...(elsewhere ? { elsewhere: true as const } : {}) });
+      panel.postGuard({ type: "guardRequest", request, ...(elsewhere ? { elsewhere: true as const } : {}), ...(owner !== undefined ? { owner } : {}) });
     }
   }
 
-  /** Goes where the request's card would: its session's tab, else every tab with the cwd. */
+  /** Goes where the request's card would: its session's tab, else every tab, saying whose session it was. */
   private postStep(request: PendingView, decider: NonNullable<PendingView["decider"]>): void {
-    const { panels, elsewhere } = this.targets(request.session);
+    const { panels, elsewhere, owner } = this.targets(request.session);
     const step = { type: "guardStep" as const, id: request.id, tool: request.tool, command: request.command, decider, at: request.createdAt };
-    for (const panel of panels) panel.postGuard(elsewhere ? { ...step, cwd: request.cwd } : step);
+    const away = { ...step, cwd: request.cwd, ...(owner !== undefined ? { owner } : {}) };
+    for (const panel of panels) panel.postGuard(elsewhere ? away : step);
   }
 }

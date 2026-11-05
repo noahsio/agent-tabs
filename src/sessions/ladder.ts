@@ -1,0 +1,351 @@
+import { randomUUID } from "node:crypto";
+import type { ModelRef } from "../chat/model";
+import { lifecycleRunning } from "../chat/reducer";
+import type { Ladder, Rung } from "../settings/ladder";
+import type { OutgoingImage } from "./controller";
+import { emptyAnswer, endFailure, lifecyclePolicyRejection, SILENCE_MS, tally, type FailureClass, type TurnTally } from "./ladderFailure";
+
+/** A model the environment serves, as the ladder needs it: enough to match a rung and to name it. */
+export type LadderModel = { provider: string; id: string; name?: string };
+
+/** What the composer shows: the step in flight, or the model the walk ended on. */
+export type LadderView =
+  /** `rung` is the rung's own number on the ladder, 1-based, out of `total`. */
+  | { state: "walking"; rung: number; total: number; label: string }
+  /** The walk saved the message and the session stays here; `back` is the model it started on. */
+  | { state: "settled"; model: string; back: { provider: string; id: string; label: string } };
+
+/** Everything the walk is allowed to do to a session. `ModelLadder` touches nothing else. */
+export interface LadderSession {
+  /** This environment's ladder, read fresh at every step: the person may have just edited it. */
+  ladder(): Ladder;
+  /** The models the environment serves now; a rung naming anything else is skipped. */
+  models(): Promise<LadderModel[]>;
+  model(): ModelRef | undefined;
+  /** Whether OmO still calls the turn running. */
+  running(): boolean;
+  /** `reason` names the failure and the rung it is stepping to, for the channel. */
+  abort(reason: string): Promise<void>;
+  /** The existing way out of a turn the abort did not end: unload the session and open it again. */
+  unwedge(): Promise<void>;
+  setModel(model: ModelRef): Promise<void>;
+  /** Sends under `id`; false when the message did not go out. */
+  send(id: string, text: string, images: OutgoingImage[]): Promise<boolean>;
+  note(level: "info" | "warn", text: string): void;
+  view(view: LadderView | undefined): void;
+}
+
+/**
+ * How long a step waits for the abort it asked for before it unloads the session instead. The same bound the composer
+ * gives «Стоп» — past it OmO has answered the abort and the turn is running all the same.
+ */
+export const ABORT_WAIT_MS = 8_000;
+/** How often the wait looks again; short enough that the usual case costs one tick. */
+const ABORT_POLL_MS = 100;
+
+/** Why the ladder moved, in the person's language; the feed line is built from it. */
+const REASON: Record<FailureClass, string> = {
+  refusal: "Модель отказалась",
+  rejected: "Провайдер отклонил запрос",
+  empty: "Модель ответила пусто",
+  silence: "От модели не было ответа 5 минут",
+  transport: "Связь с моделью оборвалась",
+};
+
+/** «1 модель», «2 модели», «5 моделей». */
+function models(count: number): string {
+  const tens = count % 100;
+  const ones = count % 10;
+  if (ones === 1 && tens !== 11) return `${count} модель`;
+  if (ones >= 2 && ones <= 4 && (tens < 12 || tens > 14)) return `${count} модели`;
+  return `${count} моделей`;
+}
+
+/** One message the ladder is watching: the person's own, or the resend that stands in for it. */
+type Walk = {
+  /** The clientMessageId OmO is answering: the person's own at first, then each resend's. */
+  id: string;
+  /** The person's message, as it must be repeated. */
+  text: string;
+  images: OutgoingImage[];
+  /** The model the session was on when the person sent it: what «вернуться на …» goes back to. */
+  first: ModelRef | undefined;
+  /** Rung ids that have already fired for this message: each fires at most once. */
+  fired: Set<string>;
+  /** Where on the ladder the session stands; -1 when its model is on no rung at all. */
+  at: number;
+  /** Models this message has been put to, the one it started on included. */
+  tried: number;
+  /** What the turn answering `id` has produced. */
+  tally: TurnTally;
+  /** A step was already taken for `id`: the sticky refusal signal must not step it again. */
+  stepped: boolean;
+  /** The turn answering `id` has produced a frame of its own. */
+  started: boolean;
+  /** The last model the walk switched to. */
+  rescuer: ModelRef | undefined;
+};
+
+function sameModel(a: { provider: string; id: string }, b: { provider: string; id: string }): boolean {
+  return a.provider === b.provider && a.id === b.id;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The model ladder of one session: it watches the turn answering the person's own message, and when one of the four
+ * failures ends that turn it moves the message to the next rung that answers that failure — aborting the turn first,
+ * so a late answer from the queue can never become a second answer to one message.
+ *
+ * Two rules keep one failure from walking the whole ladder. A step is keyed to the clientMessageId being answered, so
+ * the sticky `policy-rejection` lifecycle row (15–20 of them per refusal) steps once; and a rung fires at most once
+ * per message. Nothing is ever repeated when the turn already called a tool: then the rung behaves as «остановиться
+ * и спросить», naming the reason.
+ */
+export class ModelLadder {
+  /** The person's message as it was sent, until a `message_start` shows it reached the conversation. */
+  private waiting: { id: string; text: string; images: OutgoingImage[]; wasRunning: boolean } | undefined;
+  private walk: Walk | undefined;
+  private silence: ReturnType<typeof setTimeout> | undefined;
+  private shown: LadderView | undefined;
+  /** Bumped whenever what the ladder watches changes: an answer still in flight for an older one is dropped. */
+  private generation = 0;
+  private disposed = false;
+
+  constructor(
+    private readonly session: LadderSession,
+    private readonly newId: () => string = randomUUID,
+  ) {}
+
+  /** A message the person just sent: a fresh walk, keyed to its id, armed once it reaches the conversation. */
+  armed(id: string, text: string, images: OutgoingImage[]): void {
+    if (this.disposed) return;
+    this.generation += 1;
+    this.clearSilence();
+    this.walk = undefined;
+    this.show(undefined); // whatever the last walk left on screen is about the last message
+    this.waiting = { id, text, images, wasRunning: this.session.running() };
+  }
+
+  /** Every frame of this session's own handle, after the state took it (so `running()` is current). */
+  observe(frame: Record<string, unknown>): void {
+    if (this.disposed) return;
+    const type = frame["type"];
+    const pending = this.waiting;
+    if (pending !== undefined && type === "message_start" && isObject(frame["message"])) {
+      const message = frame["message"];
+      if (message["role"] === "user" && message["clientMessageId"] === pending.id) {
+        this.waiting = undefined;
+        this.walk = {
+          id: pending.id,
+          text: pending.text,
+          images: pending.images,
+          first: this.session.model(),
+          fired: new Set(),
+          at: this.rungOfCurrentModel(),
+          tried: this.session.model() === undefined ? 0 : 1,
+          // A message written into a running turn joins work already in progress: that turn is never repeated. Its
+          // own `agent_start` (a queued message gets one) wipes this again — then the turn really is fresh.
+          tally: { text: false, tools: pending.wasRunning },
+          stepped: false,
+          started: false,
+          rescuer: undefined,
+        };
+      }
+    }
+    const walk = this.walk;
+    if (walk === undefined) return;
+    if (type === "agent_start") {
+      walk.started = true;
+      walk.tally = { text: false, tools: false };
+    }
+    if (type === "message_update" || type === "message_end" || type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
+      walk.started = true;
+    }
+    if (type === "session_lifecycle" && lifecycleRunning(frame["lifecycle"]) === true) walk.started = true;
+    walk.tally = tally(walk.tally, frame);
+    this.armSilence();
+    if (walk.stepped) return;
+    if (type === "message_end") {
+      const failure = endFailure(frame["message"]);
+      if (failure !== undefined) this.step(walk, failure);
+      return;
+    }
+    if (type === "session_lifecycle" && lifecyclePolicyRejection(frame["lifecycle"])) {
+      // OmO's own verdict on the turn that ended, gated on the turn having run at all: between a step and its resend
+      // the row is still the old turn's, and the resend's turn has produced nothing yet.
+      if (walk.started && !this.session.running()) this.step(walk, "refusal");
+      return;
+    }
+    if (type === "agent_settled" || (type === "session_lifecycle" && lifecycleRunning(frame["lifecycle"]) === false)) {
+      if (!walk.started) return;
+      if (emptyAnswer(walk.tally)) this.step(walk, "empty");
+      else this.settle(walk);
+    }
+  }
+
+  /** «Прервать»: the session stays on the model it is on, and nothing is repeated. */
+  interrupt(): void {
+    this.generation += 1;
+    this.clearSilence();
+    this.waiting = undefined;
+    this.walk = undefined;
+    this.show(undefined);
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.generation += 1;
+    this.clearSilence();
+    this.waiting = undefined;
+    this.walk = undefined;
+  }
+
+  // ---------- internals ----------
+
+  /** The rung the session's model stands on, else -1: an unknown model starts the search from the top. */
+  private rungOfCurrentModel(): number {
+    const model = this.session.model();
+    if (model === undefined) return -1;
+    return this.session.ladder().rungs.findIndex((rung) => rung.action.kind === "model" && sameModel(rung.action, model));
+  }
+
+  private show(view: LadderView | undefined): void {
+    if (view === undefined && this.shown === undefined) return;
+    this.shown = view;
+    this.session.view(view);
+  }
+
+  private clearSilence(): void {
+    if (this.silence !== undefined) clearTimeout(this.silence);
+    this.silence = undefined;
+  }
+
+  /** The silence clock: it runs only while a turn for the watched message is going, and every frame restarts it. */
+  private armSilence(): void {
+    this.clearSilence();
+    const walk = this.walk;
+    if (walk === undefined || walk.stepped || !this.session.running()) return;
+    this.silence = setTimeout(() => {
+      this.silence = undefined;
+      if (this.walk === walk && !walk.stepped && this.session.running()) this.step(walk, "silence");
+    }, SILENCE_MS);
+  }
+
+  /** The message was answered after a walk: the session stays here, with one click back to where it started. */
+  private settle(walk: Walk): void {
+    this.walk = undefined;
+    this.clearSilence();
+    const { rescuer, first } = walk;
+    if (rescuer === undefined || first === undefined || sameModel(rescuer, first)) {
+      this.show(undefined);
+      return;
+    }
+    const generation = this.generation;
+    void this.session
+      .models()
+      .then((served) => {
+        if (this.disposed || generation !== this.generation) return; // the person has moved on
+        const label = (model: ModelRef): string => served.find((item) => sameModel(item, model))?.name ?? model.id;
+        this.show({ state: "settled", model: label(rescuer), back: { ...first, label: label(first) } });
+      })
+      .catch(() => undefined); // the line is cosmetic: a model list that will not load leaves it off
+  }
+
+  /** One failure, once per message. */
+  private step(walk: Walk, failure: FailureClass): void {
+    walk.stepped = true;
+    this.clearSilence();
+    if (walk.tally.tools) {
+      // The turn called a tool, wrote a file or ran a command: repeating the message would do it a second time.
+      this.walk = undefined;
+      this.show(undefined);
+      this.session.note("warn", `${REASON[failure]}, но ход уже выполнил действия — не повторяю, решите сами`);
+      return;
+    }
+    void this.walkOn(walk, failure).catch(() => {
+      if (this.walk === walk) this.walk = undefined;
+      this.show(undefined);
+      this.session.note("warn", `${REASON[failure]} — не удалось повторить сообщение`);
+    });
+  }
+
+  private async walkOn(walk: Walk, failure: FailureClass): Promise<void> {
+    const { rungs } = this.session.ladder();
+    const served = await this.session.models();
+    if (this.walk !== walk) return; // interrupted, or another message took over
+    const label = (rung: Extract<Rung["action"], { kind: "model" }>): string => served.find((item) => sameModel(item, rung))?.name ?? rung.id;
+    for (let at = walk.at + 1; at < rungs.length; at++) {
+      const rung = rungs[at] as Rung;
+      if (walk.fired.has(rung.id) || !rung.on.includes(failure)) continue;
+      if (rung.action.kind === "model" && !served.some((item) => sameModel(item, rung.action as LadderModel))) {
+        walk.fired.add(rung.id);
+        this.session.note("info", `Ступенька ${at + 1} пропущена: ${label(rung.action)} нет в этой среде`);
+        continue;
+      }
+      walk.fired.add(rung.id);
+      walk.at = at;
+      if (rung.action.kind === "ask") {
+        this.walk = undefined;
+        this.show(undefined);
+        this.session.note("warn", `${REASON[failure]} — дальше решайте сами`);
+        return;
+      }
+      const name = rung.action.kind === "model" ? label(rung.action) : rung.action.text;
+      this.show({ state: "walking", rung: at + 1, total: rungs.length, label: name });
+      await this.stopTheTurn(`${REASON[failure]}, ступенька ${at + 1} (${name})`);
+      if (this.walk !== walk) return;
+      if (rung.action.kind === "model") {
+        await this.session.setModel({ provider: rung.action.provider, id: rung.action.id });
+        if (this.walk !== walk) return;
+        walk.rescuer = { provider: rung.action.provider, id: rung.action.id };
+        walk.tried += 1;
+      }
+      // The last look before the repeat leaves: «Прервать» must not be answered by a message going out anyway.
+      if (this.walk !== walk) return;
+      const id = this.newId();
+      const text = rung.action.kind === "text" ? rung.action.text : walk.text;
+      const images = rung.action.kind === "text" ? [] : walk.images;
+      if (!(await this.session.send(id, text, images))) {
+        if (this.walk === walk) this.walk = undefined;
+        this.show(undefined);
+        this.session.note("warn", `${REASON[failure]} — не удалось повторить сообщение`);
+        return;
+      }
+      if (this.walk !== walk) return;
+      walk.id = id;
+      walk.stepped = false;
+      walk.started = false;
+      walk.tally = { text: false, tools: false };
+      this.session.note(
+        "info",
+        rung.action.kind === "model" ? `${REASON[failure]} — перешёл на ${name} и повторил` : `${REASON[failure]} — отправил «${name}»`,
+      );
+      this.armSilence();
+      return;
+    }
+    this.walk = undefined;
+    this.show(undefined);
+    this.session.note("warn", `Дальше некуда: перепробовал ${models(walk.tried)}`);
+  }
+
+  /**
+   * The turn goes before anything else happens: the gateway holds the request in its queue, and an answer that
+   * arrived after the switch would be a second answer to one message. An abort OmO answers but does not act on
+   * leaves the existing way out — unload the session and open it again.
+   *
+   * The abort is sent whatever the tab's own state says. A refusal ends the turn *locally* — the reducer has already
+   * drawn its line and put the composer back — while the request itself is still in the gateway's queue, so the one
+   * case the abort exists for is exactly the one where the tab believes nothing is running.
+   */
+  private async stopTheTurn(reason: string): Promise<void> {
+    await this.session.abort(reason);
+    const deadline = Date.now() + ABORT_WAIT_MS;
+    while (this.session.running() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, ABORT_POLL_MS));
+    }
+    if (this.session.running()) await this.session.unwedge();
+  }
+}

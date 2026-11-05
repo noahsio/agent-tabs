@@ -6,6 +6,7 @@ import type { AgentRow, ChatState } from "../../src/chat/model";
 import { applyFrame, initialState } from "../../src/chat/reducer";
 import type { SessionItem, StateMessage, WebviewMessage } from "../../src/panel/protocol";
 import { ChatView } from "../../webview/render";
+import { type as typeInto } from "../helpers/composer";
 
 const NOW = new Date("2026-11-03T20:00:00Z").getTime();
 const MINUTE = 60_000;
@@ -22,8 +23,8 @@ function role(name: string, scope: ParentNode = root): HTMLElement {
   return scope.querySelector(`[data-role="${name}"]`) as HTMLElement;
 }
 
-function input(): HTMLTextAreaElement {
-  return root.querySelector("textarea") as HTMLTextAreaElement;
+function input(): HTMLElement {
+  return root.querySelector(".input") as HTMLElement;
 }
 
 /** The popovers currently shown. */
@@ -100,7 +101,7 @@ describe("popovers", () => {
     expect(shown()).toEqual(["actions"]);
     role("slash").click(); // the trigger toggles
     expect(shown()).toEqual([]);
-    type(input(), "/"); // a typed «/» opens the command list
+    typeInto(input(), "/"); // a typed «/» opens the command list
     expect(shown()).toEqual(["slash"]);
     expect(root.querySelector('[data-role="agents"]')).toBeNull(); // the old agents strip is gone
   });
@@ -510,7 +511,7 @@ describe("popovers", () => {
     role("model-pill").click();
     const style = popover("model").style;
     expect([style.left, style.width, style.bottom, style.top]).toEqual(["60px", "780px", "126px", ""]);
-    type(input(), "/");
+    typeInto(input(), "/");
     const slash = popover("slash").style;
     expect([slash.left, slash.width, slash.bottom, slash.top]).toEqual(["60px", "780px", "126px", ""]); // the same edges
     key(input(), "Escape");
@@ -551,6 +552,24 @@ describe("popovers", () => {
     show({ thinkingLevel: "xhigh" }, { thinkingLevels: [] });
     expect(slider()).toBeNull();
     expect(pop.textContent).not.toContain("Мощность");
+  });
+
+  /** The symptom: a model OmO reports one level for got «Мощность (off)» over a track whose knob could not move. */
+  it("a_model_with_one_level_says_so_instead_of_offering_a_dead_slider", () => {
+    show({ thinkingLevel: "off" }, { thinkingLevels: ["off"] });
+    role("model-pill").click();
+    const pop = popover("model");
+    expect(pop.querySelector('[role="slider"]')).toBeNull();
+    expect(role("effort-label", pop).textContent).toBe("Мощность");
+    expect(role("effort-only", pop).textContent).toBe("эта модель не размышляет");
+
+    show({ thinkingLevel: "high" }, { thinkingLevels: ["high"] }); // one level that is not «off» is named, not denied
+    expect(role("effort-only", pop).textContent).toBe("только «high»");
+    expect(pop.querySelector('[role="slider"]')).toBeNull();
+
+    show({ thinkingLevel: "off" }, { thinkingLevels: ["off", "low"] }); // two is a choice again
+    expect(pop.querySelector('[role="slider"]')).not.toBeNull();
+    expect(role("effort-label", pop).textContent).toBe("Мощность (off)");
   });
 
   it("selection_returns_focus_to_the_input", () => {

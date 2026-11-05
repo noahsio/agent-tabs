@@ -5,6 +5,7 @@ import { initialState } from "../../src/chat/reducer";
 import type { StateMessage, WebviewMessage } from "../../src/panel/protocol";
 import type { Bitmap, ImageCodec } from "../../webview/attachments";
 import { Composer } from "../../webview/composer";
+import { text, type as typeInto } from "../helpers/composer";
 
 type Send = Extract<WebviewMessage, { type: "send" }>;
 
@@ -21,8 +22,8 @@ function show(state: Partial<ChatState> = {}, extra: Partial<StateMessage> = {})
   composer.update({ type: "state", state: { ...initialState(), ...state }, tab: { modelMode: "auto" }, reconnectable: true, ...extra });
 }
 
-function input(): HTMLTextAreaElement {
-  return app.querySelector("textarea") as HTMLTextAreaElement;
+function input(): HTMLElement {
+  return app.querySelector(".input") as HTMLElement;
 }
 
 function role(name: string): HTMLElement {
@@ -33,9 +34,8 @@ function send(): HTMLButtonElement {
   return role("send") as HTMLButtonElement;
 }
 
-function type(text: string): void {
-  input().value = text;
-  input().dispatchEvent(new Event("input", { bubbles: true }));
+function type(words: string): void {
+  typeInto(input(), words);
 }
 
 /** The bottom bar's controls in the order they are painted. */
@@ -93,7 +93,7 @@ describe("the composer's send button", () => {
     const pressed = posted.at(-1) as Send;
 
     expect({ ...clicked, id: "" }).toEqual({ ...pressed, id: "" });
-    expect(input().value).toBe("");
+    expect(text(input())).toBe("");
   });
 
   it("the_mode_chip_rides_a_click_as_it_rides_enter", () => {
@@ -130,7 +130,7 @@ describe("the composer's send button", () => {
     expect(send().disabled).toBe(true);
 
     composer.sent(id, false);
-    expect(input().value).toBe("ушло");
+    expect(text(input())).toBe("ушло");
     expect(send().disabled).toBe(false);
   });
 });

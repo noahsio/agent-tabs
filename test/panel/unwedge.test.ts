@@ -8,6 +8,7 @@ import { ChatPanel, type PanelHost } from "../../src/panel/ChatPanel";
 import { applyDelta } from "../../src/panel/delta";
 import type { HostMessage, StateMessage } from "../../src/panel/protocol";
 import { PanelRegistry } from "../../src/panel/registry";
+import { resetAutoUnwedge } from "../../src/sessions/autoUnwedge";
 import { FakeDaemon, type Frame } from "../helpers/fakeDaemon";
 
 vi.mock("vscode", () => ({
@@ -92,6 +93,16 @@ function requests(type: string): Frame[] {
   return daemon.requests.filter((request) => request["type"] === type);
 }
 
+/** The local lines in the feed, as the person reads them. */
+function notices(posted: StateMessage[]): string[] {
+  return (posted.at(-1)?.state.blocks ?? []).flatMap((block) => (block.kind === "notice" ? [block.text] : []));
+}
+
+/** The messages the tab shows as waiting in OmO's queue. */
+function queued(posted: StateMessage[]): string[] {
+  return (posted.at(-1)?.state.blocks ?? []).flatMap((block) => (block.kind === "user" && block.delivery?.state === "queued" ? [block.text] : []));
+}
+
 async function settle(done: () => boolean): Promise<void> {
   for (let tick = 0; tick < 400 && !done(); tick++) await new Promise((resolve) => setTimeout(resolve, 5));
   expect(done()).toBe(true);
@@ -107,6 +118,7 @@ async function wedgedTab(): Promise<ReturnType<typeof fakePanel>> {
 }
 
 beforeEach(async () => {
+  resetAutoUnwedge(); // the cooldown lives in the extension process, which the test suite shares
   daemon = await FakeDaemon.start();
   await mkdir(join(daemon.agentDir, "rpc"), { recursive: true });
   await symlink(daemon.socketPath, hostSocketPath(daemon.agentDir));
@@ -180,6 +192,121 @@ describe("unwedgeSession", () => {
     await settle(() => requests("abort").length > 0);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(requests("unload_session")).toEqual([]);
+  });
+
+  it("the_automatic_restart_happens_once_per_session_and_says_so_in_the_feed", async () => {
+    const { posted, other, receive } = await wedgedTab();
+    daemon.on("unload_session", (request) => ({
+      data: { outcome: "unloaded", sessionPath: SESSION_FILE },
+      frames: [{ sessionId: request["sessionId"], type: "session_parked", sessionPath: SESSION_FILE, reason: "unloaded" }],
+    }));
+    daemon.on("open_session", () => ({ data: openData("rpc-2", false) }));
+
+    receive({ type: "unwedge", auto: true });
+    await settle(() => other.some((message) => message["type"] === "unwedged"));
+    expect(other.at(-1)).toEqual({ type: "unwedged", auto: true, outcome: "unloaded" });
+    await settle(() => notices(posted).includes("Агент не ответил на «Стоп» — перезапустил сессию"));
+    expect(requests("unload_session").length).toBe(1);
+
+    // The same session asking again within the cooldown is told so, and nothing is unloaded a second time.
+    receive({ type: "unwedge", auto: true });
+    await settle(() => other.filter((message) => message["type"] === "unwedged").length === 2);
+    expect(other.at(-1)).toEqual({ type: "unwedged", auto: true, outcome: "cooldown" });
+    expect(requests("unload_session").length).toBe(1);
+
+    // The person's own click is not rationed: it is theirs to make.
+    receive({ type: "unwedge" });
+    await settle(() => other.filter((message) => message["type"] === "unwedged").length === 3);
+    expect(requests("unload_session").length).toBe(2);
+  });
+
+  it("a_refused_automatic_restart_is_said_in_the_feed_and_changes_nothing", async () => {
+    const { posted, other, receive } = await wedgedTab();
+    daemon.on("unload_session", () => ({ data: { outcome: "refused", reason: "children_live", detail: "2 задачи", action: "children" } }));
+    const opens = requests("open_session").length;
+
+    receive({ type: "unwedge", auto: true });
+    await settle(() => other.some((message) => message["type"] === "unwedged"));
+
+    expect(other.at(-1)).toEqual({ type: "unwedged", auto: true, outcome: "refused", reason: "Дочерние задачи ещё работают: 2 задачи" });
+    expect(notices(posted)).toContain("Не удалось перезапустить сессию: Дочерние задачи ещё работают: 2 задачи");
+    expect(requests("open_session").length).toBe(opens);
+  });
+
+  /**
+   * The restart has to leave the tab honest. OmO reopens the session in the state its last turn was left in: nothing
+   * streams, yet the lifecycle still reads "running" and names that very run as the one it stopped, and the message
+   * the person queued is still in its queue. The tab used to keep the verb it was showing and go on waiting for an end
+   * frame that never comes — composer locked in its queue mode, «Стоп» armed, the queued message never leaving.
+   */
+  it("the_restart_leaves_the_turn_over_in_the_tab_too", async () => {
+    const { posted, other, receive } = await wedgedTab();
+    daemon.push({ sessionId: "rpc-1", type: "entry_appended", entry: { type: "custom", id: "e1" } }); // a journal to catch up from
+    daemon.push({ sessionId: "rpc-1", type: "session_lifecycle", lifecycle: { state: "waiting_human", runId: "run-1" } });
+    daemon.push({
+      sessionId: "rpc-1",
+      type: "queue_update",
+      steering: [],
+      followUp: ["продолжай"],
+      ordered: [{ text: "продолжай", mode: "followUp", queuedId: "q_1", revision: 1, clientMessageId: "m-2" }],
+    });
+    await settle(() => posted.at(-1)?.state.activity === "waiting_human");
+    await settle(() => queued(posted).length === 1);
+
+    daemon.on("unload_session", (request) => ({
+      data: { outcome: "unloaded", sessionPath: SESSION_FILE },
+      frames: [{ sessionId: request["sessionId"], type: "session_parked", sessionPath: SESSION_FILE, reason: "unloaded" }],
+    }));
+    daemon.on("open_session", () => ({
+      data: {
+        sessionId: "rpc-2",
+        state: {
+          sessionFile: SESSION_FILE,
+          sessionId: "durable-1",
+          isStreaming: false,
+          pendingDialogs: [],
+          model: { provider: "gw", id: "m1" },
+          lifecycle: { state: "running", runId: "run-1", lastStop: { runId: "run-1", cause: "aborted", abortSource: "user" } },
+          steering: [],
+          followUp: ["продолжай"],
+        },
+      },
+    }));
+
+    receive({ type: "unwedge", auto: true });
+    await settle(() => other.some((message) => message["type"] === "unwedged"));
+    await settle(() => posted.at(-1)?.state.running === false);
+    expect(posted.at(-1)?.state.activity).not.toBe("waiting_human"); // the verb the tab was showing is not carried over
+
+    // The composer is usable again: the next message starts a turn instead of steering one that is over.
+    daemon.on("prompt", (request) => ({ data: { disposition: "started", clientMessageId: request["clientMessageId"] } }));
+    receive({ type: "send", id: "m-3", text: "дальше", mode: "auto" });
+    await settle(() => requests("prompt").length > 0);
+    expect(requests("steer")).toEqual([]);
+  });
+
+  /** The same reading must not call a turn over while it runs: a live run is one the host has not stopped. */
+  it("a_reopen_during_a_running_turn_keeps_the_turn", async () => {
+    const { posted } = await wedgedTab();
+    daemon.on("open_session", () => ({
+      data: {
+        sessionId: "rpc-2",
+        state: {
+          sessionFile: SESSION_FILE,
+          sessionId: "durable-1",
+          isStreaming: false, // a turn inside a tool call streams nothing
+          pendingDialogs: [],
+          model: { provider: "gw", id: "m1" },
+          lifecycle: { state: "running", runId: "run-2", activity: { kind: "tool", toolName: "bash" } },
+        },
+      },
+    }));
+    const opens = requests("open_session").length;
+
+    daemon.push({ sessionId: "rpc-1", type: "session_parked", sessionPath: SESSION_FILE, reason: "idle" });
+    await settle(() => requests("open_session").length > opens);
+    await settle(() => posted.at(-1)?.state.activity === "tool");
+    expect(posted.at(-1)?.state.running).toBe(true);
   });
 
   it("a_tab_without_a_session_still_gets_an_answer", async () => {

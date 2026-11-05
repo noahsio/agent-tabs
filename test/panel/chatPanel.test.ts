@@ -12,6 +12,7 @@ import { PanelRegistry } from "../../src/panel/registry";
 import { Checkpointer } from "../../src/rewind/checkpointer";
 import { takeSnapshot } from "../../src/rewind/snapshot";
 import { CheckpointStore } from "../../src/rewind/store";
+import type { Ladder } from "../../src/settings/ladder";
 import { SETTINGS_UNAVAILABLE } from "../../src/settings/protocol";
 import { SettingsService, type SettingsSectionHost } from "../../src/settings/service";
 import { FakeDaemon, type Frame } from "../helpers/fakeDaemon";
@@ -198,6 +199,36 @@ describe("ChatPanel", () => {
     expect(JSON.stringify(posted)).not.toContain("TAIL"); // past the cap
   });
 
+  /**
+   * The tab's own symptom: an existing session shows the empty new-chat composer for as long as the open path takes.
+   * OmO 5.1.59 answers `omo.task.list` on a session it has reopened never at all, and the open waited for it — the
+   * whole conversation was in hand and the webview was shown none of it for the client's full 30-second timeout.
+   */
+  it("the_conversation_reaches_the_webview_without_waiting_for_the_task_list", async () => {
+    const entries = Array.from({ length: 1_200 }, (_, index) => ({
+      id: `e${index}`,
+      type: "message",
+      message: { role: index % 3 === 0 ? "user" : "assistant", timestamp: 1_700_000_000_000 + index, content: [{ type: "text", text: `line ${index}` }] },
+    }));
+    daemon.on("get_entries", (request) => {
+      const since = request["since"];
+      const from = since === undefined ? 0 : entries.findIndex((entry) => entry.id === since) + 1;
+      const page = entries.slice(from, from + 500);
+      return { data: { entries: page, hasMore: from + page.length < entries.length, nextSince: page[page.length - 1]?.id } };
+    });
+    // A durable id is what makes the tab ask for the task list at all; the host then never answers it.
+    daemon.on("open_session", () => ({ data: { sessionId: "rpc-1", state: { sessionFile: SESSION_FILE, sessionId: "durable-1", isStreaming: false, pendingDialogs: [] } } }));
+    daemon.on("extension_request", () => ({ silent: true }));
+    const { panel, posted, receive } = fakePanel();
+    ChatPanel.restore(host(), panel, { kind: "attach", sessionPath: SESSION_FILE, saved: { sessionPath: SESSION_FILE, modelMode: "auto" } });
+    receive({ type: "ready" });
+    const startedAt = Date.now();
+    await settle(() => (posted.at(-1)?.state.blocks.length ?? 0) === entries.length);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(posted.at(-1)?.state.error).toBeUndefined(); // and no wrong state in the meantime
+    await settle(() => daemon.requests.some((request) => request["name"] === "omo.task.list")); // asked for, just not waited on
+  });
+
   async function openAttached(overrides: Partial<PanelHost> = {}): Promise<ReturnType<typeof fakePanel> & { chat: ChatPanel; panelHost: PanelHost }> {
     const fake = fakePanel();
     const panelHost = host(overrides);
@@ -362,6 +393,28 @@ describe("ChatPanel", () => {
     await settle(() => posted.at(-1)?.thinkingLevels?.length === 3);
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(daemon.requests.filter((request) => request["type"] === "get_available_thinking_levels").length).toBe(before + 1); // debounced
+  });
+
+  /**
+   * The person's own path: the model is chosen in the popover, and the tab must end up on that model's ladder and on
+   * the level OmO restored for it (it announces both in `model_changed`), not on the levels of the model it opened on.
+   */
+  it("a_model_picked_in_the_popover_brings_its_own_levels_and_its_remembered_level", async () => {
+    const chosen = { provider: "gw", id: "m-thinks" };
+    daemon.on("set_model", (request) => ({
+      // what the live host does on a switch: it announces the new model and the level it restored for it
+      frames: [{ sessionId: "rpc-1", type: "model_changed", model: { provider: request["provider"], id: request["modelId"] }, thinkingLevel: "minimal" }],
+      data: {},
+    }));
+    const { posted, receive } = await openAttached();
+    await settle(() => posted.at(-1)?.thinkingLevels?.length === 2);
+    daemon.on("get_available_thinking_levels", () => ({ data: { levels: ["off", "minimal", "low", "medium", "high"] } }));
+
+    receive({ type: "setModel", model: chosen });
+    await settle(() => posted.at(-1)?.thinkingLevels?.length === 5);
+    expect(posted.at(-1)?.state.model).toEqual(chosen);
+    expect(posted.at(-1)?.thinkingLevels).toEqual(["off", "minimal", "low", "medium", "high"]);
+    expect(posted.at(-1)?.state.thinkingLevel).toBe("minimal"); // the level OmO remembered for it, not the old one
   });
 
   it("commands_and_levels_are_refetched_after_a_reattach", async () => {
@@ -791,6 +844,86 @@ describe("ChatPanel", () => {
     });
   });
 
+  describe("the level a model is remembered at", () => {
+    const AVAILABLE = ["off", "low", "medium", "high", "xhigh"];
+
+    beforeEach(() => {
+      for (const type of ["set_model", "set_thinking_level", "prompt"]) daemon.on(type, () => ({}));
+    });
+
+    const asked = (): Frame[] => daemon.requests.filter((request) => request["type"] === "get_model_thinking_level");
+    const levelsSet = (): Frame[] => daemon.requests.filter((request) => request["type"] === "set_thinking_level");
+
+    /** A draft whose first message creates the session; `reported` is what OmO says about the model it starts on. */
+    async function created(reported: Record<string, unknown>, overrides: Partial<PanelHost> = {}): Promise<ReturnType<typeof fakePanel>> {
+      daemon.on("get_model_thinking_level", () => ({ data: reported }));
+      const fake = fakePanel();
+      ChatPanel.restore(host(overrides), fake.panel, { kind: "new", cwd: daemon.agentDir });
+      fake.receive({ type: "send", id: "m1", text: "привет", mode: "auto" });
+      await settle(() => fake.other.some((message) => message["type"] === "sent"));
+      return fake;
+    }
+
+    it("a_new_session_starts_at_the_level_the_person_last_chose_for_that_model", async () => {
+      const fake = await created({ level: "high", source: "explicit", availableLevels: AVAILABLE }, { rememberedLevel: () => "medium" });
+      expect(asked()[0]).toMatchObject({ provider: "gw", modelId: "m1" }); // the model the session opened on
+      expect(levelsSet()).toEqual([expect.objectContaining({ level: "medium" })]);
+      // applied before the first message, so the very first turn runs at the remembered level
+      const order = daemon.requests.map((request) => String(request["type"])).filter((type) => ["open_session", "set_thinking_level", "prompt"].includes(type));
+      expect(order).toEqual(["open_session", "set_thinking_level", "prompt"]);
+      await settle(() => fake.posted.at(-1)?.state.thinkingLevel === "medium"); // and the composer shows it
+    });
+
+    it("a_level_omo_restored_itself_is_left_alone", async () => {
+      await created({ level: "high", source: "global", availableLevels: AVAILABLE }, { rememberedLevel: () => "medium" });
+      expect(levelsSet()).toEqual([]);
+    });
+
+    it("with_nothing_remembered_the_composer_still_shows_the_level_the_session_is_really_on", async () => {
+      // A new session's journal walks through the profile's own steps; the host's answer is what the turn will run at.
+      const fake = await created({ level: "high", source: "explicit", availableLevels: AVAILABLE });
+      expect(levelsSet()).toEqual([]);
+      await settle(() => fake.posted.at(-1)?.state.thinkingLevel === "high");
+    });
+
+    it("the_level_picked_in_the_draft_wins_over_the_remembered_one", async () => {
+      daemon.on("get_model_thinking_level", () => ({ data: { level: "high", source: "explicit", availableLevels: AVAILABLE } }));
+      const fake = fakePanel();
+      ChatPanel.restore(host({ rememberedLevel: () => "medium" }), fake.panel, { kind: "new", cwd: daemon.agentDir });
+      fake.receive({ type: "setThinking", level: "xhigh" });
+      await settle(() => fake.posted.at(-1)?.state.thinkingLevel === "xhigh");
+      fake.receive({ type: "send", id: "m1", text: "привет", mode: "auto" });
+      await settle(() => fake.other.some((message) => message["type"] === "sent"));
+      expect(levelsSet()).toEqual([expect.objectContaining({ level: "xhigh" })]);
+      expect(asked()).toEqual([]);
+    });
+
+    it("a_session_that_existed_before_keeps_its_own_level", async () => {
+      daemon.on("get_model_thinking_level", () => ({ data: { level: "high", source: "explicit", availableLevels: AVAILABLE } }));
+      await openAttached({ rememberedLevel: () => "medium" });
+      expect(asked()).toEqual([]);
+      expect(levelsSet()).toEqual([]);
+    });
+
+    it("the_drafts_composer_shows_the_remembered_level_of_the_model_it_picked", async () => {
+      const fake = fakePanel();
+      const levels: Record<string, string> = { "gw/m2": "xhigh" };
+      ChatPanel.restore(host({ rememberedLevel: (model) => levels[`${model.provider}/${model.id}`] }), fake.panel, { kind: "new", cwd: daemon.agentDir });
+      fake.receive({ type: "setModel", model: { provider: "gw", id: "m2" } });
+      await settle(() => fake.posted.at(-1)?.state.thinkingLevel === "xhigh");
+      fake.receive({ type: "setModel", model: { provider: "gw", id: "m9" } }); // nothing remembered for it
+      await settle(() => fake.posted.at(-1)?.state.thinkingLevel === undefined);
+      expect(daemon.requests).toEqual([]); // still a draft: nothing reached omo
+    });
+
+    it("the_composer_follows_the_level_omo_restores_on_a_model_switch", async () => {
+      const { posted } = await openAttached();
+      daemon.push({ sessionId: "rpc-1", type: "model_changed", model: { provider: "gw", id: "m2" }, thinkingLevel: "xhigh", source: "set" });
+      await settle(() => posted.at(-1)?.state.thinkingLevel === "xhigh");
+      expect(posted.at(-1)?.state.model).toEqual({ provider: "gw", id: "m2" });
+    });
+  });
+
   it("csp_allows_data_images_and_nothing_else_inline", async () => {
     const { panel } = await openAttached();
     const csp = /Content-Security-Policy" content="([^"]*)"/.exec(panel.webview.html)?.[1] ?? "";
@@ -1045,6 +1178,73 @@ describe("ChatPanel", () => {
       await settle(() => vi.mocked(vscode.window.showWarningMessage).mock.calls.length > 0);
       expect(vi.mocked(vscode.window.showWarningMessage).mock.calls[0]?.[0]).toBe("Сообщение не найдено в журнале сессии");
       expect(openFork).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the model ladder", () => {
+    const LADDER: Ladder = {
+      rungs: [
+        { id: "top", action: { kind: "model", provider: "gw", id: "m1" }, on: [] },
+        { id: "next", action: { kind: "model", provider: "gw", id: "m2" }, on: ["refusal", "rejected", "empty", "silence", "transport"] },
+        { id: "ask", action: { kind: "ask" }, on: ["refusal", "rejected", "empty", "silence", "transport"] },
+      ],
+    };
+
+    const ladderMessages = (fake: { other: Record<string, unknown>[] }): Record<string, unknown>[] => fake.other.filter((message) => message["type"] === "ladder");
+    const setModels = (): Frame[] => daemon.requests.filter((request) => request["type"] === "set_model");
+
+    function refuse(): void {
+      daemon.push({ sessionId: "rpc-1", type: "agent_start" });
+      daemon.push({
+        sessionId: "rpc-1",
+        type: "message_end",
+        message: { role: "assistant", timestamp: 9, content: [], stopReason: "error", rawStopReason: "refusal", stopDetails: { type: "refusal", explanation: "нет" } },
+      });
+    }
+
+    async function sentAndDelivered(fake: ReturnType<typeof fakePanel>, text: string): Promise<void> {
+      fake.receive({ type: "send", id: "m-own", text, mode: "auto" });
+      await settle(() => daemon.requests.some((request) => request["type"] === "prompt"));
+      daemon.push({ sessionId: "rpc-1", type: "message_start", message: { role: "user", clientMessageId: "m-own", content: [{ type: "text", text }] } });
+    }
+
+    beforeEach(() => {
+      daemon.on("get_available_models", () => ({
+        data: { models: [{ provider: "gw", id: "m1", name: "Первая" }, { provider: "gw", id: "m2", name: "Вторая" }] },
+      }));
+      daemon.on("prompt", (request) => ({ data: { disposition: "started", clientMessageId: request["clientMessageId"] } }));
+      daemon.on("steer", () => ({ data: { disposition: "queued" } }));
+      daemon.on("abort", () => ({}));
+      daemon.on("set_model", () => ({}));
+    });
+
+    it("the_persons_send_arms_the_ladder_and_its_line_reaches_the_webview", async () => {
+      const fake = await openAttached({ ladder: () => LADDER });
+      await sentAndDelivered(fake, "разбери кошельки");
+      refuse();
+      await settle(() => ladderMessages(fake).length > 0);
+      expect(ladderMessages(fake)[0]).toEqual({ type: "ladder", view: { state: "walking", rung: 2, total: 3, label: "Вторая" } });
+      await settle(() => setModels().length === 1);
+    });
+
+    it("an_interrupt_from_the_webview_stops_the_walk", async () => {
+      const fake = await openAttached({ ladder: () => LADDER });
+      await sentAndDelivered(fake, "привет");
+      fake.receive({ type: "ladderInterrupt" });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      refuse();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(setModels()).toHaveLength(0);
+      expect(ladderMessages(fake)).toEqual([]);
+    });
+
+    it("a_window_without_a_ladder_never_builds_one", async () => {
+      const fake = await openAttached();
+      await sentAndDelivered(fake, "привет");
+      refuse();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(setModels()).toHaveLength(0);
+      expect(ladderMessages(fake)).toEqual([]);
     });
   });
 });

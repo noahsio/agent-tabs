@@ -70,7 +70,7 @@ describe.skipIf(!hasChrome)("the «/» menus in a real browser (headless Chrome)
 
   it("the_typed_menu_paints_the_hovered_row_in_the_same_blue", async () => {
     const selection = await page.evaluate<string>(SELECTION);
-    await page.evaluate(`(() => { const input = document.querySelector("textarea"); input.focus(); input.value = "/re"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+    await page.evaluate(`(() => { const input = document.querySelector(".input"); input.focus(); input.textContent = "/re"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
     await waitFor(page, `!document.querySelector('[data-popover="slash"]').hidden`);
     const rows = '[data-popover="slash"] [data-row]';
     await page.move(await centre(page, `${rows}:nth-child(3)`));

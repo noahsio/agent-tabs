@@ -1,7 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createConnection, createServer, type Server } from "node:net";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
@@ -37,6 +38,20 @@ export type ProcessOps = {
   kill(pid: number, signal: NodeJS.Signals | 0): void;
   commandLine(pid: number): Promise<string | undefined>;
   listensOn(pid: number, socket: string): Promise<boolean>;
+  /** Every live host of `socket` by command line: how a host is identified when the pid file is missing. */
+  hostPids(socket: string): Promise<number[]>;
+  /**
+   * The OS's own start time for `pid`, undefined when there is no such process: the half of a cooldown key a process
+   * cannot rotate, and the cheapest «is it still there» there is.
+   */
+  startedAt(pid: number): Promise<string | undefined>;
+  /**
+   * Descriptors of `pid` named with the unix socket `socket`: the listener it bound, plus one per client connected to
+   * it (macOS names an accepted unix socket by the path it was bound with). 0 means it does not hold the path at all.
+   */
+  socketFds(pid: number, socket: string): Promise<number>;
+  /** Cumulative CPU seconds charged to `pid`, undefined when it is gone: two samples make a rate. */
+  cpuSeconds(pid: number): Promise<number | undefined>;
 };
 /** `beforeLaunch` runs before every host start (P7: the protection profile is regenerated there). */
 export type HostDeps = { spawn?: SpawnFn; processes?: ProcessOps; readyTimeoutMs?: number; beforeLaunch?: () => void };
@@ -50,6 +65,11 @@ const HOST_READY_TIMEOUT_MS = 20_000;
 const READY_POLL_MS = 200;
 const HOST_STOP_TIMEOUT_MS = 10_000;
 const STABLE_CONNECTION_MS = 30_000;
+/** How long a window waits for whichever window is starting the host before it stops waiting and reports why. */
+const START_LOCK_WAIT_MS = 40_000;
+const START_LOCK_POLL_MS = 100;
+/** A unix socket path may not pass this many bytes (macOS); a lock path longer than that is not used at all. */
+const MAX_SOCKET_PATH = 103;
 
 /**
  * Our own bare host's socket (never the shared `omo daemon` one, whose environment is an allowlist of names) and the
@@ -80,29 +100,80 @@ export function activeHostSocketPath(agentDir: string): string {
 
 const defaultSpawn: SpawnFn = (file, args, options) => spawn(file, args, options) as HostProcess;
 
-const defaultProcesses: ProcessOps = {
+/** One `ps` field of one pid, or undefined when `ps` exits 1 because there is no such process. */
+async function psField(pid: number, field: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await promisify(execFile)("ps", ["-o", `${field}=`, "-p", String(pid)]);
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `[[days-]hh:]mm:ss.cc` as `ps` prints a process's CPU clock, in seconds. */
+export function cpuTimeSeconds(text: string): number | undefined {
+  const [days, clock] = text.includes("-") ? text.split("-") : [undefined, text];
+  const parts = (clock as string).split(":").map(Number);
+  if (parts.length === 0 || parts.length > 3 || parts.some((part) => !Number.isFinite(part))) return undefined;
+  const seconds = parts.reduce((total, part) => total * 60 + part, 0);
+  return seconds + (days === undefined ? 0 : Number(days) * 86_400);
+}
+
+/** The real process table: everything the manager and the reaper ask of it goes through `ps` and `lsof`. */
+export const systemProcesses: ProcessOps = {
   kill: (pid, signal) => process.kill(pid, signal),
-  commandLine: async (pid) => {
-    try {
-      const { stdout } = await promisify(execFile)("ps", ["-o", "command=", "-p", String(pid)]);
-      return stdout.trim() || undefined;
-    } catch {
-      return undefined; // ps exits 1 when there is no such process
-    }
-  },
+  commandLine: (pid) => psField(pid, "command"),
   listensOn: (pid, socket) => listensOn(pid, socket),
+  hostPids: (socket) => hostPids(socket),
+  startedAt: (pid) => psField(pid, "lstart"),
+  socketFds: (pid, socket) => socketFds(pid, socket),
+  cpuSeconds: async (pid) => {
+    const text = await psField(pid, "cputime");
+    return text === undefined ? undefined : cpuTimeSeconds(text);
+  },
 };
 
-/** True when `pid` holds a unix socket bound at `socket` (lsof names it by the path it was bound with, or the real one). */
-export async function listensOn(pid: number, socket: string): Promise<boolean> {
+/**
+ * Live pids whose command line is this extension's host command for `socket` — the same rule `recordedHostPid` trusts,
+ * without the pid file. Under protection the command starts with `sandbox-exec`, which execs omo in place, so there is
+ * one process either way.
+ */
+export async function hostPids(socket: string): Promise<number[]> {
+  let stdout: string;
+  try {
+    ({ stdout } = await promisify(execFile)("ps", ["-axo", "pid=,command="]));
+  } catch {
+    return [];
+  }
+  const tail = ` --mode rpc --listen unix://${socket}`;
+  const pids: number[] = [];
+  for (const line of stdout.split("\n")) {
+    if (!line.endsWith(tail)) continue;
+    const pid = Number(line.trim().split(/\s+/)[0]);
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid) pids.push(pid);
+  }
+  return pids;
+}
+
+/**
+ * Descriptors of `pid` named with the unix socket `socket` (lsof names one by the path it was bound with, or the real
+ * one — a bind that was unlinked from under the process keeps its name here, which is what makes a stolen path
+ * visible). The listener counts as one; every client that connected to it counts as one more.
+ */
+export async function socketFds(pid: number, socket: string): Promise<number> {
   let stdout: string;
   try {
     ({ stdout } = await promisify(execFile)("/usr/sbin/lsof", ["-nP", "-a", "-p", String(pid), "-U", "-F", "n"]));
   } catch {
-    return false; // no such process, or nothing open
+    return 0; // no such process, or nothing open
   }
   const names = new Set([socket, realOf(socket)].map((file) => `n${file}`));
-  return stdout.split("\n").some((line) => names.has(line));
+  return stdout.split("\n").filter((line) => names.has(line)).length;
+}
+
+/** True when `pid` holds a unix socket bound at `socket`. */
+export async function listensOn(pid: number, socket: string): Promise<boolean> {
+  return (await socketFds(pid, socket)) > 0;
 }
 
 function errorText(error: unknown): string {
@@ -113,6 +184,64 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Where the start lock for a host socket lives: next to it, so it is per socket path and in the same closed dir. */
+export function startLockPath(socket: string): string {
+  return `${socket}.start`;
+}
+
+/** Something is at this path — a socket, a file, a dangling link. `existsSync` would follow the link and miss it. */
+function pathExists(file: string): boolean {
+  try {
+    lstatSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** True when something is listening at `file` right now. A path with nothing behind it is free to unlink and rebind. */
+function answersOn(file: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createConnection(file);
+    probe.once("connect", () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.once("error", () => {
+      probe.destroy();
+      resolve(false);
+    });
+  });
+}
+
+/**
+ * Binds `file` as this window's claim on a one-at-a-time job (starting the host; refreshing the installed guard, in
+ * src/guard/protection.ts), or returns undefined when another window holds it.
+ * A bound unix socket is the lock: taking it is one atomic step, and the OS gives it back the moment the process dies,
+ * so a window that crashed in the middle of a start never leaves a lock anyone has to judge stale. The only thing it
+ * can leave is the socket FILE, which is unlinked exactly when nothing answers on it.
+ */
+export async function bindStartLock(file: string): Promise<Server | undefined> {
+  if (existsSync(file)) {
+    if (await answersOn(file)) return undefined; // another window is starting the host right now
+    await rm(file, { force: true });
+  }
+  const server = createServer();
+  server.unref(); // the lock must never hold the extension host open
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(file, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+  } catch {
+    return undefined; // another window bound it between the probe and the listen
+  }
+  return server;
+}
+
 /**
  * Owns the connection to this environment's omo host: a bare `omo --mode rpc --listen` the extension spawns detached
  * with exactly the built environment (so CLAUDE_CONFIG_DIR and the rest reach it), outliving VS Code.
@@ -121,6 +250,8 @@ function sleep(ms: number): Promise<void> {
  */
 export class DaemonManager extends EventEmitter {
   private current: RpcClient | undefined;
+  /** The live host's own `instanceId`: what tells a refusal's holder apart from the host this window talks to. */
+  private instance: string | undefined;
   private inflight: Promise<RpcClient> | undefined;
   private timer: NodeJS.Timeout | undefined;
   private stableTimer: NodeJS.Timeout | undefined;
@@ -137,7 +268,7 @@ export class DaemonManager extends EventEmitter {
   ) {
     super();
     this.spawnFn = deps.spawn ?? defaultSpawn;
-    this.processes = deps.processes ?? defaultProcesses;
+    this.processes = deps.processes ?? systemProcesses;
     this.readyTimeoutMs = deps.readyTimeoutMs ?? HOST_READY_TIMEOUT_MS;
     this.beforeLaunch = deps.beforeLaunch ?? (() => undefined);
   }
@@ -147,9 +278,34 @@ export class DaemonManager extends EventEmitter {
     return this.env.secrets;
   }
 
+  /** The environment this host belongs to, as the person's own setting names it. */
+  get agentDir(): string {
+    return this.env.agentDir;
+  }
+
   /** True while there is a live client. */
   get connected(): boolean {
     return this.current !== undefined;
+  }
+
+  /** The socket this window's host serves: a refusal's holder is «ours» only when it names this path. */
+  get socketPath(): string {
+    return activeHostSocketPath(this.env.agentDir);
+  }
+
+  /** The live host's `instanceId`, once it has answered; undefined while it has not. */
+  get hostInstance(): string | undefined {
+    return this.instance;
+  }
+
+  /**
+   * The pid this extension RECORDED for the host serving this environment's socket, while that pid is still that host.
+   * Only the record, never the process table's guess: with the record lost (which is how two hosts happen at all) both
+   * copies hold the path and the guess could name either, so an answer of «undefined» is the honest one. What tells a
+   * second copy from the serving host without it is that nothing is connected to the second copy.
+   */
+  servingPid(): Promise<number | undefined> {
+    return this.recordedHostPid(activeLocation(this.env.agentDir));
   }
 
   /** The live client, connecting (and starting the host if needed) when there is none. */
@@ -215,22 +371,15 @@ export class DaemonManager extends EventEmitter {
 
   private async establish(): Promise<RpcClient> {
     const location = activeLocation(this.env.agentDir);
-    let client: RpcClient;
-    if (location.protected && (await this.recordedHostPid(location)) === undefined) {
-      // N6: any sandboxed process may bind the protected socket; only our recorded host is ever talked to
-      client = await this.startHost();
-    } else {
-      try {
-        client = await RpcClient.connect(location.socket, this.env.agentDir);
-      } catch {
-        client = await this.startHost();
-      }
-    }
+    // A host that is already serving the path is the only host: nothing is started, and nothing is unlinked from
+    // under it. Starting one happens under a lock, so two windows cold-starting together cannot make two hosts.
+    const client = (await this.connectExisting(location)) ?? (await this.startUnderLock(location));
     if (this.disposed) {
       client.close();
       throw new Error("daemon manager is disposed");
     }
     this.current = client;
+    this.instance = client.instanceId;
     this.stableTimer = setTimeout(() => {
       this.stableTimer = undefined;
       this.attempts = 0;
@@ -239,6 +388,74 @@ export class DaemonManager extends EventEmitter {
     client.on("warning", (text: string) => this.emit("warning", text));
     this.emit("connected", client);
     return client;
+  }
+
+  /**
+   * The host already serving this socket, or undefined when there is none. Protected (N6): any sandboxed process may
+   * bind the protected socket, so only a host of ours is ever talked to, and the record is written back — a lost pid
+   * write (or an older version's) stops making «Перезапустить OmO» miss its host. Unprotected: whatever answers the
+   * authenticated handshake, as before, and the process table is left alone (it is on every connect).
+   */
+  private async connectExisting(location: HostLocation): Promise<RpcClient | undefined> {
+    if (!existsSync(location.socket)) return undefined;
+    if (location.protected) {
+      const own = await this.ownHostOn(location);
+      if (own === undefined) return undefined;
+      await this.writePid(location.pid, own);
+    }
+    try {
+      return await RpcClient.connect(location.socket, this.env.agentDir);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * A host of ours holding this socket path now: the pid file when it still names one, else the live process whose
+   * command line is our host command for this path. It is what tells «a leftover socket file» and «a stranger bound
+   * our path» (both go) from «our own live host» (never unbound — that unlink is what orphaned a working host).
+   */
+  private async ownHostOn(location: HostLocation): Promise<number | undefined> {
+    const recorded = await this.recordedHostPid(location);
+    if (recorded !== undefined) return recorded;
+    for (const pid of await this.processes.hostPids(location.socket)) {
+      if (await this.processes.listensOn(pid, location.socket)) return pid;
+    }
+    return undefined;
+  }
+
+  /**
+   * Starts the host as the one window allowed to. The lock is taken first and the path is looked at again under it, so
+   * the window that loses connects to the host the winner started instead of starting a second one. Without a usable
+   * lock path the start still cannot double-bind — a socket that answers is never unlinked, and omo itself refuses a
+   * live one with EADDRINUSE — so the lock is skipped rather than failing the start.
+   */
+  private async startUnderLock(location: HostLocation): Promise<RpcClient> {
+    // The lock and the socket share a directory, so it has to exist before either is bound. Protected: the host binds
+    // in a dir a sandboxed host cannot create in or unlink from, and rpc/ (its key files) cannot be created under the
+    // profile either, so both are made here.
+    if (location.protected) await mkdir(dirname(hostSocketPath(this.env.agentDir)), { recursive: true });
+    await mkdir(dirname(location.socket), { recursive: true, ...(location.protected ? { mode: 0o700 } : {}) });
+    const file = startLockPath(location.socket);
+    if (Buffer.byteLength(file) > MAX_SOCKET_PATH) return this.startHost(location);
+    const deadline = Date.now() + START_LOCK_WAIT_MS;
+    for (;;) {
+      const lock = await bindStartLock(file);
+      if (lock !== undefined) {
+        try {
+          return (await this.connectExisting(location)) ?? (await this.startHost(location));
+        } finally {
+          lock.close();
+          await rm(file, { force: true });
+        }
+      }
+      const started = await this.connectExisting(location);
+      if (started !== undefined) return started;
+      if (Date.now() >= deadline) {
+        throw new Error(redact(`другое окно запускает хост omo дольше ${START_LOCK_WAIT_MS / 1_000} с`, this.env.secrets));
+      }
+      await sleep(START_LOCK_POLL_MS);
+    }
   }
 
   /**
@@ -255,22 +472,23 @@ export class DaemonManager extends EventEmitter {
     };
   }
 
-  /** Spawns the bare host (no stdin: omo prepends inherited stdin to prompts) and connects once it answers. */
-  private async startHost(): Promise<RpcClient> {
+  /**
+   * Spawns the bare host (no stdin: omo prepends inherited stdin to prompts) and connects once it answers. Only ever
+   * called with the start lock held and with nothing answering on the socket, so the host it starts is the only one.
+   */
+  private async startHost(location: HostLocation): Promise<RpcClient> {
     const fail = (message: string): Error => new Error(redact(message, this.env.secrets));
     try {
       this.beforeLaunch();
     } catch (error) {
       this.emit("warning", redact(`Профиль песочницы не обновлён: ${errorText(error)}`, this.env.secrets));
     }
-    const location = activeLocation(this.env.agentDir);
-    if (location.protected) {
-      // The host binds in a dir a sandboxed host cannot create in or unlink from: make it, and clear whatever is at
-      // the socket unless it is our recorded host (a foreign listener is not killed, only unbound from the path).
-      // rpc/ (its key files) cannot be created under the profile either: the unprotected host's place is closed.
-      await mkdir(dirname(hostSocketPath(this.env.agentDir)), { recursive: true });
-      await mkdir(dirname(location.socket), { recursive: true, mode: 0o700 });
-      if ((await this.recordedHostPid(location)) === undefined) await rm(location.socket, { force: true });
+    // Whatever sits at the socket goes — a leftover file, a dangling link, a sandboxed process that bound the path
+    // (N6: unbound from the path, never killed) — UNLESS a host of ours is serving it. Unlinking a live host of ours
+    // is how a second host used to take the path away from the first, leaving the first unreachable with its
+    // sessions' files still held (measured live: host-race case r6).
+    if (location.protected && pathExists(location.socket) && (await this.ownHostOn(location)) === undefined) {
+      await rm(location.socket, { force: true });
     }
     const command = this.hostCommand(location);
     let child: HostProcess;
@@ -295,7 +513,13 @@ export class DaemonManager extends EventEmitter {
     const deadline = Date.now() + this.readyTimeoutMs;
     let lastError = "no answer";
     for (;;) {
-      if (ended !== undefined) throw fail(`omo host ${ended}`);
+      if (ended !== undefined) {
+        // Our host is gone (a live socket refuses the bind with EADDRINUSE). Whatever answers the path now was there
+        // before us, so it is joined — never fought for the path, and never recorded as our child's pid.
+        const already = await this.connectExisting(location);
+        if (already !== undefined) return already;
+        throw fail(`omo host ${ended}`);
+      }
       try {
         const client = await RpcClient.connect(location.socket, this.env.agentDir);
         if (location.protected && (child.pid === undefined || !(await this.processes.listensOn(child.pid, location.socket)))) {
@@ -371,6 +595,7 @@ export class DaemonManager extends EventEmitter {
   private onClose(client: RpcClient): void {
     if (this.current !== client) return;
     this.current = undefined;
+    this.instance = undefined;
     if (this.disposed) return;
     if (this.stableTimer !== undefined) clearTimeout(this.stableTimer);
     this.stableTimer = undefined;

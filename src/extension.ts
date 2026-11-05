@@ -2,28 +2,46 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
-import { activeHostSocketPath, DaemonManager, RECONNECT_DELAYS_MS } from "./daemon";
+import { activeHostSocketPath, DaemonManager, RECONNECT_DELAYS_MS, systemProcesses } from "./daemon";
 import { buildOmoEnv, redact, type EnvVar } from "./env";
 import { serviceMayRun } from "../kit/guard/sockets.mjs";
+import { guardFilesDir } from "../kit/guard/lifecycle.mjs";
 import { DEFAULT_TG_ENV } from "../kit/guard/telegram.mjs";
 import { GuardAdmin } from "./guard/admin";
 import { GuardApprovals } from "./guard/approvals";
-import { disableProtection, enableProtection, hostRestarter, plannedWriteDenies, protectionStatus, refreshProfile, systemProtectionDeps, type VscodePaths } from "./guard/protection";
+import {
+  disableProtection,
+  enableProtection,
+  hostRestarter,
+  installedKit,
+  plannedWriteDenies,
+  protectionStatus,
+  refreshProfile,
+  refreshProtection,
+  systemProtectionDeps,
+  type VscodePaths,
+} from "./guard/protection";
+import { Freshness } from "./guard/freshness";
+import { OutsideChats } from "./guard/outside";
+import { TaskRegistry } from "./guard/tasks";
 import { type Catalog, parseCatalog } from "./panel/catalog";
 import { CHAT_VIEW_TYPE, ChatPanel, targetColumn, type PanelHost } from "./panel/ChatPanel";
 import { isExternalLink, isNextMode, type ModelInfo, type PersistedState } from "./panel/protocol";
 import { OUTPUT_SCHEME, OutputDocuments } from "./panel/outputDocuments";
 import { PanelRegistry, revealOrOpen } from "./panel/registry";
-import { buildSessionItems, fetchLiveSessions } from "./panel/sessionsList";
+import { buildSessionItems, fetchLiveSessions, liveSessionPath } from "./panel/sessionsList";
 import { Checkpointer } from "./rewind/checkpointer";
 import { pruneCheckpoints } from "./rewind/prune";
 import { CheckpointStore } from "./rewind/store";
 import { listPastSessions, type PastSession, type SummaryCache } from "./sessions/history";
+import { HostReaper } from "./sessions/reapHost";
+import { readRememberedLevels, rememberedLevel } from "./sessions/rememberedLevels";
 import { RpcClient } from "./rpc/client";
 import { AccountsService } from "./settings/accounts";
 import { ConnectionsHost } from "./settings/connections";
 import { EnvironmentHost } from "./settings/environment";
 import { keyFileSecrets } from "./settings/gateway";
+import { LadderHost, readLadder } from "./settings/ladder";
 import { RolesHost } from "./settings/roles";
 import { SecurityHost } from "./settings/security";
 import { migrateGwApiKey } from "./settings/migrateKey";
@@ -264,10 +282,20 @@ export function activate(context: vscode.ExtensionContext): void {
     restartHost: () => void restartHost(),
     showOutput: (taskId, label, content) => outputs.show(taskId, label, content),
     ...(settings !== undefined ? { settings } : {}),
+    // Read on demand, never cached: OmO writes its store the moment a level is picked, in this window or another.
+    ...(built.ok ? { rememberedLevel: (model) => rememberedLevel(readRememberedLevels(built.value.agentDir), model) } : {}),
     ...(built.ok && checkpointStore !== undefined ? { checkpointer: new Checkpointer({ store: checkpointStore, agentDir: built.value.agentDir }) } : {}),
     openFork: (sessionPath, draft, column, name) =>
       void ChatPanel.create(host, { kind: "attach", sessionPath, draft, ...(name !== undefined ? { name } : {}) }, targetColumn(column)),
+    // One reaper for the window: it is where the one-attempt-per-holder bound and the shared attempt live, so however
+    // many tabs are blocked by the same duplicate host, it is looked at once and stopped once.
+    stopDuplicateHost: (holder, options) => {
+      const manager = host.daemon();
+      if (!manager.ok) return Promise.resolve({ verdict: "refused" as const, reason: manager.error, offerStop: false });
+      return reaper.stop(manager.value, holder, options);
+    },
   };
+  const reaper = new HostReaper({ processes: systemProcesses });
   if (checkpointStore !== undefined) {
     pruneCheckpoints(checkpointStore, Date.now()).catch((error: unknown) => log(`Не удалось убрать старые снимки: ${String(error)}`));
   }
@@ -327,15 +355,22 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       return writeDenies.list;
     };
+    const guardSource = path.join(kitDir, "guard");
+    /** Why the activation refresh below did not go through, for «Безопасность» to show instead of nothing. */
+    let refreshError: string | undefined;
     settings.register(
       new SecurityHost({
         paths,
-        guardSource: path.join(kitDir, "guard"),
+        guardSource,
         protection: {
           status: () => protectionStatus(paths, vscodePaths()),
           enable: () => enableProtection(paths, protectionDeps()),
           disable: () => disableProtection(paths, protectionDeps()),
           writeDenies: plannedDenies,
+          installed: () => {
+            const kit = installedKit(paths, guardSource);
+            return { ...(kit !== undefined ? { installed: kit } : {}), ...(refreshError !== undefined ? { refreshError } : {}) };
+          },
         },
         admin: () => GuardAdmin.connect(agentDir),
         serviceMayRun: () => serviceMayRun(agentDir),
@@ -346,6 +381,27 @@ export function activate(context: vscode.ExtensionContext): void {
         fetch: (url, init) => fetch(url, init),
       }),
     );
+    // The guard that decides is the installed copy, not these files: an update reaches the person only here. Started
+    // before any session attaches and never awaited — it restarts no host, so nothing it does interrupts a turn — and
+    // it reads the installation off the disk first, so an activation with nothing to refresh touches nothing at all.
+    if (vscodeDirs !== undefined) {
+      void refreshProtection(paths, protectionDeps()).then(
+        (outcome) => {
+          if (outcome.kind === "refreshed") log(`Защита: установленная копия обновлена до нынешней (${outcome.kitDir}); служба перезапущена, OmO не тронут`);
+          if (outcome.kind === "failed") {
+            refreshError = outcome.reason;
+            log(`Защита: установленную копию не удалось обновить до нынешней: ${outcome.reason}`);
+          }
+        },
+        (error: unknown) => {
+          refreshError = error instanceof Error ? error.message : String(error);
+          log(`Защита: установленную копию не удалось обновить до нынешней: ${refreshError}`);
+        },
+      );
+    }
+    // Read on demand, never cached: the ladder a failure walks is the one the modal shows right now.
+    host.ladder = () => readLadder(paths);
+    settings.register(new LadderHost({ paths, models: () => roles.modelOptions(), changed: () => settings.emit("changed") }));
     let hiddenCommands: readonly string[] = readHiddenCommands(paths); // one array until it changes: the tabs' deltas compare by reference
     host.hiddenCommands = () => hiddenCommands;
     settings.register(
@@ -384,10 +440,31 @@ export function activate(context: vscode.ExtensionContext): void {
     if (vscodeDirs !== undefined) {
       // One subscription for the window's tabs: started while protection is set up, re-checked on every settings change
       // (protection switched, `human.card` changed).
-      const approvals = new GuardApprovals({
+      // OmO's task registry of THIS agent dir: whose chat a subagent's request belongs to. One per window, never shared
+      // with the other environment's dir.
+      const tasks = new TaskRegistry(agentDir);
+      // A request no window has a tab for: raised outside the chats, so no chat shows a card it never asked for.
+      const chats = new OutsideChats({
+        notify: (text, ...buttons) => Promise.resolve(vscode.window.showInformationMessage(text, ...buttons)),
+        openSession: async (session) => {
+          const manager = daemon;
+          const path = manager !== undefined && manager.connected ? await liveSessionPath(await manager.client(), session) : undefined;
+          if (path === undefined) {
+            log(`Сессию ${session} не открыть: её нет среди живых сессий среды`);
+            void vscode.window.showWarningMessage("Эту сессию не открыть: её больше нет среди живых — подробности в канале «Agent Tabs»");
+            return;
+          }
+          await host.openSession(path);
+        },
+        answer: (id, decision) => approvals.answerOutside(id, decision),
+        log,
+      });
+      const approvals: GuardApprovals = new GuardApprovals({
         protectionOn: async () => (await protectionStatus(paths, vscodeDirs)).state !== "off",
         connect: () => GuardAdmin.connect(agentDir),
         panels: () => panels,
+        rootOf: (session) => tasks.rootOf(session),
+        outside: (request, owner) => chats.raise(request, owner),
         log,
         retryDelaysMs: RECONNECT_DELAYS_MS,
       });
@@ -395,6 +472,25 @@ export function activate(context: vscode.ExtensionContext): void {
       settings.on("changed", () => void approvals.sync());
       void approvals.sync();
       context.subscriptions.push({ dispose: () => approvals.dispose() });
+      // Once per window and never per tab: the person has fifteen of them, each running whatever build it loaded when
+      // it started, and no way to tell which of them is still deciding for itself whose request a card is.
+      void new Freshness({
+        running: String((context.extension?.packageJSON as { version?: string } | undefined)?.version ?? ""),
+        extensionsDir: vscodeDirs.extensionsDir,
+        expectedKit: guardFilesDir(paths.home, path.join(kitDir, "guard")),
+        status: async () => {
+          const admin = await GuardAdmin.connect(agentDir, { reconnectDelaysMs: [] });
+          try {
+            return await admin.status();
+          } finally {
+            admin.close();
+          }
+        },
+        notify: (text, button) => Promise.resolve(vscode.window.showWarningMessage(text, button)),
+        reloadWindow: () => void vscode.commands.executeCommand("workbench.action.reloadWindow"),
+        restartService: () => enableProtection(paths, protectionDeps()),
+        log,
+      }).tell();
     }
     host.firstRun = () => sectionHost.firstRun();
     let modelsInFlight: Promise<ModelInfo[]> | undefined; // many drafts may ask at once

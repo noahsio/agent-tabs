@@ -66,7 +66,7 @@ describe("GuardAdmin", () => {
     await boot(agentDir);
     const admin = await connect(agentDir);
     const hookSock = servicePaths(agentDir).hookSock as string;
-    const { id, ticket } = await send(hookSock, evaluate("git push"));
+    const { id, ticket } = await send(hookSock, evaluate("rm -rf $U"));
     expect((await admin.pending()).map((item) => item.id)).toEqual([id]);
     const waiting = send(hookSock, { op: "wait", id, ticket });
     await admin.answer(id, "allow-once");
@@ -81,16 +81,16 @@ describe("GuardAdmin", () => {
     const events: GuardEvent[] = [];
     admin.subscribe((event) => events.push(event));
     const hookSock = servicePaths(agentDir).hookSock as string;
-    await send(hookSock, evaluate("git push"));
+    await send(hookSock, evaluate("rm -rf $U"));
     await until(() => events.some((event) => event.event === "pending"));
 
     await first.close(); // launchd's KeepAlive starts it again
     services = services.filter((service) => service !== first);
     await boot(agentDir);
     events.length = 0;
-    const { id } = await send(hookSock, evaluate("git push --force"));
+    const { id } = await send(hookSock, evaluate("rm -rf $U --force"));
     const pending = await until(() => events.find((event) => event.event === "pending" && event.item.id === id));
-    expect(pending).toMatchObject({ event: "pending", item: { command: "git push --force" } });
+    expect(pending).toMatchObject({ event: "pending", item: { command: "rm -rf $U --force" } });
   });
 
   it("subscribe_reports_every_confirmation_including_after_a_restart", async () => {
@@ -126,7 +126,7 @@ describe("GuardAdmin", () => {
     await boot(agentDir);
     const events: GuardEvent[] = [];
     admin.subscribe((event) => events.push(event));
-    const { id } = await send(servicePaths(agentDir).hookSock as string, evaluate("git push"));
+    const { id } = await send(servicePaths(agentDir).hookSock as string, evaluate("rm -rf $U"));
     await until(() => events.find((event) => event.event === "pending" && event.item.id === id));
     expect(stale).toEqual([]);
     expect(gaveUp).toBe(1);

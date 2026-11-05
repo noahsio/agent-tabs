@@ -86,7 +86,7 @@ afterEach(async () => {
 describe("thin hook", () => {
   it("a_safe_call_is_allowed_without_the_service", async () => {
     expect(await runThinHook(bash("git status"), opts)).toEqual({});
-    expect(await runThinHook(call("grep", { pattern: "git push" }), opts)).toEqual({});
+    expect(await runThinHook(call("grep", { pattern: "rm -rf $U" }), opts)).toEqual({});
     expect(await runThinHook(call("write", { path: "/work/proj/a.txt", content: "x" }), opts)).toEqual({});
     expect(svc.connections).toBe(0);
   });
@@ -104,62 +104,65 @@ describe("thin hook", () => {
 
   it("a_disputed_call_goes_to_the_service", async () => {
     svc.answer = { decision: "deny", reason: "нет" };
-    expect(decision(await runThinHook(bash("git push"), opts))).toEqual({ permissionDecision: "deny", permissionDecisionReason: "[guard] нет" });
-    expect(svc.seen).toEqual([{ tool: "bash", input: { command: "git push" }, cwd: "/work/proj", session: SESSION }]);
+    expect(decision(await runThinHook(bash("rm -rf $U"), opts))).toEqual({ permissionDecision: "deny", permissionDecisionReason: "[guard] нет" });
+    expect(svc.seen).toEqual([{ tool: "bash", input: { command: "rm -rf $U" }, cwd: "/work/proj", session: SESSION }]);
   });
 
   it("a_service_allow_is_an_explicit_allow", async () => {
     svc.answer = { decision: "allow", reason: "[guard] решатель разрешил: ок" };
-    expect(decision(await runThinHook(bash("git push"), opts))).toEqual({ permissionDecision: "allow", permissionDecisionReason: "[guard] решатель разрешил: ок" });
+    expect(decision(await runThinHook(bash("rm -rf $U"), opts))).toEqual({ permissionDecision: "allow", permissionDecisionReason: "[guard] решатель разрешил: ок" });
   });
 
   it("a_pending_call_waits_with_its_ticket", async () => {
     svc.answer = { decision: "pending", id: "r1", ticket: "tk-1" };
     svc.waitAnswer = { decision: "allow", reason: "[guard] человек разрешил один раз (agent-tabs)" };
-    const out = await runThinHook(bash("git push"), opts);
+    const out = await runThinHook(bash("rm -rf $U"), opts);
     expect(decision(out)).toEqual({ permissionDecision: "allow", permissionDecisionReason: "[guard] человек разрешил один раз (agent-tabs)" });
     expect(svc.waits).toEqual([{ op: "wait", id: "r1", ticket: "tk-1" }]);
   });
 
-  it("a_connection_drop_mid_wait_denies", async () => {
+  it("a_connection_drop_mid_wait_is_decided_locally", async () => {
     svc.answer = { decision: "pending", id: "r1", ticket: "tk-1" };
     svc.waitAnswer = "drop";
-    const out = await runThinHook(bash("git push"), opts);
-    expect(decision(out).permissionDecision).toBe("deny");
-    expect(reason(out)).toContain("[guard]");
+    expect(await runThinHook(bash("rm -rf $U"), opts)).toEqual({});
+    expect(decision(await runThinHook(bash("rm -rf /"), opts)).permissionDecision).toBe("deny");
   });
 
-  it("no_answer_within_the_budget_denies", async () => {
+  it("no_answer_within_the_budget_is_decided_locally", async () => {
     svc.answer = { decision: "pending", id: "r1", ticket: "tk-1" };
     svc.waitAnswer = "hang";
     const t0 = Date.now();
-    const out = await runThinHook(bash("git push"), { ...opts, budgetMs: 300 });
+    expect(await runThinHook(bash("rm -rf $U"), { ...opts, budgetMs: 300 })).toEqual({});
     expect(Date.now() - t0).toBeLessThan(2000);
-    expect(decision(out).permissionDecision).toBe("deny");
-    expect(reason(out)).toContain("нет ответа службы защиты");
+    svc.answer = { decision: "pending", id: "r1", ticket: "tk-1" };
+    const denied = await runThinHook(bash("rm -rf /"), { ...opts, budgetMs: 300 });
+    expect(decision(denied).permissionDecision).toBe("deny");
+    expect(reason(denied)).toContain("нет ответа службы защиты");
   });
 
-  it("an_error_reply_denies", async () => {
+  it("an_error_reply_is_decided_locally", async () => {
+    // P44: the hook has the same rules and classifier, so it does not guess when the service misbehaves.
     svc.answer = { error: "unknown op" };
-    const out = await runThinHook(bash("git push"), opts);
-    expect(decision(out).permissionDecision).toBe("deny");
-    expect(reason(out)).toContain("unknown op");
+    expect(await runThinHook(bash("rm -rf $U"), opts)).toEqual({});
+    expect(decision(await runThinHook(bash("rm -rf /"), opts)).permissionDecision).toBe("deny");
   });
 
-  it("non_json_partial_null_and_malformed_replies_deny", async () => {
+  it("non_json_partial_null_and_malformed_replies_are_decided_locally", async () => {
     const replies: Reply[] = [{ raw: "garbage\n" }, { raw: '{"decision":"al' }, { raw: "null\n" }, { raw: "[]\n" }, { decision: "maybe" }, { decision: "pending" }];
     for (const reply of replies) {
       svc.answer = reply;
-      const out = await runThinHook(bash("git push"), opts);
-      expect([reply, decision(out).permissionDecision]).toEqual([reply, "deny"]);
-      expect(reason(out).startsWith("[guard] ")).toBe(true);
+      expect([reply, await runThinHook(bash("rm -rf $U"), opts)]).toEqual([reply, {}]);
+      svc.answer = reply;
+      const denied = await runThinHook(bash("rm -rf /"), opts);
+      expect([reply, decision(denied).permissionDecision]).toEqual([reply, "deny"]);
+      expect(reason(denied).startsWith("[guard] ")).toBe(true);
     }
   });
 
   it("a_reason_that_is_not_a_string_is_shown_safely", async () => {
     for (const bad of [{ x: 1 }, null, 42]) {
       svc.answer = { decision: "deny", reason: bad };
-      const out = await runThinHook(bash("git push"), opts);
+      const out = await runThinHook(bash("rm -rf $U"), opts);
       expect(decision(out).permissionDecision).toBe("deny");
       expect(typeof reason(out)).toBe("string");
       expect(reason(out)).not.toContain("[object");
@@ -173,21 +176,25 @@ describe("thin hook", () => {
     expect(svc.connections).toBe(0);
   });
 
-  it("bash_input_keys_that_submit_go_to_the_service", async () => {
-    expect(await runThinHook(call("bash_input", { bash_id: "b1", keys: ["ctrl+c"] }), opts)).toEqual({});
-    expect(svc.connections).toBe(0);
+  it("bash_input_keys_that_submit_no_longer_reach_the_service", async () => {
+    // P45: replaying whatever the terminal holds cannot be read, and P43 retired unreadability as a verdict.
+    for (const keys of [{ keys: ["ctrl+c"] }, { keys: ["up", "enter"] }, { keys: ["up"], submit: true }]) {
+      expect(await runThinHook(call("bash_input", { bash_id: "b1", ...keys }), opts)).toEqual({});
+    }
+    // Text it CAN read still goes through the rules.
     svc.answer = { decision: "deny", reason: "[guard] нет" };
-    expect(decision(await runThinHook(call("bash_input", { bash_id: "b1", keys: ["up", "enter"] }), opts)).permissionDecision).toBe("deny");
-    expect(decision(await runThinHook(call("bash_input", { bash_id: "b1", keys: ["up"], submit: true }), opts)).permissionDecision).toBe("deny");
-    expect(svc.connections).toBe(2);
+    expect(decision(await runThinHook(call("bash_input", { bash_id: "b1", input: "rm -rf $U" }), opts)).permissionDecision).toBe("deny");
+    expect(svc.connections).toBe(1);
   });
 
-  it("a_rules_file_that_cannot_be_stat_ed_is_not_the_defaults", async () => {
+  it("a_rules_file_that_cannot_be_stat_ed_falls_back_to_the_defaults", async () => {
     const guardDir = servicePaths(agentDir).dir;
     fs.chmodSync(guardDir, 0o000);
     try {
+      // P44: unreadable rules fall back to the defaults, which are stricter than any edited copy, so a corrupted
+      // file cannot buy more than a fresh install has. `git status` is ordinary work either way.
       const out = await runThinHook(bash("git status"), opts);
-      expect(decision(out).permissionDecision).toBe("deny");
+      expect(out).toEqual({});
     } finally {
       fs.chmodSync(guardDir, 0o700);
     }
@@ -201,30 +208,36 @@ describe("thin hook", () => {
     expect(svc.connections).toBe(1);
   });
 
-  it("stale_socket_file_denies_fast", async () => {
+  it("stale_socket_file_decides_locally_and_fast", async () => {
     await svc.close();
     fs.rmSync(hookSock(), { force: true });
     fs.writeFileSync(hookSock(), "");
     const t0 = Date.now();
-    const out = await runThinHook(bash("git push"), opts);
+    const out = await runThinHook(bash("rm -rf $U"), opts);
     expect(Date.now() - t0).toBeLessThan(2000);
-    expect(decision(out).permissionDecision).toBe("deny");
-    expect(reason(out)).toContain("служба защиты не запущена");
+    expect(out).toEqual({});
+    expect(decision(await runThinHook(bash("rm -rf ~"), opts)).permissionDecision).toBe("deny");
   });
 
-  it("a_missing_socket_denies_with_the_hint", async () => {
+  it("a_missing_socket_still_denies_a_deny_and_the_guards_own_files_and_names_the_hint", async () => {
     await svc.close();
     fs.rmSync(hookSock(), { force: true });
-    expect(reason(await runThinHook(bash("git push"), opts))).toBe(
-      "[guard] служба защиты не запущена — включите защиту в настройках Agent Tabs → Безопасность",
-    );
+    // What was only going to be ASKED passes; what the deny set or the guard's own surface catches still refuses,
+    // and the refusal names why the service was not consulted.
+    expect(await runThinHook(bash("rm -rf $U"), opts)).toEqual({});
+    const denied = await runThinHook(bash("rm -rf /"), opts);
+    expect(decision(denied).permissionDecision).toBe("deny");
+    expect(reason(denied)).toContain("служба защиты не запущена");
+    const guard = await runThinHook(bash(`cat ${path.join(agentDir, "guard", "rules.json")}`), opts);
+    expect(decision(guard).permissionDecision).toBe("deny");
+    expect(reason(guard)).toContain("служба защиты не запущена");
   });
 
   describe("every tool that runs or writes reaches the service", () => {
     const disputed: Record<string, unknown> = {
-      bash_input: { bash_id: "b1", input: "git push" },
-      monitor: { type: "command", command: "git push", description: "x" },
-      eval: { language: "ts", summary: "x", code: "await $`git push`" },
+      bash_input: { bash_id: "b1", input: "rm -rf $U" },
+      monitor: { type: "command", command: "rm -rf $U", description: "x" },
+      eval: { language: "ts", summary: "x", code: "await $`rm -rf $U`" },
       write: { path: "@AGENT/hooks.json", content: "{}" },
       edit: { path: "@AGENT/guard/rules.json", oldText: "a", newText: "b" },
       apply_patch: { input: "*** Begin Patch\n*** Update File: @AGENT/hooks.json\n*** End Patch" },
@@ -237,23 +250,25 @@ describe("thin hook", () => {
     });
   });
 
-  it("an_unknown_write_tool_is_denied", async () => {
-    for (const tool of ["fs_write_v2", "run_script", "remote_exec", "spawn_process"]) {
-      const out = await runThinHook({ tool_name: tool, tool_input: {} }, opts);
-      expect(decision(out).permissionDecision).toBe("deny");
-      expect(reason(out)).toContain("неизвестный инструмент записи");
-    }
-    expect(svc.connections).toBe(0);
+  it("an_unknown_write_tool_goes_to_the_service_so_that_an_answer_can_come_back", async () => {
+    // P45: the hook denied this on the spot, which was consistent while the service would have denied it too. It is
+    // an ASK now, and the hook must not answer an ask on the person's behalf — the call reaches the service, and the
+    // service's answer is what the hook reports. The name travels as given, so camelCase humps stay word breaks.
+    const names = ["fs_write_v2", "run_script", "remote_exec", "spawn_process", "runCommand", "shell_exec"];
+    svc.answer = { decision: "allow", reason: "[guard] человек разрешил один раз (agent-tabs)" };
+    for (const tool of names) expect([tool, decision(await runThinHook(call(tool, {}), opts)).permissionDecision]).toEqual([tool, "allow"]);
+    expect(svc.seen.map((seen) => seen.tool)).toEqual(names);
+    svc.answer = { decision: "deny", reason: "[guard] человек запретил (agent-tabs)" };
+    expect(decision(await runThinHook(call("fs_write_v2", {}), opts)).permissionDecision).toBe("deny");
   });
 
-  it("write_like_names_are_tokens_and_mcp_or_innocent_names_go_to_the_service", async () => {
-    for (const tool of ["runCommand", "shell_exec"]) expect(reason(await runThinHook(call(tool, {}), opts))).toContain("неизвестный инструмент записи");
-    expect(svc.connections).toBe(0);
-    svc.answer = { decision: "deny", reason: "[guard] спорная команда запрещена настройками защиты" };
+  it("write_like_names_are_tokens_and_an_innocent_or_mcp_name_never_reaches_the_service", async () => {
+    // P45: a tool name that is not write-like is no longer a question either — these pass without the service.
     for (const tool of ["truncate", "prune", "credit", "mcp_fs_write_file"]) {
-      expect(reason(await runThinHook(call(tool, {}), opts))).not.toContain("неизвестный инструмент записи");
+      expect([tool, await runThinHook(call(tool, {}), opts)]).toEqual([tool, {}]);
     }
-    expect(svc.seen.map((seen) => seen.tool)).toEqual(["truncate", "prune", "credit", "mcp_fs_write_file"]);
+    expect(svc.connections).toBe(0);
+    expect(svc.seen).toEqual([]);
   });
 
   it("subagent_memory_goal_and_codegraph_tools_pass_without_the_service", async () => {
@@ -290,10 +305,10 @@ describe("thin hook against the real service", () => {
     writeRules(agentDir, { decider: { mode: "ask-me" } });
     const service = await start(agentDir);
     try {
-      const pending = runThinHook(bash("git push origin main"), opts);
+      const pending = runThinHook(bash("rm -rf $U/main"), opts);
       const paths = servicePaths(agentDir);
       const [item] = await pendingItems(paths.adminSock);
-      expect(item).toMatchObject({ tool: "bash", command: "git push origin main", session: SESSION });
+      expect(item).toMatchObject({ tool: "bash", command: "rm -rf $U/main", session: SESSION });
       expect(await send(paths.adminSock, { op: "answer", id: item.id, decision: "allow-once", by: "agent-tabs" })).toEqual({ ok: true });
       expect(decision(await pending)).toEqual({ permissionDecision: "allow", permissionDecisionReason: "[guard] человек разрешил один раз (agent-tabs)" });
     } finally {
@@ -301,14 +316,14 @@ describe("thin hook against the real service", () => {
     }
   });
 
-  it("the_service_stopping_mid_wait_denies", async () => {
+  it("the_service_stopping_mid_wait_is_decided_locally", async () => {
     await svc.close();
     writeRules(agentDir, { decider: { mode: "ask-me" } });
     const service = await start(agentDir);
-    const pending = runThinHook(bash("git push origin main"), opts);
+    const pending = runThinHook(bash("rm -rf $U/main"), opts);
     await pendingItems(servicePaths(agentDir).adminSock);
     await service.close();
-    expect(decision(await pending).permissionDecision).toBe("deny");
+    expect(await pending).toEqual({});
   });
 });
 
@@ -330,7 +345,7 @@ describe("hook.mjs entry", () => {
     const allowed = await run(["--agent-dir", agentDir], JSON.stringify(bash("git status")));
     expect(allowed).toEqual({ status: 0, stdout: "{}\n" });
     svc.answer = { decision: "deny", reason: "[guard] нет" };
-    const denied = await run(["--agent-dir", agentDir], JSON.stringify(bash("git push")));
+    const denied = await run(["--agent-dir", agentDir], JSON.stringify(bash("rm -rf $U")));
     expect(denied.status).toBe(0);
     expect(JSON.parse(denied.stdout)).toEqual({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "[guard] нет" } });
     const noDir = await run([], JSON.stringify(bash("git status")));
@@ -343,7 +358,8 @@ describe("hook.mjs entry", () => {
     expect(await run(["--agent-dir", agentDir], JSON.stringify(bash("git status")), entry)).toEqual({ status: 0, stdout: "{}\n" });
     await svc.close();
     fs.rmSync(hookSock(), { force: true });
-    const denied = await run(["--agent-dir", agentDir], JSON.stringify(bash("git push")), entry);
+    expect(await run(["--agent-dir", agentDir], JSON.stringify(bash("rm -rf $U")), entry)).toEqual({ status: 0, stdout: "{}\n" });
+    const denied = await run(["--agent-dir", agentDir], JSON.stringify(bash("rm -rf /")), entry);
     expect(denied.status).toBe(0);
     expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason).toContain("служба защиты не запущена");
   });

@@ -110,6 +110,7 @@ export class ModelPopover implements PopoverContent {
   /** «Мощность (level)» and a slider: one step per level, filled up to the chosen one, the knob on it. */
   private effort(): HTMLElement {
     const { levels, level } = this.view;
+    if (levels.length < 2) return this.onlyLevel(levels[0] as string);
     const index = level === undefined ? -1 : levels.indexOf(level);
     const slider = el("div", {
       class: "slider",
@@ -142,6 +143,19 @@ export class ModelPopover implements PopoverContent {
       { class: "mrow effort" },
       el("span", { class: "name", "data-role": "effort-label" }, `Мощность (${level ?? "—"})`),
       slider,
+    );
+  }
+
+  /**
+   * A whole ladder of one step is no choice at all: the row says so in words. A slider built from it had a single
+   * notch under the knob and nothing to slide — the symptom «Мощность (off)» over a dead track.
+   */
+  private onlyLevel(only: string): HTMLElement {
+    return el(
+      "div",
+      { class: "mrow effort" },
+      el("span", { class: "name", "data-role": "effort-label" }, "Мощность"),
+      el("span", { class: "s", "data-role": "effort-only" }, only === "off" ? "эта модель не размышляет" : `только «${only}»`),
     );
   }
 

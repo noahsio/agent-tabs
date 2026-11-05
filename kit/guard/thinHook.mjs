@@ -1,13 +1,16 @@
 // Thin PreToolUse hook logic (guard v2, spec §4.3): a client of the decision service. hook.mjs is the entry that loads
 // this module and fails closed; one hooks.json group without a matcher, so every tool call comes here.
-// A call the rules allow outright (same test the service makes) passes as `{}` without touching the socket; an unknown
-// tool whose name looks like writing or running is denied here; everything else goes to <agentDir>/guard/hook.sock:
-// evaluate -> allow | deny | pending {id, ticket} -> wait {id, ticket}. No service, a dropped connection, a bad reply or
-// no answer in time -> deny.
+// A call the rules allow outright (same test the service makes) passes as `{}` without touching the socket; a call
+// shape with no readable command is denied here; everything else goes to <agentDir>/guard/hook.sock:
+// evaluate -> allow | deny | pending {id, ticket} -> wait {id, ticket}.
+// Ruling P44: when the service cannot answer — not running, dropped connection, bad reply, no answer in time — the
+// hook does NOT guess. It has the same rules and the same classifier, so it decides locally: a deny pattern still
+// denies, the guard's own decision surface still denies, and anything that was merely going to be ASKED is allowed.
+// A failure of ours is not evidence about the command.
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets, isUnknownWriteTool } from "./classify.mjs";
+import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets } from "./classify.mjs";
 import { commandText, guardStateReason, protectedTarget } from "./protect.mjs";
 import { loadDefaultRules, loadRules } from "./rules.mjs";
 import { readLines, servicePaths, writeLine } from "./sockets.mjs";
@@ -60,11 +63,11 @@ function exchange(file, message, { connectTimeoutMs, replyTimeoutMs }) {
   });
 }
 
-/** The service's reply as hook output; a malformed one denies. */
+/** The service's reply as hook output, or null when the reply is not one (the caller then decides locally, P44). */
 function fromReply(reply) {
-  if (reply === null || typeof reply !== "object" || Array.isArray(reply)) return deny("служба защиты ответила не по протоколу");
-  if (reply.error !== undefined) return deny(`служба защиты: ${typeof reply.error === "string" ? reply.error : "ошибка без описания"}`);
-  if (reply.decision !== "allow" && reply.decision !== "deny") return deny("служба защиты ответила не по протоколу");
+  if (reply === null || typeof reply !== "object" || Array.isArray(reply)) return null;
+  if (reply.error !== undefined) return null;
+  if (reply.decision !== "allow" && reply.decision !== "deny") return null;
   return output(reply.decision, typeof reply.reason === "string" ? reply.reason : "служба защиты не указала причину");
 }
 
@@ -78,13 +81,32 @@ function allowedLocally(call, rules, where) {
   return verdict.tier === "allow" && !guardStateReason(commandText(tool, call.input), where);
 }
 
-/** Rules for the local check: no file -> defaults; unreadable or invalid -> null (the service decides, and denies). */
+/** Rules for the local check: no file -> defaults; unreadable or invalid -> null (the service decides). */
 function readRulesOrNull(file) {
   try {
     return loadRules(file);
   } catch (error) {
     return error?.code === "ENOENT" ? loadDefaultRules() : null;
   }
+}
+
+/**
+ * What the hook decides on its own when the service cannot answer (P44): the local verdict, with only a deny or the
+ * guard's own decision surface refused. Rules it could not read fall back to the defaults, which are stricter than
+ * any edited copy, so a corrupted rules file cannot buy more than a fresh install has.
+ */
+function withoutTheService(call, rules, where, reason) {
+  const tool = call.tool.toLowerCase();
+  const usable = rules ?? loadDefaultRules();
+  if (FILE_WRITE_TOOLS.has(tool)) {
+    const hit = fileWriteTargets({ tool_name: tool, tool_input: call.input }).find((target) => protectedTarget(target, where));
+    return hit ? deny(`жёсткий запрет: агенту нельзя менять файлы решателя и хуков (${hit}); ${reason}`) : {};
+  }
+  const verdict = classify({ tool_name: call.tool, tool_input: call.input, cwd: call.cwd, agent_dir: where.agentDir, home: where.home }, usable);
+  if (verdict.tier === "deny") return deny(`жёсткий запрет: ${verdict.reasons.join("; ")}; ${reason}`);
+  const guardState = guardStateReason(commandText(tool, call.input), where);
+  if (guardState) return deny(`${guardState} — решает только человек, а ${reason}`);
+  return {};
 }
 
 /**
@@ -114,7 +136,9 @@ export async function runThinHook(rawInput, { agentDir, connectTimeoutMs = 1500,
     session: String(raw.session_id ?? ""),
   };
   if (!call.tool) return deny("внутренняя ошибка хука: нет tool_name");
-  if (isUnknownWriteTool(call.tool)) return deny(`неизвестный инструмент записи «${call.tool}» запрещён`);
+  // P45: an unknown write-like name used to be denied right here, because the service would have denied it too. It is
+  // an ASK now, and an ask belongs to the service — the person has to be able to answer it. The name still travels
+  // as given, so camelCase humps stay word breaks when the service classifies it.
   if (commandsOf(call.tool, call.input) === "invalid") return deny("некорректный вызов инструмента");
 
   const paths = servicePaths(agentDir);
@@ -124,12 +148,13 @@ export async function runThinHook(rawInput, { agentDir, connectTimeoutMs = 1500,
   const remaining = () => Math.max(0, budgetMs - (Date.now() - started));
   const ask = (message) => exchange(paths.hookSock, message, { connectTimeoutMs, replyTimeoutMs: remaining() });
   try {
+    const local = (why) => withoutTheService(call, rules, { cwd: call.cwd, agentDir, home }, why);
     const reply = await ask({ op: "evaluate", call });
-    if (reply?.decision !== "pending") return fromReply(reply);
-    if (typeof reply.id !== "string" || typeof reply.ticket !== "string") return deny("служба защиты ответила не по протоколу");
-    return fromReply(await ask({ op: "wait", id: reply.id, ticket: reply.ticket }));
+    if (reply?.decision !== "pending") return fromReply(reply) ?? local("служба защиты ответила не по протоколу");
+    if (typeof reply.id !== "string" || typeof reply.ticket !== "string") return local("служба защиты ответила не по протоколу");
+    return fromReply(await ask({ op: "wait", id: reply.id, ticket: reply.ticket })) ?? local("служба защиты ответила не по протоколу");
   } catch (error) {
-    return error instanceof Unreachable ? deny(NOT_RUNNING) : deny(error.message);
+    return withoutTheService(call, rules, { cwd: call.cwd, agentDir, home }, error instanceof Unreachable ? NOT_RUNNING : error.message);
   }
 }
 

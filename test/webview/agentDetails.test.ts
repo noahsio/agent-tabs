@@ -266,7 +266,7 @@ describe("agent details modal", () => {
       expect(document.activeElement).toBe(card("Поиск"));
       escape(); // now the map itself
       expect(shown()).toEqual([]);
-      expect(document.activeElement).toBe(root.querySelector("textarea"));
+      expect(document.activeElement).toBe(root.querySelector(".input"));
       show([DONE]);
     }
   });

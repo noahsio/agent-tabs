@@ -1,4 +1,5 @@
-import type { AgentRow, AgentStatus, Block, ChatState, Dialog, ImageRef, ModelRef, SessionActivity } from "./model";
+import type { AgentRow, AgentStatus, Answer, AnsweredQuestion, Block, ChatState, Dialog, ImageRef, ModelRef, SessionActivity } from "./model";
+import { providerStop, type ProviderStop, type ProviderStopKind } from "./providerStop";
 import { todoCall } from "./todo";
 
 export const TOOL_OUTPUT_LIMIT = 20_000;
@@ -19,6 +20,7 @@ type Json = Record<string, any>;
 type ToolBlock = Extract<Block, { kind: "tool" }>;
 type AssistantBlock = Extract<Block, { kind: "assistant" }>;
 type UserBlock = Extract<Block, { kind: "user" }>;
+type NoticeBlock = Extract<Block, { kind: "notice" }>;
 
 /** Receives image bytes out of band; ChatState only ever keeps the ImageRef. */
 export type ImageSink = (ref: ImageRef, data: string) => void;
@@ -84,11 +86,13 @@ function userImages(message: Json, id: string): { refs: ImageRef[]; bytes: strin
   return hasStableUserId(message) ? extractImages(id, message["content"]) : { refs: [], bytes: [] };
 }
 
-function userBlock(message: Json, id: string, text: string): UserBlock {
+function userBlock(message: Json, id: string, text: string, blocks: Block[]): UserBlock {
   const block: UserBlock = { kind: "user", id, text };
   if (typeof message["timestamp"] === "number") block.timestamp = message["timestamp"];
   const { refs } = userImages(message, id);
   if (refs.length > 0) block.images = refs;
+  const answer = answerFromText(blocks, text);
+  if (answer !== undefined) block.answer = answer;
   return block;
 }
 
@@ -234,6 +238,8 @@ function toolView(name: string, args: unknown): ToolView {
     }
     case "todo":
       return todoCall(args) !== undefined ? {} : { input: JSON.stringify(args) }; // a known call is drawn from `todo` (toolBlock)
+    case ASK_TOOL:
+      return {}; // the questions are shown as the answer card, never as the call's JSON
     default:
       return { input: JSON.stringify(args) };
   }
@@ -305,8 +311,162 @@ function lastStreamingAssistant(blocks: Block[]): AssistantBlock | undefined {
   return undefined;
 }
 
-function notice(id: string, level: "info" | "warn" | "error", text: string): Block {
-  return { kind: "notice", id, level, text: text.slice(0, NOTICE_LIMIT) };
+function notice(id: string, level: "info" | "warn" | "error", text: string, details?: string): NoticeBlock {
+  const block: NoticeBlock = { kind: "notice", id, level, text: text.slice(0, NOTICE_LIMIT) };
+  if (details !== undefined && details !== "") block.details = details.slice(0, NOTICE_LIMIT);
+  return block;
+}
+
+// ---------- answered questions ----------
+
+/**
+ * OmO's own tool for asking the person. It records an answer two ways, and the feed shows one card either way: with
+ * `waitForAnswer: true` the call's own result carries the questions and the answers, and with `waitForAnswer: false`
+ * the answer arrives as a user message of protocol text («[Answer to question …]») whose questions are only in the
+ * call's arguments. Neither wording is ever shown: the card is built from them.
+ */
+const ASK_TOOL = "ask_user_question";
+const ANSWER_HEAD = /^\[Answer to question (\S+)\]\s*/;
+const UNANSWERED = /^Unanswered:\s*/;
+/** How long an answer's own words may be before the card cuts them (the card collapses long ones as a message does). */
+const WORDS_LIMIT = 4_000;
+
+/** One question as it was asked. */
+type Asked = { header?: string; text?: string; options: { label: string; description?: string }[] };
+/** What OmO recorded as the answer to one question. */
+type Given = { header?: string; answer: string };
+
+const escapeRe = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The `questions` of an `ask_user_question` payload: its call arguments, or the record its result keeps of them. */
+function askedQuestions(payload: unknown): Asked[] {
+  const list = isObject(payload) && Array.isArray(payload["questions"]) ? payload["questions"] : [];
+  return list.filter(isObject).map((question) => {
+    const options = (Array.isArray(question["options"]) ? question["options"] : []).flatMap((option) => {
+      const label = typeof option === "string" ? option : isObject(option) ? asString(option["label"]) : undefined;
+      if (label === undefined || label === "") return [];
+      const description = isObject(option) ? asString(option["description"]) : undefined;
+      return [{ label, ...(description !== undefined && description.trim() !== "" ? { description } : {}) }];
+    });
+    const header = asString(question["header"]);
+    const text = asString(question["question"]);
+    return { ...(header ? { header } : {}), ...(text ? { text } : {}), options };
+  });
+}
+
+/**
+ * The answer text OmO writes for `waitForAnswer: false`: a header line, then one line per question — `Запись: Хватит
+ * живой записи`, `Unanswered: Координаты`, or a `(see […] below)` placeholder whose words are appended as their own
+ * sections. The placeholders go, the sections give those questions their words.
+ */
+function parseAnswerText(text: string): { questionId: string; given: Given[]; unanswered: string[] } | undefined {
+  const head = ANSWER_HEAD.exec(text);
+  if (head?.[1] === undefined) return undefined;
+  const questionId = head[1];
+  const id = escapeRe(questionId);
+  const body = text
+    .slice(head[0].length)
+    .replace(new RegExp(`\\(see \\[The user's answer to [\\s\\S]*? for question ${id}\\] below\\)`, "g"), "");
+  const [lines = "", ...sections] = body.split(new RegExp(`\\[The user's answer to ([\\s\\S]*?) for question ${id}\\]`));
+  const words = new Map<string, string>();
+  for (let at = 0; at + 1 < sections.length; at += 2) words.set((sections[at] as string).trim(), (sections[at + 1] as string).trim());
+  const given: Given[] = [];
+  const unanswered: string[] = [];
+  for (const line of lines.split("\n").map((candidate) => candidate.trim())) {
+    if (line === "") continue;
+    if (UNANSWERED.test(line)) {
+      unanswered.push(...line.replace(UNANSWERED, "").split(",").map((name) => name.trim()).filter((name) => name !== ""));
+      continue;
+    }
+    // «<вопрос>: <ответ>», on the first colon; a placeholder removed above leaves the header alone with its colon
+    const named = /^(.+?):(?:\s+([\s\S]*))?$/.exec(line);
+    const header = named?.[1];
+    const said = (named?.[2] ?? "").trim();
+    const answer = header === undefined ? line : said === "" ? (words.get(header) ?? "") : said;
+    given.push({ ...(header !== undefined ? { header } : {}), answer });
+  }
+  // a question answered only in their own words leaves an empty line and a section of its own
+  for (const [header, said] of words) if (!given.some((entry) => entry.header === header)) given.push({ header, answer: said });
+  return { questionId, given, unanswered };
+}
+
+/** The question `given` answers: the one with its header, else the one in its place. */
+function askedFor(asked: Asked[], given: Given, index: number): Asked | undefined {
+  if (asked.length === 1) return asked[0];
+  const named = given.header === undefined ? undefined : asked.find((question) => question.header === given.header);
+  return named ?? asked[index];
+}
+
+/** The option rows of one answered question: every option that was on screen, the ones they picked marked. */
+function answeredOptions(asked: Asked, answer: string): { options?: AnsweredQuestion["options"]; words?: string } {
+  const parts = answer.split(", ").map((part) => part.trim());
+  const options = asked.options.map((option) => ({ ...option, chosen: answer === option.label || parts.includes(option.label) }));
+  const own = parts.filter((part) => part !== "" && !asked.options.some((option) => option.label === part)).join(", ");
+  const words = options.some((option) => option.chosen) ? own : answer;
+  return {
+    ...(options.length > 0 ? { options } : {}),
+    ...(words !== "" ? { words: words.slice(0, WORDS_LIMIT) } : {}),
+  };
+}
+
+/** The card: one entry per question asked (or, when none is left to read, per answer the text carries). */
+function buildAnswer(questionId: string, asked: Asked[], given: Given[], unanswered: string[], forkFrom: string | undefined): Answer {
+  const used = new Set<Asked>();
+  const answered: AnsweredQuestion[] = given.map((entry, index) => {
+    const question = askedFor(asked, entry, index);
+    if (question !== undefined) used.add(question);
+    return {
+      // the question's own short name when it is still there to read; else whatever the answer text named it
+      ...(question?.header !== undefined ? { header: question.header } : entry.header !== undefined ? { header: entry.header } : {}),
+      ...(question?.text !== undefined ? { text: question.text } : {}),
+      ...(question === undefined ? { words: entry.answer.slice(0, WORDS_LIMIT) } : answeredOptions(question, entry.answer)),
+    };
+  });
+  const left: AnsweredQuestion[] = asked
+    .filter((question) => !used.has(question) && (unanswered.length === 0 || question.header === undefined || unanswered.includes(question.header)))
+    .map((question) => ({
+      ...(question.header !== undefined ? { header: question.header } : {}),
+      ...(question.text !== undefined ? { text: question.text } : {}),
+      ...(question.options.length > 0 ? { options: question.options.map((option) => ({ ...option, chosen: false })) } : {}),
+      skipped: true,
+    }));
+  return { questionId, questions: [...answered, ...left], ...(forkFrom !== undefined ? { forkFrom } : {}) };
+}
+
+/**
+ * Where «Ответвить» from the card goes: the message whose turn asked the question. OmO records a settled question in
+ * the journal before it writes the answer, so a session cut at the answer is opened with the question already closed —
+ * it is never asked again. Going back to the message that led to it is the one point from which it can be.
+ */
+function forkTarget(blocks: Block[], questionId: string): string | undefined {
+  const at = blocks.findIndex((block) => block.id === questionId);
+  const before = at < 0 ? blocks : blocks.slice(0, at);
+  return before.filter((block) => block.kind === "user" && block.delivery === undefined && block.answer === undefined).at(-1)?.id;
+}
+
+/** The card for an answer that came as a user message: its questions are the call's own arguments. */
+function answerFromText(blocks: Block[], text: string): Answer | undefined {
+  const parsed = parseAnswerText(text);
+  if (parsed === undefined) return undefined;
+  const call = blocks.find((block) => block.id === parsed.questionId);
+  const asked = askedQuestions(call?.kind === "tool" ? call.args : undefined);
+  return buildAnswer(parsed.questionId, asked, parsed.given, parsed.unanswered, forkTarget(blocks, parsed.questionId));
+}
+
+/** The card for an `ask_user_question` the agent waited on: its result records both the questions and the answers. */
+function answerFromResult(blocks: Block[], questionId: string, payload: unknown): Answer | undefined {
+  const details = isObject(payload) ? payload["details"] : undefined;
+  if (!isObject(details) || details["status"] !== "answered") return undefined;
+  const asked = askedQuestions(details);
+  const answers = isObject(details["answers"]) ? details["answers"] : {};
+  const unanswered = (Array.isArray(details["unanswered"]) ? details["unanswered"] : []).flatMap((name) => asString(name) ?? []);
+  const named = (question: Asked): string | undefined => asString(answers[question.text ?? ""]) ?? asString(answers[question.header ?? ""]);
+  const given = asked.flatMap((question, index) => {
+    const answer = named(question) ?? asString(Object.values(answers)[index]);
+    if (answer === undefined || answer === "") return [];
+    return [{ ...(question.header !== undefined ? { header: question.header } : {}), answer }];
+  });
+  return buildAnswer(questionId, asked, given, unanswered, forkTarget(blocks, questionId));
 }
 
 // ---------- live frames ----------
@@ -336,7 +496,7 @@ function onMessageStart(s: ChatState, frame: Json, sink: ImageSink | undefined):
     const withoutQueued = removeQueuedByText(pending, text);
     if (withoutQueued.some((block) => block.id === id)) return { ...s, blocks: withoutQueued };
     sinkImages(message, id, sink);
-    return { ...s, blocks: [...withoutQueued, userBlock(message, id, text)] };
+    return { ...s, blocks: [...withoutQueued, userBlock(message, id, text, withoutQueued)] };
   }
   return s; // custom/toolResult are not chat bubbles
 }
@@ -400,6 +560,29 @@ function usageTokens(usage: unknown): number | undefined {
   return total > 0 ? total : undefined;
 }
 
+/**
+ * The two ways a provider says it will not answer, and the one thing that helps after either: switch the model. The
+ * provider's own words go behind «Подробнее», never into the line — they are English, and one ban has three
+ * different wordings across the person's journals.
+ *
+ * A **refusal** is a classifier's: the model answered nothing and a typed marker says why. OmO has already retried it
+ * once itself, and a repeat only buys the same answer at the same price.
+ *
+ * A **rejection** is the provider's: it began a response and ended it with an error having produced nothing. It
+ * carries no typed marker at all — `gw-openai` sends one plain English sentence — so before `providerStop` saw it,
+ * that sentence went to the red banner at the top of the tab, which is where errors about *us* belong.
+ */
+const STOP_TEXT: Record<ProviderStopKind, string> = {
+  refusal: "Модель отказалась отвечать на этот запрос — смените модель для этой сессии",
+  rejected: "Провайдер отклонил запрос — смените модель для этой сессии",
+};
+
+/** One quiet Russian line, and the turn over: the composer is usable and nothing waits for a reply. */
+function refused(s: ChatState, id: string, stop: ProviderStop): ChatState {
+  const blocks = upsertBlock(s.blocks, notice(`refusal:${id}`, "warn", STOP_TEXT[stop.kind], stop.detail));
+  return withActivity({ ...s, blocks }, false, "idle", undefined);
+}
+
 function onMessageEnd(s: ChatState, frame: Json): ChatState {
   const message = frame["message"];
   if (!isObject(message) || message["role"] !== "assistant") return s;
@@ -408,10 +591,12 @@ function onMessageEnd(s: ChatState, frame: Json): ChatState {
   target ??= lastStreamingAssistant(s.blocks);
   const text = contentText(message["content"]);
   const thinking = assistantThinking(message["content"]);
-  const errorMessage = message["stopReason"] === "error" ? asString(message["errorMessage"]) : undefined;
+  const stop = providerStop(message);
+  const errorMessage = stop === undefined && message["stopReason"] === "error" ? asString(message["errorMessage"]) : undefined;
   const contextTokens = usageTokens(message["usage"]);
   const withUsage: ChatState = contextTokens === undefined || contextTokens === s.contextTokens ? s : { ...s, contextTokens };
-  const next: ChatState = errorMessage ? { ...withUsage, error: errorMessage } : withUsage;
+  const next: ChatState =
+    errorMessage ? { ...withUsage, error: errorMessage } : stop !== undefined ? refused(withUsage, id, stop) : withUsage;
   if (!target) {
     if (!text && !thinking) return next;
     const block: AssistantBlock = { kind: "assistant", id, text, thinking, streaming: false };
@@ -466,6 +651,8 @@ function onToolOutput(s: ChatState, frame: Json, final: boolean, now: Clock): Ch
     if (seed.timestamp !== undefined) next.durationMs = Math.max(0, now() - seed.timestamp);
     const model = seed.name === "task" ? taskResultModel(payload) : undefined;
     if (model) next.model = model;
+    const answer = seed.name === ASK_TOOL ? answerFromResult(s.blocks, id, payload) : undefined;
+    if (answer !== undefined) next.answer = answer;
   }
   return { ...s, blocks: upsertBlock(s.blocks, next) };
 }
@@ -483,7 +670,14 @@ function onQueueUpdate(s: ChatState, frame: Json): ChatState {
     const queuedId = asString(item["queuedId"]);
     const id = asString(item["clientMessageId"]) ?? `${FOREIGN_QUEUED}${queuedId ?? listed.size}`;
     const revision = typeof item["revision"] === "number" ? { revision: item["revision"] } : {};
-    listed.set(id, { kind: "user", id, text: item["text"], delivery: { state: "queued", ...(queuedId !== undefined ? { queuedId } : {}), ...revision } });
+    const answer = answerFromText(s.blocks, item["text"]); // an answer waiting in the queue is already a card, never its protocol text
+    listed.set(id, {
+      kind: "user",
+      id,
+      text: item["text"],
+      delivery: { state: "queued", ...(queuedId !== undefined ? { queuedId } : {}), ...revision },
+      ...(answer !== undefined ? { answer } : {}),
+    });
   }
   const blocks: Block[] = [];
   for (const block of s.blocks) {
@@ -537,19 +731,67 @@ function onAgentSettled(s: ChatState): ChatState {
   return { ...s, blocks, running: false };
 }
 
-function onLifecycle(s: ChatState, frame: Json): ChatState {
-  const lifecycle = frame["lifecycle"];
-  const state = isObject(lifecycle) ? lifecycle["state"] : undefined;
-  if (state === "running") {
-    const live = lifecycle["activity"];
-    const kind = isObject(live) ? live["kind"] : undefined;
-    const tool = kind === "tool" ? asString(live?.["toolName"]) : undefined;
-    const activity = kind === "tool" ? "tool" : kind === "model" ? "thinking" : undefined;
-    return withActivity(s, true, activity, tool);
-  }
-  if (state === "waiting_human") return withActivity(s, true, "waiting_human", undefined);
-  if (state === "done") return withActivity(s, false, "idle", undefined);
-  return s;
+/**
+ * Whether OmO's lifecycle describes a turn that is still going. `lastStop` names the run OmO stopped: when that is
+ * this very run, the turn is over however `state` still reads. OmO leaves exactly that behind twice — a turn whose
+ * model request errored out gets `turn_end`/`agent_end` and no `agent_settled`, and a session reopened after a park
+ * reports the state its last turn was left in — so without this the tab would wait for an end frame that never comes.
+ * Undefined means the lifecycle says nothing either way (`waiting_background`, `waiting_children`, no lifecycle).
+ */
+export function lifecycleRunning(lifecycle: unknown): boolean | undefined {
+  if (!isObject(lifecycle)) return undefined;
+  const runId = lifecycle["runId"];
+  const stopped = isObject(lifecycle["lastStop"]) ? lifecycle["lastStop"]["runId"] : undefined;
+  if (lifecycle["state"] === "done" || (typeof runId === "string" && runId === stopped)) return false;
+  if (lifecycle["state"] === "waiting_human") return !attentionOnly(lifecycle);
+  return lifecycle["state"] === "running" ? true : undefined;
+}
+
+/**
+ * The human waits OmO raises out of the session's own state instead of out of a question put to the person: a goal it
+ * stopped, a run it calls stalled, a run something interrupted. OmO turns ANY human wait into `waiting_human`, so
+ * without telling these apart a goal OmO stopped would read as a turn waiting for an answer nobody will ever be
+ * asked for — and the tab would wait on it forever while every message the person sends only queues.
+ */
+const ATTENTION_KINDS = new Set(["goal_blocked", "goal_paused", "stalled", "interrupted_run"]);
+
+/**
+ * True when every one of the lifecycle's human waits is one of those (and there is at least one): nothing is being
+ * asked, so no turn is running. A host that reports no `waitingOn` says nothing either way and keeps `waiting_human`.
+ */
+function attentionOnly(lifecycle: Json): boolean {
+  const waiting = lifecycle["waitingOn"];
+  const human = isObject(waiting) && Array.isArray(waiting["human"]) ? waiting["human"] : [];
+  return human.length > 0 && human.every((wait) => isObject(wait) && ATTENTION_KINDS.has(String(wait["kind"])));
+}
+
+/**
+ * OmO's own words, in English, when a session it resumed still has a stopped goal: over RPC it does not offer the
+ * TUI's «Resume goal?» choice, it only says this once and leaves the goal where it is. `SessionController` resumes
+ * the goal itself and says what happened in Russian, so this line never reaches the feed. Returns the goal's status.
+ */
+export function stoppedGoalNotice(frame: unknown): string | undefined {
+  if (!isObject(frame) || frame["type"] !== "extension_ui_request" || frame["method"] !== "notify") return undefined;
+  return /^Goal remains (blocked|paused) after session resume\b/.exec(asString(frame["message"]) ?? "")?.[1];
+}
+
+/** OmO's goal card — what a `/goal …` command answers with (`Goal active\nObjective: …`). */
+export function goalCardNotice(frame: unknown): boolean {
+  if (!isObject(frame) || frame["type"] !== "extension_ui_request" || frame["method"] !== "notify") return false;
+  return /^Goal (active|paused|blocked|complete)\n/.test(asString(frame["message"]) ?? "");
+}
+
+/** The lifecycle's own word on the turn, applied to a state: the verb it names, or the turn's end. */
+export function applyLifecycle(s: ChatState, lifecycle: unknown): ChatState {
+  const running = lifecycleRunning(lifecycle);
+  if (running === false) return withActivity(s, false, "idle", undefined);
+  if (running === undefined || !isObject(lifecycle)) return s;
+  if (lifecycle["state"] === "waiting_human") return withActivity(s, true, "waiting_human", undefined);
+  const live = lifecycle["activity"];
+  const kind = isObject(live) ? live["kind"] : undefined;
+  const tool = kind === "tool" ? asString(live?.["toolName"]) : undefined;
+  const activity = kind === "tool" ? "tool" : kind === "model" ? "thinking" : undefined;
+  return withActivity(s, true, activity, tool);
 }
 
 function withActivity(s: ChatState, running: boolean, activity: SessionActivity | undefined, tool: string | undefined): ChatState {
@@ -589,6 +831,7 @@ function onUiRequest(s: ChatState, frame: Json): ChatState {
   if (method === "notify") {
     const text = asString(frame["message"]);
     if (!id || !text) return s;
+    if (stoppedGoalNotice(frame) !== undefined) return s; // handled, in Russian, by the controller
     const type = frame["notifyType"];
     const level = type === "error" ? "error" : type === "warning" || type === "warn" ? "warn" : "info";
     if (level === "info" && HOUSEKEEPING.test(text.trim())) return s;
@@ -788,7 +1031,7 @@ export function applyFrame(s: ChatState, frame: any, sink?: ImageSink, now: Cloc
       return { ...(frame["aborted"] === true ? s : rest), compacting: false };
     }
     case "session_lifecycle":
-      return onLifecycle(s, frame);
+      return applyLifecycle(s, frame["lifecycle"]);
     case "model_changed":
       return onModelChanged(s, frame);
     case "session_info_changed": {
@@ -822,7 +1065,7 @@ export function resolveDialog(s: ChatState, id: string): ChatState {
 
 // ---------- journal ----------
 
-function entryBlocks(entry: Json, fallbackIndex: number): Block[] {
+function entryBlocks(entry: Json, fallbackIndex: number, blocks: Block[]): Block[] {
   if (entry["type"] === "custom_message") {
     const customType = asString(entry["customType"]);
     const text = contentText(entry["content"]);
@@ -835,7 +1078,7 @@ function entryBlocks(entry: Json, fallbackIndex: number): Block[] {
     case "user": {
       const text = contentText(message["content"]);
       const id = userId(message, fallbackIndex);
-      const block = userBlock(message, id, text);
+      const block = userBlock(message, id, text, blocks);
       return text || block.images ? [block] : [];
     }
     case "assistant": {
@@ -843,6 +1086,9 @@ function entryBlocks(entry: Json, fallbackIndex: number): Block[] {
       const text = contentText(content);
       const thinking = assistantThinking(content);
       const blocks: Block[] = [];
+      const stop = providerStop(message);
+      // Same id as the live path, so a reload shows the one line again and a catch-up does not add a second.
+      if (stop !== undefined) blocks.push(notice(`refusal:${assistantId(message, fallbackIndex)}`, "warn", STOP_TEXT[stop.kind], stop.detail));
       if (text || thinking) {
         const block: AssistantBlock = { kind: "assistant", id: assistantId(message, fallbackIndex), text, thinking, streaming: false };
         if (typeof message["timestamp"] === "number") block.timestamp = message["timestamp"];
@@ -870,6 +1116,8 @@ function applyToolResult(blocks: Block[], message: Json): Block[] {
   const next: ToolBlock = { ...seed, output, truncated, state };
   const model = seed.name === "task" ? taskResultModel(message) : undefined;
   if (model) next.model = model;
+  const answer = seed.name === ASK_TOOL ? answerFromResult(blocks, id, message) : undefined;
+  if (answer !== undefined) next.answer = answer;
   return upsertBlock(blocks, next);
 }
 
@@ -921,7 +1169,7 @@ export function applyEntries(s: ChatState, entries: any[], sink?: ImageSink): Ch
     } else {
       if (entry["type"] === "custom_message") next = finishedAgents(next, entry);
       let blocks = next.blocks;
-      for (const block of entryBlocks(entry, index)) {
+      for (const block of entryBlocks(entry, index, blocks)) {
         const existing = blocks.find((candidate) => candidate.id === block.id);
         if (existing?.kind === "user" && existing.delivery !== undefined && block.kind === "user") {
           // the journal has the message we showed as undelivered: it is in the conversation now

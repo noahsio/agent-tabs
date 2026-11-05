@@ -26,6 +26,8 @@ let service: SettingsService;
 let status: ProtectionStatus;
 let enableCalls: number;
 let disableCalls: number;
+/** What the window knows about the guard copy that runs: «Безопасность» passes it on, it does not compute it. */
+let installed: { installed?: SecurityView["installed"]; refreshError?: string };
 let enableError: Error | undefined;
 let adminRules: RulesV2;
 let adminSets: RulesV2[];
@@ -64,6 +66,7 @@ beforeEach(() => {
   status = { state: "off" };
   enableCalls = 0;
   disableCalls = 0;
+  installed = {};
   enableError = undefined;
   adminRules = { ...defaults(), hardDeny: [...existing] };
   adminSets = [];
@@ -114,6 +117,7 @@ beforeEach(() => {
           status = { state: "off" };
         },
         writeDenies: async () => ["/opt/homebrew", "/Users/me/.codegraph"],
+        installed: () => installed,
       },
       admin,
       serviceMayRun: async () => serviceMayRun,
@@ -158,6 +162,17 @@ describe("SecurityHost · protection", () => {
     const result = await perform({ kind: "protection.set", on: true, confirmed: true });
     expect(result).toMatchObject({ ok: false, error: expect.stringContaining("Служба защиты не запустилась за 10 с") });
     expect((await view()).state).toBe("off");
+  });
+
+  it("the_view_says_which_guard_copy_runs_and_why_it_was_not_refreshed", async () => {
+    status = { state: "on" };
+    const empty = await view();
+    expect(empty.installed).toBeUndefined();
+    expect(empty.refreshError).toBeUndefined();
+    installed = { installed: { dir: `${home}/.omo/kit/6cdd90b9ec09/guard`, installedAt: 1_762_349_280_000, stale: true }, refreshError: "Служба защиты не запустилась за 10 с" };
+    const shown = await view();
+    expect(shown.installed).toEqual({ dir: `${home}/.omo/kit/6cdd90b9ec09/guard`, installedAt: 1_762_349_280_000, stale: true });
+    expect(shown.refreshError).toBe("Служба защиты не запустилась за 10 с");
   });
 
   it("the_view_names_what_consent_installs_and_why_it_is_broken", async () => {

@@ -126,7 +126,8 @@ describe("decider transports", () => {
     expect(thrown.reason).not.toContain(KEY);
     const refused = { ...transport("openai-completions"), fetchFn: async () => new Response(`bad key ${KEY}`, { status: 401 }) };
     const rejected = await askDecider(REQUEST, refused);
-    expect(rejected).toEqual({ decision: "ask", reason: expect.not.stringContaining(KEY) });
+    // P44: a failure of ours is marked `failed`, so the service allows and logs it instead of asking.
+    expect(rejected).toEqual({ decision: "ask", failed: true, reason: expect.not.stringContaining(KEY) });
   });
 });
 
@@ -274,12 +275,12 @@ describe("decider through omo -p", () => {
     expect(await askDecider(REQUEST, config)).toEqual({ decision: "deny", reason: "ёжик в тумане" });
   });
 
-  it("an_omo_failure_or_timeout_is_ask", async () => {
+  it("an_omo_failure_or_timeout_is_a_failure_not_a_verdict", async () => {
     const failing = fakeSpawn("", { code: 1 });
     const base = { kind: "omo-cli", omoPath: "/opt/omo", model: "p/m", agentDir: "/tmp/a", rules: RULES };
     expect((await askDecider(REQUEST, { ...base, timeoutMs: 1000, spawnFn: failing.spawnFn })).decision).toBe("ask");
     const hanging = fakeSpawn("", { hang: true });
-    expect(await askDecider(REQUEST, { ...base, timeoutMs: 30, spawnFn: hanging.spawnFn })).toEqual({ decision: "ask", reason: expect.stringContaining("30") });
+    expect(await askDecider(REQUEST, { ...base, timeoutMs: 30, spawnFn: hanging.spawnFn })).toEqual({ decision: "ask", failed: true, reason: expect.stringContaining("30") });
     expect(hanging.spawned[0]!.child.killed).toBe(true);
     const chatty = fakeSpawn("Sure, allow it");
     expect((await askDecider(REQUEST, { ...base, timeoutMs: 1000, spawnFn: chatty.spawnFn })).decision).toBe("ask");

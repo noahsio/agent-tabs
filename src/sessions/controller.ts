@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { realpathSync } from "node:fs";
 import type { ChatState, ImageRef, ModelRef } from "../chat/model";
-import { addOutgoing, applyEntries, applyFrame, applyTaskList, dropOutgoing, initialState, resolveDialog, reviseQueued, taskStatus } from "../chat/reducer";
+import { addOutgoing, applyEntries, applyFrame, applyLifecycle, applyTaskList, dropOutgoing, goalCardNotice, initialState, lifecycleRunning, resolveDialog, reviseQueued, stoppedGoalNotice, taskStatus } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import { redact } from "../env";
 import type { AgentDetails } from "../panel/protocol";
@@ -10,7 +10,10 @@ import { BARRIER_DEADLINE_MS, type Checkpointer } from "../rewind/checkpointer";
 import { readSessionHeader } from "../rewind/fork";
 import type { SentMode } from "../rewind/store";
 import { RpcError, type RpcClient } from "../rpc/client";
+import type { Ladder } from "../settings/ladder";
 import { sharedImages, type ImageStore } from "./images";
+import { ModelLadder, type LadderView } from "./ladder";
+import type { ModelLevel } from "./rememberedLevels";
 
 /** A mode keyword that prefixes every prose message while it is on (the actions menu's toggles). */
 export type NextMode = "ulw" | "mass ulw";
@@ -60,6 +63,24 @@ type Frame = Record<string, any>;
 
 const ENTRIES_PAGE_LIMIT = 500;
 const SESSION_NAME_MAX = 60;
+/**
+ * The agent rows are cosmetic and off the open path, so the list is asked for with a deadline of its own instead of the
+ * client's 30-second default: a reopened session's task bridge answers `omo.task.list` never at all (OmO 5.1.59), and
+ * the open used to sit on that request for the full 30 seconds with the conversation already in hand.
+ */
+const TASK_LIST_TIMEOUT_MS = 5_000;
+
+/** What one journal load cost: the one line an open writes to the channel is made of it. */
+type JournalLoad = { ms: number; pages: number };
+
+/**
+ * What OmO asks a client to send after it resumed a session whose goal it had stopped: `/goal resume` puts the goal
+ * back to active and queues its continuation, so the agent carries on by itself. A slash command goes in as a prompt
+ * and is answered `disposition: "handled"` — an input handler took it, no turn of its own was started.
+ */
+const GOAL_RESUME_COMMAND = "/goal resume";
+const GOAL_RESUMED_TEXT = "Цель сессии была остановлена — возобновил её, агент продолжает работу";
+const GOAL_RESUME_FAILED_TEXT = "Цель сессии остановлена, и возобновить её не удалось — агент сам не продолжит, напишите, что делать дальше";
 
 function isObject(value: unknown): value is Frame {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -133,6 +154,10 @@ export class SessionController extends EventEmitter {
   private outgoing: Promise<unknown> = Promise.resolve();
   /** A prompt started a turn whose frames have not settled yet: until they do, a new message steers it. */
   private turnStarting = false;
+  /** A `/goal resume` of this tab's own is in flight: one at a time, and its goal card is OmO's echo, not news. */
+  private goalResuming = false;
+  /** The model ladder, once the tab has given this session one. */
+  private modelLadder: ModelLadder | undefined;
   /** What was sent and is not in the conversation yet, by clientMessageId: a dequeued message goes back to the composer as typed. */
   private readonly outbox = new Map<string, { text: string; images: OutgoingImage[] }>();
   /** This tab's prefix in the shared image store: two sessions can have the same image ids. */
@@ -148,14 +173,22 @@ export class SessionController extends EventEmitter {
     client: RpcClient,
     private readonly imageStore: ImageStore,
     private readonly checkpointer: Checkpointer | undefined,
+    /** One line per open (and one when a post-open extra fails) for the «Agent Tabs» channel; absent in tests. */
+    private readonly log: ((text: string) => void) | undefined,
   ) {
     super();
     this.client = client;
   }
 
   /** Opens a brand-new session in `cwd` (the profile picks the model). */
-  static async create(dm: DaemonManager, cwd: string, images: ImageStore = sharedImages, checkpointer?: Checkpointer): Promise<SessionController> {
-    const controller = new SessionController(dm, await dm.client(), images, checkpointer);
+  static async create(
+    dm: DaemonManager,
+    cwd: string,
+    images: ImageStore = sharedImages,
+    checkpointer?: Checkpointer,
+    log?: (text: string) => void,
+  ): Promise<SessionController> {
+    const controller = new SessionController(dm, await dm.client(), images, checkpointer, log);
     controller.sessionCwd = realpathSync(cwd);
     await controller.start(
       { cwd: controller.sessionCwd, retain_on_disconnect: true, promptSurface: "app", auto_title: true },
@@ -171,8 +204,9 @@ export class SessionController extends EventEmitter {
     saved?: TabState,
     images: ImageStore = sharedImages,
     checkpointer?: Checkpointer,
+    log?: (text: string) => void,
   ): Promise<SessionController> {
-    const controller = new SessionController(dm, await dm.client(), images, checkpointer);
+    const controller = new SessionController(dm, await dm.client(), images, checkpointer, log);
     Object.assign(controller.tab, saved, { sessionPath });
     try {
       const cwd = (await readSessionHeader(sessionPath))["cwd"];
@@ -388,6 +422,7 @@ export class SessionController extends EventEmitter {
 
   /** Cancels every pending dialog (abort is ignored while one is open), then aborts the turn. */
   async stop(): Promise<void> {
+    this.noteInterrupt("Прерываю ход: «Стоп» — попросил человек");
     for (const dialog of this.current.dialogs) {
       try {
         await this.request("extension_ui_response", { uiRequestId: dialog.id, cancelled: true });
@@ -407,9 +442,10 @@ export class SessionController extends EventEmitter {
    * «Снять зависание»: a turn OmO still calls running after «Стоп» (a provider request that never returns) is let go of
    * by unloading the session and opening it again in this tab. `interrupt` aborts the stuck turn, `force` drops the
    * extensions' own work and other clients' holds, and `children: "detach"` leaves child tasks running. The transcript
-   * and the queued input survive — OmO restores the queue on the reopen. Only the person's click ever calls this.
+   * and the queued input survive — OmO restores the queue on the reopen. `why` names who asked, for the channel.
    */
-  async unwedgeSession(): Promise<UnwedgeOutcome> {
+  async unwedgeSession(why: string = "попросил человек"): Promise<UnwedgeOutcome> {
+    this.noteInterrupt(`Выгружаю сессию: «Снять зависание» — ${why}`);
     let data: Frame;
     try {
       data = await this.request<Frame>("unload_session", { interrupt: true, force: true, children: "detach" });
@@ -434,12 +470,44 @@ export class SessionController extends EventEmitter {
   private parked(): void {
     if (this.handle === "" || this.released) return;
     this.handle = "";
+    this.turnStarting = false; // the handle is gone and the turn with it: the next message prompts, it does not steer
     this.commit({
       ...this.current,
       running: false,
       blocks: [...this.current.blocks, { kind: "notice", id: `parked:${randomUUID()}`, level: "info", text: "Сессия выгружена — открываю заново" }],
     });
     this.reopening = this.reopening.then(() => this.reattach()).catch(() => undefined);
+  }
+
+  /**
+   * OmO resumed this session and left its goal stopped, telling us (in English) to resume it explicitly once loading
+   * is done. That moment is here: the notice was held with the rest of the session's opening frames and is replayed
+   * only after `open_session` and the journal are in hand. The feed hears about it in Russian, once, either way —
+   * and if OmO will not resume the goal, the tab says the agent will not carry on by itself instead of waiting on it.
+   */
+  private async resumeStoppedGoal(): Promise<void> {
+    if (this.goalResuming) return;
+    this.goalResuming = true;
+    const handle = this.handle;
+    try {
+      const data = await this.request<Frame>("prompt", { message: GOAL_RESUME_COMMAND, clientMessageId: randomUUID() });
+      if (this.released || this.handle !== handle) return;
+      if (data?.["disposition"] !== "handled") throw new Error(`OmO не выполнил «${GOAL_RESUME_COMMAND}»`);
+      this.noteOnce("goal-resumed", "info", GOAL_RESUMED_TEXT);
+    } catch (error) {
+      // A turn is running after all: the goal continues with it, and the person is not waiting on anything.
+      if (this.released || this.handle !== handle || (error instanceof RpcError && error.code === "streaming")) return;
+      this.log?.(`«${GOAL_RESUME_COMMAND}» не прошёл: ${redact(errorText(error), this.dm.secrets)}`);
+      this.noteOnce("goal-resume-failed", "warn", GOAL_RESUME_FAILED_TEXT);
+    } finally {
+      this.goalResuming = false;
+    }
+  }
+
+  /** One line in the feed under a fixed id: a session resumed again says the same thing in the same place. */
+  private noteOnce(id: string, level: "info" | "warn", text: string): void {
+    const blocks = this.current.blocks.filter((block) => block.id !== id);
+    this.commit({ ...this.current, blocks: [...blocks, { kind: "notice", id, level, text }] });
   }
 
   /** «Сжать сейчас»: the compact_start/compact_end frames drive the busy state; a refusal lands in the error. */
@@ -516,6 +584,64 @@ export class SessionController extends EventEmitter {
     else this.tab.stickyMode = mode;
   }
 
+  /**
+   * Gives this session a model ladder. The walk only ever reaches the session through the port built here: it reads
+   * the environment's ladder and model list, aborts (and, if that is not enough, unloads) the turn, switches the
+   * model and repeats the message through the same `send` the person's own messages take. `view` is its line.
+   */
+  setLadder(deps: { ladder: () => Ladder; view: (view: LadderView | undefined) => void }): void {
+    this.modelLadder?.dispose();
+    this.modelLadder = new ModelLadder({
+      ladder: deps.ladder,
+      models: () => this.models(),
+      model: () => this.current.model,
+      running: () => this.current.running,
+      abort: (reason) => this.abortForLadder(reason),
+      unwedge: async () => void (await this.unwedgeSession("лесенка моделей не смогла оборвать ход")),
+      setModel: (model) => this.setModel(model),
+      send: (id, text, images) => this.send(text, "auto", images, id),
+      note: (level, text) => this.note(level, text),
+      view: deps.view,
+    });
+  }
+
+  /** A message the person themselves just sent: the one thing the ladder ever watches. */
+  watchForLadder(id: string, text: string, images: OutgoingImage[]): void {
+    this.modelLadder?.armed(id, text, images);
+  }
+
+  /** «Прервать» on the ladder's line. */
+  interruptLadder(): void {
+    this.modelLadder?.interrupt();
+  }
+
+  /**
+   * The abort a ladder step takes before it repeats the message. It is sent whatever the state says: a refusal ends
+   * the turn *in the tab* — the reducer has drawn its line and freed the composer — while the request itself still
+   * sits in the gateway's queue, and that late answer is the one thing this exists to prevent.
+   *
+   * Unlike «Стоп» it also forgets the turn the prompt started, so the repeat goes in as a prompt of its own instead
+   * of steering into the turn just abandoned. A prompt OmO refuses because something is still streaming becomes a
+   * steer by itself (see `send`), so guessing wrong here costs nothing.
+   */
+  private async abortForLadder(reason: string): Promise<void> {
+    this.noteInterrupt(`Прерываю ход: лесенка моделей — ${reason}`);
+    await this.request("abort").catch(() => undefined);
+    this.turnStarting = false;
+  }
+
+  /**
+   * Every interruption this tab sends, in the «Agent Tabs» channel, naming the path and its reason.
+   *
+   * OmO labels an abort that arrives over RPC `abortSource: "user"` whatever we meant by it (the dispatcher routes
+   * `abort` to `session.abort()`, which calls `_abortActiveAgentAndRetry("user")`), so a journal cannot tell our
+   * abort from the person's own — and when a turn dies, the journal is all there is to read. This line is the only
+   * place that says it was us, which path it was, and why.
+   */
+  private noteInterrupt(text: string): void {
+    this.log?.(text);
+  }
+
   async models(): Promise<{ provider: string; id: string; name?: string }[]> {
     let data: Frame;
     try {
@@ -544,6 +670,35 @@ export class SessionController extends EventEmitter {
     } catch (error) {
       this.fail(error);
     }
+  }
+
+  /**
+   * What one model runs at in this session, without switching to it: the level, where it came from
+   * (`get_state.thinkingLevelSource`) and the levels the model supports. Undefined when the host cannot say.
+   */
+  async modelThinkingLevel(model: ModelRef): Promise<ModelLevel | undefined> {
+    let data: Frame;
+    try {
+      data = await this.request<Frame>("get_model_thinking_level", { provider: model.provider, modelId: model.id });
+    } catch {
+      return undefined; // an older host, or a model its registry does not offer
+    }
+    if (typeof data?.["level"] !== "string") return undefined;
+    const available: unknown[] = Array.isArray(data["availableLevels"]) ? data["availableLevels"] : [];
+    return {
+      level: data["level"],
+      ...(typeof data["source"] === "string" ? { source: data["source"] } : {}),
+      availableLevels: available.filter((level): level is string => typeof level === "string"),
+    };
+  }
+
+  /**
+   * The level the host reports for this session, taken as the session's own. A new session's journal walks through the
+   * steps of applying the profile (the remembered level, then the profile's own), and a client that loaded the journal
+   * before the last step landed is left showing a level the session is not on; this corrects it without a command.
+   */
+  noteThinkingLevel(level: string): void {
+    if (this.current.thinkingLevel !== level) this.commit({ ...this.current, thinkingLevel: level });
   }
 
   async thinkingLevels(): Promise<string[]> {
@@ -620,6 +775,7 @@ export class SessionController extends EventEmitter {
     if (this.released) return;
     this.released = true;
     clearTimeout(this.deadlineTimer);
+    this.modelLadder?.dispose();
     this.imageStore.dropScope(this.imageScope);
     this.dm.off("connected", this.onConnected);
     this.client.off("frame", this.onFrame);
@@ -711,9 +867,10 @@ export class SessionController extends EventEmitter {
     }
   }
 
-  private sessionRequest<T>(type: string, fields: Frame = {}): Promise<T> {
+  /** `timeoutMs` undefined leaves the client's own default. */
+  private sessionRequest<T>(type: string, fields: Frame = {}, timeoutMs?: number): Promise<T> {
     if (this.handle === "") return Promise.reject(new RpcError("not_attached", "session is not attached"));
-    return this.client.request<T>(type, { ...fields, sessionId: this.handle });
+    return this.client.request<T>(type, { ...fields, sessionId: this.handle }, timeoutMs);
   }
 
   private async start(openFields: Frame, load: "full" | "catchup"): Promise<void> {
@@ -730,11 +887,19 @@ export class SessionController extends EventEmitter {
     }
   }
 
-  /** open_session, then history; frames that arrive meanwhile are held and replayed in order. */
+  /**
+   * open_session, then history; frames that arrive meanwhile are held and replayed in order. Returns as soon as the
+   * conversation is in the state: everything a tab asks for on top of it (the agent rows here, the pickers' lists in
+   * ChatPanel) is asked for afterwards, so nothing off the conversation's path can hold the tab on an empty feed.
+   */
   private async open(openFields: Frame, load: "full" | "catchup"): Promise<void> {
     this.buffer = [];
+    const startedAt = Date.now();
+    let openedMs = 0;
+    let journal: JournalLoad = { ms: 0, pages: 0 };
     try {
       const data = await this.client.request<Frame>("open_session", openFields);
+      openedMs = Date.now() - startedAt;
       this.handle = String(data["sessionId"]);
       const sessionState = isObject(data["state"]) ? data["state"] : {};
       if (typeof sessionState["sessionFile"] === "string") this.tab.sessionPath = sessionState["sessionFile"];
@@ -745,15 +910,15 @@ export class SessionController extends EventEmitter {
       const cursor = this.current.cursor;
       if (load === "full" || cursor === undefined) {
         this.current = this.seedFromState(initialState(), sessionState);
-        await this.loadEntries(undefined);
+        journal = await this.loadEntries(undefined);
       } else {
         this.current = this.seedFromState(this.current, sessionState);
         try {
-          await this.loadEntries(cursor);
+          journal = await this.loadEntries(cursor);
         } catch (error) {
           if (!(error instanceof RpcError) || error.code !== "not_found") throw error;
           this.current = this.seedFromState(initialState(), sessionState);
-          await this.loadEntries(undefined);
+          journal = await this.loadEntries(undefined);
         }
       }
     } finally {
@@ -762,22 +927,32 @@ export class SessionController extends EventEmitter {
       for (const frame of held) this.handleFrame(frame);
       this.sync();
     }
-    await this.restoreAgents();
+    this.log?.(
+      `Сессия открыта за ${Date.now() - startedAt} мс: open_session ${openedMs} мс, журнал ${journal.ms} мс (${journal.pages} стр.), блоков ${this.current.blocks.length}`,
+    );
+    void this.restoreAgents(); // never awaited: the conversation is already in hand
   }
 
   /**
    * OmO's list of this session's tasks, after the held frames: an attach hears no `omo.task.updated` until a task
-   * changes. Best effort — without the task bridge the rows the journal gave stay.
+   * changes. Asked for after the open and merged whenever it answers — best effort, and a host that does not answer
+   * (see TASK_LIST_TIMEOUT_MS) only leaves the rows the journal gave, with a line in the channel saying so.
    */
   private async restoreAgents(): Promise<void> {
     if (this.durableId === undefined) return;
     const handle = this.handle;
+    const startedAt = Date.now();
     try {
-      const data = await this.sessionRequest<Frame>("extension_request", { name: "omo.task.list", data: { parent_session_id: this.durableId } });
+      const data = await this.sessionRequest<Frame>(
+        "extension_request",
+        { name: "omo.task.list", data: { parent_session_id: this.durableId } },
+        TASK_LIST_TIMEOUT_MS,
+      );
       if (this.released || this.handle !== handle) return;
       this.commit(applyTaskList(this.current, data));
-    } catch {
-      // an OmO without omo.task.list
+    } catch (error) {
+      if (this.released) return; // the tab was closed while it was in flight: nothing to say about it
+      this.log?.(`Список задач сессии не получен за ${Date.now() - startedAt} мс: ${redact(errorText(error), this.dm.secrets)}`);
     }
   }
 
@@ -785,10 +960,15 @@ export class SessionController extends EventEmitter {
    * Live truth from `open_session`'s state: running flag, model, title, pending dialogs; an attach that got here clears
    * the old error. An idle session has no streaming reply and no running tool: a tool still marked running ended
    * without a result while we were away (the catch-up still applies any result the journal has).
+   *
+   * The turn comes from the host's own lifecycle, which knows a turn in a tool call and a turn a park left behind;
+   * `isStreaming` only answers for a host that reports no lifecycle. What the tab remembered about the turn — the verb
+   * it was showing — is never carried over: after a reopen only the host's word counts.
    */
   private seedFromState(base: ChatState, sessionState: Frame): ChatState {
-    const { error: _cleared, ...rest } = base;
-    const running = sessionState["isStreaming"] === true;
+    const { error: _cleared, activity: _verb, activityTool: _tool, ...rest } = base;
+    const lifecycle = sessionState["lifecycle"];
+    const running = lifecycleRunning(lifecycle) ?? sessionState["isStreaming"] === true;
     const blocks = running
       ? rest.blocks
       : rest.blocks.map((block) => {
@@ -796,7 +976,7 @@ export class SessionController extends EventEmitter {
           if (block.kind === "tool" && block.state === "running") return { ...block, state: "error" as const };
           return block;
         });
-    let next: ChatState = { ...rest, blocks, dialogs: [], running };
+    let next: ChatState = applyLifecycle({ ...rest, blocks, dialogs: [], running }, lifecycle);
     const model = sessionState["model"];
     if (isObject(model) && typeof model["provider"] === "string" && typeof model["id"] === "string") {
       next = { ...next, model: { provider: model["provider"], id: model["id"] } };
@@ -811,17 +991,22 @@ export class SessionController extends EventEmitter {
     return next;
   }
 
-  /** Pages the journal (`since` undefined = from the start) into the state. */
-  private async loadEntries(since: string | undefined): Promise<void> {
+  /** Pages the journal (`since` undefined = from the start) into the state; returns what the load cost. */
+  private async loadEntries(since: string | undefined): Promise<JournalLoad> {
     let cursor = since;
+    let pages = 0;
+    const startedAt = Date.now();
     for (;;) {
       const page = await this.sessionRequest<Frame>("get_entries", {
         limit: ENTRIES_PAGE_LIMIT,
         ...(cursor !== undefined ? { since: cursor } : {}),
       });
+      pages += 1;
       const entries: unknown[] = Array.isArray(page?.["entries"]) ? page["entries"] : [];
       this.current = applyEntries(this.current, entries, this.sink);
-      if (page?.["hasMore"] !== true || typeof page["nextSince"] !== "string" || page["nextSince"] === cursor) return;
+      if (page?.["hasMore"] !== true || typeof page["nextSince"] !== "string" || page["nextSince"] === cursor) {
+        return { ms: Date.now() - startedAt, pages };
+      }
       cursor = page["nextSince"];
     }
   }
@@ -879,15 +1064,21 @@ export class SessionController extends EventEmitter {
       this.parked();
       return;
     }
+    if (stoppedGoalNotice(frame) !== undefined) {
+      void this.resumeStoppedGoal();
+      return; // the English line never reaches the feed; the Russian one comes from the resume
+    }
+    if (this.goalResuming && goalCardNotice(frame)) return; // our own command's echo, in English, that nobody asked for
     if (this.checkpointer !== undefined && this.durableId !== undefined && this.sessionCwd !== undefined) {
       this.checkpointer.observe(this.durableId, this.sessionCwd, frame);
     }
     this.commit(applyFrame(this.current, frame, this.sink));
     const type = frame["type"];
-    if (type === "agent_settled" || (type === "session_lifecycle" && frame["lifecycle"]?.["state"] === "done")) this.turnStarting = false;
+    if (type === "agent_settled" || (type === "session_lifecycle" && lifecycleRunning(frame["lifecycle"]) === false)) this.turnStarting = false;
     if (type === "agent_settled" || type === "queue_update" || (type === "message_start" && frame["message"]?.["role"] === "user")) this.pruneOutbox();
     if (frame["type"] === "model_changed") this.emit("model");
     if (frame["type"] === "agent_settled" || frame["type"] === "compaction_end") void this.refreshContext();
+    this.modelLadder?.observe(frame); // after the commit, so the ladder reads the turn's state as this frame left it
   }
 
   /** The context fill from the host's own estimate; best effort, the ring just keeps its last value on a failure. */

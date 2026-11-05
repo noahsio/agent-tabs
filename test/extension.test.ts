@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ASK_LABEL } from "../src/settings/ladder";
+import { DEFAULT_LADDER } from "../src/settings/ladderDefault";
 import { DEFAULT_HIDDEN_COMMANDS } from "../src/settings/protocol";
 
 const vscodeMock = vi.hoisted(() => ({
@@ -282,6 +284,11 @@ describe("PanelHost sessions", () => {
         omoUnavailable: "нет связи с OmO",
         restartNeeded: false,
         restartHint: "Перезапустить OmO — нужно после смены папок",
+      },
+      // «Лесенка моделей»: the spec's default table; with no model list to read, nothing is called missing
+      ladder: {
+        models: [],
+        rungs: DEFAULT_LADDER.rungs.map((rung) => ({ ...rung, label: rung.action.kind === "model" ? rung.action.id : ASK_LABEL })),
       },
       // «Безопасность»: protection is off in a fresh home, the rules are the shipped kit's defaults, nothing installed
       security: expect.objectContaining({

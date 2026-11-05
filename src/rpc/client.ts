@@ -8,11 +8,14 @@ import { JsonlDecoder, MAX_RECORD_CHARS } from "./jsonl";
 
 export class RpcError extends Error {
   readonly code: string;
+  /** The refusal's own `errorData`, when the host sent one: who holds a path, when to ask again. */
+  readonly data: Record<string, unknown> | undefined;
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, data?: Record<string, unknown>) {
     super(message);
     this.name = "RpcError";
     this.code = code;
+    this.data = data;
   }
 }
 
@@ -97,6 +100,7 @@ export class RpcClient extends EventEmitter {
   private readonly pending = new Map<string, Pending>();
   private nextId = 1;
   private closed = false;
+  private host: string | undefined;
 
   private constructor(private readonly socket: Socket) {
     super();
@@ -141,6 +145,11 @@ export class RpcClient extends EventEmitter {
     this.write({ ...fields, type });
   }
 
+  /** The host's own `instanceId` from the handshake: what tells it apart from another copy of the host. */
+  get instanceId(): string | undefined {
+    return this.host;
+  }
+
   close(): void {
     this.socket.destroy();
   }
@@ -153,6 +162,8 @@ export class RpcClient extends EventEmitter {
       { auth: { client_nonce: clientNonce } },
       HANDSHAKE_TIMEOUT_MS,
     );
+    // The handshake's own `get_protocol_info` already carries who the host is: no second round trip for it.
+    if (isFrame(info) && typeof info["instanceId"] === "string") this.host = info["instanceId"];
     const offer = parseAuthOffer(info);
     const key = await readKey(agentDir, offer.launch_id);
     const expected = serverProof(key, offer.launch_id, clientNonce, offer.server_nonce);
@@ -221,7 +232,8 @@ export class RpcClient extends EventEmitter {
     }
     const code = typeof frame["errorCode"] === "string" ? frame["errorCode"] : "error";
     const message = typeof frame["error"] === "string" ? frame["error"] : "request failed";
-    entry.reject(new RpcError(code, message));
+    const data = isFrame(frame["errorData"]) ? frame["errorData"] : undefined;
+    entry.reject(new RpcError(code, message, data));
   }
 
   private onClosed(error: Error | undefined): void {

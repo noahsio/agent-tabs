@@ -3,6 +3,7 @@ import type { FieldError, SettingsSection, SettingsView } from "../../src/settin
 import { el } from "../dom";
 import { ConnectionsSection } from "./connections";
 import { EnvironmentSection } from "./environment";
+import { LadderSection } from "./ladder";
 import { ModelsSection } from "./models";
 import { SecuritySection } from "./security";
 import { ToolsSection } from "./tools";
@@ -11,6 +12,7 @@ import { ToolsSection } from "./tools";
 export const SECTION_LABELS: Record<SettingsSection, string> = {
   connections: "Подключения",
   models: "Модели и роли",
+  ladder: "Лесенка моделей",
   security: "Безопасность",
   tools: "Инструменты",
   environment: "Среда",
@@ -35,6 +37,7 @@ export interface SectionView {
 export function createSection(section: SettingsSection, context: SectionContext): SectionView {
   if (section === "connections") return new ConnectionsSection(context);
   if (section === "models") return new ModelsSection(context);
+  if (section === "ladder") return new LadderSection(context);
   if (section === "security") return new SecuritySection(context);
   if (section === "tools") return new ToolsSection(context);
   if (section === "environment") return new EnvironmentSection(context);

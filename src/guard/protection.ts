@@ -1,9 +1,11 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import type { Server } from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 import { ENV_NAMES, resolveEnv } from "../../kit/lib/envs.mjs";
 import {
+  guardFilesDir,
   guardHandlers,
   guardHookEntry,
   installGuardFiles,
@@ -21,7 +23,8 @@ import {
   protectedHostSocketPath,
   type VscodeInstall,
 } from "../../kit/sandbox/profile.mjs";
-import { listensOn } from "../daemon";
+import { MAX_SOCKET_PATH } from "../../kit/guard/sockets.mjs";
+import { bindStartLock, listensOn } from "../daemon";
 import type { EnvPaths } from "../settings/paths";
 import { launchAgentPath, launchAgentPlist, serviceLabel } from "./launchAgent";
 
@@ -59,6 +62,8 @@ const SOCKET_POLL_MS = 100;
 const PATH_MARK = "__agent_tabs_path__";
 
 const inputsFile = (agentDir: string): string => path.join(agentDir, "guard", "sandbox.json");
+
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 function readOr(file: string): string | undefined {
   try {
@@ -337,14 +342,38 @@ export async function plannedWriteDenies(paths: EnvPaths, deps: PlanDeps): Promi
   return [...new Set([...(await plan(paths, deps)).writableDirs, ...loadedResourceDenies(paths.home, agentDirs)])].sort();
 }
 
+/** The LaunchAgent that runs `kitGuard`'s service with `node`: the one place the plist's content is decided. */
+function plistFor(paths: EnvPaths, node: string, kitGuard: string): string {
+  return launchAgentPlist({
+    label: serviceLabel(paths.agentDir),
+    node,
+    serviceScript: path.join(kitGuard, "service.mjs"),
+    agentDir: paths.agentDir,
+    logFile: path.join(servicePaths(paths.agentDir).dir, "service.log"),
+  });
+}
+
 /**
- * Turns protection on, in an order that is safe to stop anywhere and to repeat: rules -> kit copy -> LaunchAgent
- * (rebooted only when its plist changed or the service is not answering) -> hook socket up (else the LaunchAgent goes
- * again and an error: state off) -> our hook group -> agent dirs -> sandbox inputs and profile -> host restart (always:
- * no session stays unsandboxed).
+ * Boots the LaunchAgent at `plistFile` — only when its plist changed or nothing answers on the hook socket, so a
+ * repeat leaves a running service alone. False when the service did not come up in time.
  */
-export async function enableProtection(paths: EnvPaths, deps: ProtectionDeps): Promise<void> {
-  const { node, writableDirs } = await plan(paths, deps);
+async function bootService(paths: EnvPaths, deps: ProtectionDeps, plistFile: string, plistChanged: boolean): Promise<boolean> {
+  const service = servicePaths(paths.agentDir);
+  if (!plistChanged && (await deps.waitForSocket(service.hookSock, 0))) return true;
+  const label = serviceLabel(paths.agentDir);
+  await deps.launchctl(["bootout", `gui/${deps.uid}/${label}`]).catch(() => undefined); // not loaded: nothing to stop
+  await deps.launchctl(["bootstrap", `gui/${deps.uid}`, plistFile]);
+  return deps.waitForSocket(service.hookSock, SERVICE_START_MS);
+}
+
+/**
+ * Puts the protection of this environment in place, in an order that is safe to stop anywhere and to repeat: rules ->
+ * kit copy -> LaunchAgent (rebooted only when its plist changed or the service is not answering) -> hook socket up
+ * (else the LaunchAgent goes again and an error: nothing of ours is loaded) -> our hook group -> agent dirs -> sandbox
+ * inputs and profile. `writableDirs` left out keeps the dirs sandbox.json already names (what the person consented to
+ * close); the host is the caller's to restart.
+ */
+async function provision(paths: EnvPaths, deps: ProtectionDeps, spec: { node: string; writableDirs?: string[] }): Promise<void> {
   const source = path.join(deps.kitDir, "guard");
   const service = servicePaths(paths.agentDir);
 
@@ -356,36 +385,31 @@ export async function enableProtection(paths: EnvPaths, deps: ProtectionDeps): P
 
   const label = serviceLabel(paths.agentDir);
   const plistFile = launchAgentPath(paths.home, label);
-  const plist = launchAgentPlist({
-    label,
-    node,
-    serviceScript: path.join(kitGuard, "service.mjs"),
-    agentDir: paths.agentDir,
-    logFile: path.join(service.dir, "service.log"),
-  });
-  const plistChanged = await writeIfDifferent(deps, plistFile, plist, 0o644);
-  if (plistChanged || !(await deps.waitForSocket(service.hookSock, 0))) {
-    // not loaded: nothing to stop
-    const bootout = (): Promise<void> => deps.launchctl(["bootout", `gui/${deps.uid}/${label}`]).catch(() => undefined);
-    await bootout();
-    await deps.launchctl(["bootstrap", `gui/${deps.uid}`, plistFile]);
-    if (!(await deps.waitForSocket(service.hookSock, SERVICE_START_MS))) {
-      await bootout();
-      await deps.removeFile(plistFile);
-      throw new Error(`Служба защиты не запустилась за ${SERVICE_START_MS / 1000} с — журнал: ${path.join(service.dir, "service.log")}`);
-    }
+  const plistChanged = await writeIfDifferent(deps, plistFile, plistFor(paths, spec.node, kitGuard), 0o644);
+  if (!(await bootService(paths, deps, plistFile, plistChanged))) {
+    await deps.launchctl(["bootout", `gui/${deps.uid}/${label}`]).catch(() => undefined);
+    await deps.removeFile(plistFile);
+    throw new Error(`Служба защиты не запустилась за ${SERVICE_START_MS / 1000} с — журнал: ${path.join(service.dir, "service.log")}`);
   }
 
-  setGuardHook(paths, true, guardHookEntry({ node, kitDir: kitGuard, agentDir: paths.agentDir }));
+  setGuardHook(paths, true, guardHookEntry({ node: spec.node, kitDir: kitGuard, agentDir: paths.agentDir }));
 
   // must exist before a sandboxed host starts (it cannot create them); the guard dir exists since the rules step
   fs.mkdirSync(path.join(paths.agentDir, "extensions"), { recursive: true });
   fs.mkdirSync(path.dirname(hostSocketPath(paths.agentDir)), { recursive: true });
   fs.mkdirSync(path.dirname(protectedHostSocketPath(paths.agentDir)), { recursive: true, mode: 0o700 });
 
-  const inputs = nextInputs(paths, deps.vscode, writableDirs);
+  const inputs = nextInputs(paths, deps.vscode, spec.writableDirs);
   writeInputs(paths.agentDir, inputs);
   await writeIfDifferent(deps, profilePath(paths.agentDir), profileFor(paths, inputs), 0o644);
+}
+
+/**
+ * Turns protection on: the provisioning above with the node and the write-denies planned from the login PATH as it is
+ * now, and then a host restart (always: no session stays unsandboxed).
+ */
+export async function enableProtection(paths: EnvPaths, deps: ProtectionDeps): Promise<void> {
+  await provision(paths, deps, await plan(paths, deps));
   await deps.restartHost();
 }
 
@@ -514,6 +538,131 @@ export function refreshProfile(paths: EnvPaths, vscode: VscodePaths): void {
   writeInputs(paths.agentDir, inputs);
   const content = profileFor(paths, inputs);
   if (readOr(profile) !== content) writeAtomic(profile, content, 0o644);
+}
+
+type GuardHandler = { event: string; command: string; timeout?: number };
+
+/** The guard copy, the node and the handlers of the hook entry installed here, when hooks.json holds a v2 one of ours. */
+function installedHook(paths: EnvPaths): { node: string; kitDir: string; handlers: GuardHandler[] } | undefined {
+  let handlers: GuardHandler[];
+  try {
+    handlers = guardHandlers(paths).filter((handler) => !isV1(handler.command));
+  } catch {
+    return undefined; // an unusable hooks.json is «broken»: nothing is read off it
+  }
+  for (const { command } of handlers) {
+    const files = hookFiles(command);
+    if (files !== undefined) return { node: files.node, kitDir: path.dirname(files.script), handlers };
+  }
+  return undefined;
+}
+
+/** The guard copy that actually runs: where it is, when it was installed there, and whether it is the shipped one. */
+export type InstalledKit = { dir: string; installedAt?: number; stale: boolean };
+
+/**
+ * What «Безопасность» says about the guard the person actually runs: the installed copy the hook entry names, when it
+ * was installed, and whether it is `source`'s. `stale`: the classifier, the rules and the service in use are an older
+ * build's — what this whole refresh exists to make visible. Undefined while no v2 hook of ours is installed.
+ */
+export function installedKit(paths: EnvPaths, source: string): InstalledKit | undefined {
+  const hook = installedHook(paths);
+  if (hook === undefined) return undefined;
+  const installedAt = lstatOrUndefined(path.join(hook.kitDir, "hook.mjs"))?.mtimeMs;
+  return { dir: hook.kitDir, ...(installedAt !== undefined ? { installedAt } : {}), stale: hook.kitDir !== guardFilesDir(paths.home, source) };
+}
+
+/** An installation to carry forward: the node it already names (a refresh never re-decides it) and the copy to run. */
+type Installation = { node: string; kitDir: string };
+
+/**
+ * Whether what is installed is what the bundled kit calls for, read off the disk alone — no launchctl, no login shell,
+ * so an activation with nothing to do costs nothing and touches nothing. The comparison is exact: the hook entry under
+ * both events and the LaunchAgent must be what `provision` would write for the bundled copy and the node the hook
+ * already names, so a changed kit, a drifted plist and a drifted entry are all one check. «absent»: nothing of ours is
+ * installed here (no v2 hook group, no LaunchAgent, an unreadable hooks.json), or the node the hook names is gone —
+ * that last one is «broken», and «Починить» plans a node anew instead of this guessing one.
+ */
+function refreshTarget(paths: EnvPaths, source: string): Installation | "absent" | "fresh" {
+  const hook = installedHook(paths);
+  if (hook === undefined || !fs.existsSync(hook.node)) return "absent";
+  const plistFile = launchAgentPath(paths.home, serviceLabel(paths.agentDir));
+  if (!fs.existsSync(plistFile)) return "absent";
+  const kitDir = guardFilesDir(paths.home, source);
+  const wanted = guardHookEntry({ node: hook.node, kitDir, agentDir: paths.agentDir }).hooks[0];
+  const entryIsCurrent =
+    new Set(hook.handlers.map((handler) => handler.event)).size === 2 &&
+    hook.handlers.every((handler) => handler.command === wanted?.command && handler.timeout === wanted.timeout);
+  return entryIsCurrent && readOr(plistFile) === plistFor(paths, hook.node, kitDir) ? "fresh" : { node: hook.node, kitDir };
+}
+
+/** What activation did about the installed guard copy. */
+export type RefreshOutcome =
+  | { kind: "absent" }
+  | { kind: "fresh" }
+  | { kind: "elsewhere" }
+  | { kind: "refreshed"; kitDir: string }
+  | { kind: "failed"; reason: string };
+
+const REFRESH_LOCK = "refresh.sock";
+
+/**
+ * Brings the installed guard up to the one this extension ships, at activation. Protection is refreshed without asking:
+ * the person consented to the guard running from an installed copy, and a copy left behind by an update is not a
+ * gentler version of that — it denies and asks for what today's rules allow, for as long as nobody notices (which is
+ * the bug this fixes). What it costs is bounded in exchange: nothing of the person's choosing is re-decided (the node
+ * and the dirs sandbox.json closes stay as they are), no host is restarted — so no turn is interrupted — and the only
+ * window of harm is the second or two the decision service is rebooting, in which a tool call that needs it is denied
+ * and the agent may retry. `provision`'s own ordering does the work, so the plist, the hook entry, the sandbox inputs
+ * and the service come out of a refresh exactly as they do out of enabling.
+ *
+ * One refresh at a time across every window (the lock src/daemon.ts binds for host starts), re-checked under the lock;
+ * the loser leaves it to the holder. A failure never leaves the hook entry and the LaunchAgent naming different copies.
+ */
+export async function refreshProtection(paths: EnvPaths, deps: ProtectionDeps): Promise<RefreshOutcome> {
+  const source = path.join(deps.kitDir, "guard");
+  const target = refreshTarget(paths, source);
+  if (typeof target === "string") return { kind: target };
+  const lockFile = path.join(servicePaths(paths.agentDir).dir, REFRESH_LOCK);
+  let lock: Server | undefined;
+  // A path too long to bind is skipped rather than failing the refresh, as a host start skips its own lock.
+  if (Buffer.byteLength(lockFile) <= MAX_SOCKET_PATH) {
+    lock = await bindStartLock(lockFile);
+    if (lock === undefined) return { kind: "elsewhere" }; // another window is refreshing it right now
+  }
+  try {
+    const under = refreshTarget(paths, source); // the window that held the lock may have just done it
+    if (typeof under === "string") return { kind: under };
+    try {
+      await provision(paths, deps, { node: under.node });
+      return { kind: "refreshed", kitDir: under.kitDir };
+    } catch (error) {
+      return { kind: "failed", reason: await realign(paths, deps, errorText(error)) };
+    }
+  } finally {
+    lock?.close();
+    if (lock !== undefined) fs.rmSync(lockFile, { force: true });
+  }
+}
+
+/**
+ * After a failed refresh: a hook entry naming a copy the LaunchAgent does not run — or no LaunchAgent at all, which is
+ * what a service that would not start leaves behind — denies every tool call until someone notices. The plist for the
+ * copy the hook entry names (the previous one, or the new one when the entry got that far) is put back and booted
+ * before the failure is reported; the reason says so when even that did not work. The copy itself is still there:
+ * installing a new one never removes an old one.
+ */
+async function realign(paths: EnvPaths, deps: ProtectionDeps, reason: string): Promise<string> {
+  const hook = installedHook(paths);
+  if (hook === undefined) return reason;
+  const plistFile = launchAgentPath(paths.home, serviceLabel(paths.agentDir));
+  try {
+    const changed = await writeIfDifferent(deps, plistFile, plistFor(paths, hook.node, hook.kitDir), 0o644);
+    if (await bootService(paths, deps, plistFile, changed)) return reason;
+    return `${reason}; прежняя служба защиты тоже не поднялась — включите защиту заново`;
+  } catch (error) {
+    return `${reason}; прежнюю службу защиты не вернуть: ${errorText(error)}`;
+  }
 }
 
 /** Polls `file` until something accepts connections on it or `ms` passes. */

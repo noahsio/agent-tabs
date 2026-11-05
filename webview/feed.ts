@@ -1,5 +1,5 @@
 import MarkdownIt from "markdown-it";
-import type { Block, ImageRef, SessionActivity } from "../src/chat/model";
+import type { Answer, Block, ImageRef, SessionActivity } from "../src/chat/model";
 import type { TodoPhase } from "../src/chat/todo";
 import { button, copyButton, el, type Post } from "./dom";
 import { isNone, splitHandoff, type Handoff } from "./handoff";
@@ -65,11 +65,65 @@ function handoffCard(handoff: Handoff): HTMLElement | undefined {
   return rows.length === 0 ? undefined : el("div", { class: "handoff" }, ...rows);
 }
 
+/** OmO's tool for asking the person: its call shows as the answer card (see `answerCard`), never as a step. */
+const ASK_TOOL = "ask_user_question";
+const ANSWER_TITLE = "Вопрос агента";
+const ANSWERS_TITLE = "Вопросы агента";
+const ANSWER_MARK = "Ответ";
+const NOT_ANSWERED = "Не ответили";
+const QUESTION_LOST = "Вопрос не сохранился";
+
+/**
+ * An answered question, as history: the question as it was asked, every option that was on screen with its
+ * description, the one they chose marked, and their own words when no option says it. Quiet — it is not a prompt
+ * any more — and in the shape of the panel they answered in (see the dialogs mockup).
+ */
+function answerCard(answer: Answer): HTMLElement {
+  const set = answer.questions.length > 1;
+  const only = answer.questions[0];
+  const head = el("div", { class: "answer-head" }, el("span", { class: "answer-title" }, set ? ANSWERS_TITLE : ANSWER_TITLE));
+  if (!set && only?.header !== undefined) head.append(el("span", { class: "tool" }, only.header));
+  head.append(el("span", { class: "answer-mark" }, ANSWER_MARK));
+  const card = el("div", { class: "answer" }, head);
+  for (const question of answer.questions) {
+    const body = el("div", { class: question.skipped === true ? "answer-q skipped" : "answer-q" });
+    if (set && question.header !== undefined) body.append(el("div", { class: "answer-name" }, question.header));
+    if (question.text !== undefined) body.append(el("p", { class: "question-text" }, question.text));
+    const options = question.options ?? [];
+    if (options.length > 0) {
+      const list = el("ol", { class: "opts" });
+      for (const option of options) {
+        const label = el("span", { class: "lbl" }, option.label);
+        if (option.description !== undefined) label.append(el("span", { class: "desc" }, option.description));
+        const box = el("span", { class: option.chosen ? "box on" : "box", "aria-hidden": "true" });
+        if (option.chosen) box.append(icon("check"));
+        list.append(el("li", { class: option.chosen ? "opt chosen" : "opt" }, box, label));
+      }
+      body.append(list);
+    }
+    if (question.words !== undefined) body.append(el("p", { class: "answer-words" }, question.words));
+    if (question.skipped === true) body.append(el("p", { class: "answer-note" }, NOT_ANSWERED));
+    else if (question.text === undefined && options.length === 0) body.append(el("p", { class: "answer-note" }, QUESTION_LOST));
+    card.append(body);
+  }
+  return card;
+}
+
 /** A sent message taller than this many lines is collapsed (to the `.user-bubble.collapsed` height, 8 lines). */
 const LONG_MESSAGE_LINES = 12;
+/**
+ * Lines the pinned copy of the last message keeps (CSS clamps it to the same count). Tighter than a collapsed message
+ * in the timeline: the copy floats over the feed, so it has to say what was asked without taking the view.
+ */
+const PIN_LINES = 3;
+const PIN_LABEL = "Ваше последнее сообщение";
+const OPEN_MESSAGE = "Показать полностью";
+const CLOSE_MESSAGE = "Свернуть";
 /** 13px × 1.55, for when the computed line height is not a number. */
 const FALLBACK_LINE_PX = 20;
 const UNNAMED_IMAGE = "image.png";
+/** The composer's mark for a picture standing in the text; see `imageLabel` in composer.ts. */
+const LABEL = /\[картинка (\d+)\]/g;
 const STICK_TO_BOTTOM_PX = 48;
 const MINUTE_MS = 60_000;
 const TASK_TOOL = "task";
@@ -84,6 +138,8 @@ const CLAMP_LINES = 3;
 const DIFF_CLAMP_LINES = 5;
 const CAPPED_NOTE = "Вывод обрезан: показаны первые 20 000 символов.";
 const NOTICE_CLASS: Record<Extract<Block, { kind: "notice" }>["level"], string> = { info: "muted", warn: "warn", error: "error" };
+/** What folds away someone else's words under a notice (a provider's refusal text). */
+const NOTICE_DETAILS_LABEL = "Подробнее";
 
 /** The first BOX_LINES lines (at most BOX_CHARS characters) of a text, and how many lines are left out. */
 function clip(text: string): { text: string; more: number } {
@@ -148,6 +204,11 @@ export function toolLabel(name: string): string {
 /** An assistant block that has produced nothing yet stays out of the timeline. */
 function isPending(block: Block): boolean {
   return block.kind === "assistant" && block.text === "" && block.thinking === "";
+}
+
+/** An answered question, wherever OmO recorded it: on the call the agent waited on, or on the answer's user message. */
+function isAnswered(block: Block): boolean {
+  return (block.kind === "tool" || block.kind === "user") && block.answer !== undefined;
 }
 
 /** A message not in the conversation yet (sending, queued, not sent): it stays under everything the agent did meanwhile. */
@@ -260,6 +321,15 @@ export class Feed {
   private readonly list: HTMLElement;
   private readonly indicator: HTMLElement;
   private readonly verb: HTMLElement;
+  /** The copy of the last sent message over the top of the feed: the slot that holds it, its text and its control. */
+  private readonly pinSlot: HTMLElement;
+  private readonly pin: HTMLElement;
+  private readonly pinText: HTMLElement;
+  private readonly pinToggle: HTMLButtonElement;
+  /** The message the copy shows, and whether the person opened it (the next message is pinned closed again). */
+  private pinned: string | undefined;
+  private pinOpen = false;
+  private scrollFrame: number | undefined;
   /** Per block: what it was rendered from, and the extras (the time stamp) that also shape it. */
   private readonly rendered = new Map<string, { block: Block; extras: string; element: HTMLElement }>();
   /** Tool steps whose IN/OUT box the person expanded. */
@@ -295,9 +365,25 @@ export class Feed {
     const star = el("span", { class: "star", "aria-hidden": "true" }, icon("spark"));
     this.indicator = el("div", { class: "indicator", "data-role": "indicator", role: "status" }, star, this.verb);
     this.indicator.hidden = true;
+    this.pinText = el("div", { class: "user-text" });
+    this.pinToggle = button("", { class: "link message-toggle", "data-role": "pin-toggle" }, () => {
+      this.pinOpen = !this.pinOpen;
+      this.showPin(); // in place: the view never moves away from what the agent is doing
+    });
+    this.pin = el("div", { class: "user-bubble pin", "data-role": "pin", role: "group", "aria-label": PIN_LABEL }, this.pinText, this.pinToggle);
+    this.pinSlot = el("div", { class: "pin-slot" }, this.pin);
+    this.pinSlot.hidden = true;
     root.classList.add("feed");
-    root.replaceChildren(this.list, ...(options.tail ?? []), this.indicator);
+    root.replaceChildren(this.pinSlot, this.list, ...(options.tail ?? []), this.indicator);
     root.addEventListener("click", (event) => this.onClick(event));
+    // The copy comes and goes as the message it stands for leaves the view; one measure per frame, however many events.
+    root.addEventListener("scroll", () => {
+      if (this.scrollFrame !== undefined) return;
+      this.scrollFrame = requestAnimationFrame(() => {
+        this.scrollFrame = undefined;
+        this.updatePin();
+      });
+    });
     root.addEventListener("keydown", (event) => {
       const box = (event.target as Element | null)?.closest<HTMLElement>('[data-role="tool-io"]');
       if (box === null || box === undefined || (event.key !== "Enter" && event.key !== " ")) return;
@@ -344,6 +430,11 @@ export class Feed {
     this.guardRows.set(id, { after, row: el("div", { class: "entry steps guard-entry" }, element) });
     this.renderBlocks();
     if (stick) this.root.scrollTop = this.root.scrollHeight;
+  }
+
+  /** Takes a guard row out again: an offer this chat never took up leaves no trace in the timeline. */
+  removeGuardRow(id: string): void {
+    if (this.guardRows.delete(id)) this.renderBlocks();
   }
 
   /** Room under the last message as tall as the composer floating over the feed; a feed at the bottom stays there. */
@@ -411,6 +502,58 @@ export class Feed {
         this.tiles.delete(image.id);
       }
     }
+    this.updatePin();
+  }
+
+  // ---------- the last message, pinned over the feed ----------
+
+  /** The last message of their own the agent already has: what the copy over the feed stands for. */
+  private lastSent(): UserBlock | undefined {
+    const sent = this.blocks.filter(
+      (block): block is UserBlock => block.kind === "user" && block.delivery === undefined && block.answer === undefined && block.text !== "",
+    );
+    return sent.at(-1);
+  }
+
+  /**
+   * The copy over the top of the feed: the last message's text, collapsed to `PIN_LINES`, shown only while the message
+   * itself is out of the view — with it on screen there is nothing to scroll back to.
+   */
+  private updatePin(): void {
+    const block = this.lastSent();
+    if (block === undefined) {
+      this.pinned = undefined;
+      this.pinSlot.hidden = true;
+      return;
+    }
+    if (block.id !== this.pinned || block.text !== this.pinText.textContent) {
+      this.pinned = block.id;
+      this.pinOpen = false; // a message they have not read back yet is pinned closed
+      this.pinText.textContent = block.text;
+    }
+    this.pinSlot.hidden = !this.outOfView(block.id);
+    if (!this.pinSlot.hidden) this.showPin(); // measurable only once it is shown
+  }
+
+  /** True while a block's own row is not in the feed's view: its top edge is over or under the viewport. */
+  private outOfView(blockId: string): boolean {
+    const element = this.rendered.get(blockId)?.element;
+    if (element === undefined) return false;
+    const row = element.getBoundingClientRect();
+    const view = this.root.getBoundingClientRect();
+    if (view.height === 0) return false; // a hidden tab has no layout: nothing is out of view
+    return row.top < view.top || row.top > view.bottom;
+  }
+
+  /** The copy's own fold: `PIN_LINES` while closed, and the control only when the text does not fit in them. */
+  private showPin(): void {
+    const line = parseFloat(getComputedStyle(this.pinText).lineHeight) || FALLBACK_LINE_PX;
+    const long = this.pinText.scrollHeight > PIN_LINES * line; // every read before the writes below
+    this.pin.classList.toggle("long", long);
+    this.pin.classList.toggle("collapsed", long && !this.pinOpen);
+    this.pinToggle.hidden = !long;
+    this.pinToggle.textContent = this.pinOpen ? CLOSE_MESSAGE : OPEN_MESSAGE;
+    this.pinToggle.setAttribute("aria-expanded", String(this.pinOpen));
   }
 
   /**
@@ -430,7 +573,8 @@ export class Feed {
       this.held = true; // left as it is, and still unrendered: the next render (or the selection letting go) builds it
       return previous.element;
     }
-    const kind = block.kind === "user" ? "user" : isPending(block) ? "pending" : "steps";
+    // an answered question is the person's own turn, wherever the answer was recorded: the user entry's row and menu
+    const kind = block.kind === "user" || isAnswered(block) ? "user" : isPending(block) ? "pending" : "steps";
     const element = el("div", { "data-block": block.id, class: `entry ${kind}` });
     if (stamp !== undefined) element.append(el("div", { class: "ts" }, stamp));
     element.append(...this.renderBlock(block, shownPlan));
@@ -449,26 +593,55 @@ export class Feed {
     switch (block.kind) {
       case "user": {
         const bubble = this.renderUser(block);
-        if (block.delivery === undefined) bubble.append(this.messageActions(block.id)); // pinned to the bubble's top-right corner (CSS)
+        // pinned to the bubble's top-right corner (CSS); an answer card carries its own, aimed at the question's turn
+        if (block.delivery === undefined && block.answer === undefined) bubble.append(this.messageActions(block.id));
         return [bubble];
       }
       case "assistant":
         return this.renderAssistant(block);
       case "tool":
+        if (block.answer !== undefined) return [this.answerBubble(block.answer)];
+        if (block.name === ASK_TOOL) return []; // a question still open: the panel asks it, the feed waits
         if (isTodoStep(block)) return [plan !== undefined ? todoPlan(plan) : todoMark(block.todo)]; // no box, no OmO's echo
         return [this.renderTool(block)];
-      case "notice":
-        return [el("div", { class: `step notice ${NOTICE_CLASS[block.level]}` }, block.text)];
+      case "notice": {
+        const row = el("div", { class: `step notice ${NOTICE_CLASS[block.level]}` }, block.text);
+        // Someone else's words (a provider's refusal) stay folded away: the line itself says what to do about it.
+        if (block.details !== undefined) {
+          row.append(el("details", { class: "notice-details" }, el("summary", {}, NOTICE_DETAILS_LABEL), el("pre", {}, block.details)));
+        }
+        return [row];
+      }
     }
   }
 
+  /**
+   * The card in the bubble's place, collapsed like a long message (same `.user-bubble` / `.user-text` shell, so
+   * `fitMessages` measures it) and with the ↺ menu of the message whose turn asked the question.
+   */
+  private answerBubble(answer: Answer): HTMLElement {
+    const bubble = el("div", { class: "user-bubble answered" }, el("div", { class: "user-text" }, answerCard(answer)));
+    if (answer.forkFrom !== undefined) bubble.append(this.messageActions(answer.forkFrom));
+    return bubble;
+  }
+
   private renderUser(block: UserBlock): HTMLElement {
+    if (block.answer !== undefined) {
+      const card = this.answerBubble(block.answer);
+      if (block.delivery === undefined) return card;
+      card.classList.add("queued");
+      card.append(el("span", { class: "queued-label" }, DELIVERY_LABEL[block.delivery.state]));
+      return card;
+    }
     const bubble = el("div", { class: "user-bubble" });
     const images = block.images ?? [];
-    if (images.length > 0) bubble.append(el("div", { class: "uimgs" }, ...images.map((image) => this.tile(image))));
+    const body = this.userText(block.text, images);
+    // Pictures the text has no label for (attached with no place in it) keep the row above the message.
+    const loose = images.filter((_, index) => !body.labelled.has(index));
+    if (loose.length > 0) bubble.append(el("div", { class: "uimgs" }, ...loose.map((image) => this.tile(image, false))));
     const delivery = block.delivery;
     const editable = delivery?.state === "queued" && delivery.queuedId !== undefined && !this.handedOver.has(block.id);
-    bubble.append(editable && this.editing.has(block.id) ? this.queuedEditor(block.id) : el("div", { class: "user-text" }, block.text));
+    bubble.append(editable && this.editing.has(block.id) ? this.queuedEditor(block.id) : body.element);
     if (this.handedOver.has(block.id)) {
       bubble.append(el("span", { class: "queued-label" }, HANDED_OVER));
       return bubble;
@@ -499,6 +672,27 @@ export class Feed {
       bubble.append(el("div", { class: "queued-actions" }, edit, dequeue));
     }
     return bubble;
+  }
+
+  /**
+   * The message as it was written: every «[картинка N]» the composer put in for a pill becomes that pill again, so the
+   * picture stands where the person put it. A label with no picture behind it (one the person typed) stays text.
+   */
+  private userText(text: string, images: ImageRef[]): { element: HTMLElement; labelled: Set<number> } {
+    const element = el("div", { class: "user-text" });
+    const labelled = new Set<number>();
+    let at = 0;
+    LABEL.lastIndex = 0;
+    for (let match = LABEL.exec(text); match !== null; match = LABEL.exec(text)) {
+      const index = Number(match[1]) - 1;
+      const image = images[index];
+      if (image === undefined || labelled.has(index)) continue;
+      element.append(text.slice(at, match.index), this.tile(image, true));
+      labelled.add(index);
+      at = match.index + match[0].length;
+    }
+    element.append(text.slice(at));
+    return { element, labelled };
   }
 
   private startEdit(blockId: string, text: string): void {
@@ -551,7 +745,7 @@ export class Feed {
     // Every read first, then every write: a class change between two reads would force a layout per bubble.
     const fits: { id: string; bubble: HTMLElement; long: boolean }[] = [];
     for (const [id, { block, element }] of this.rendered) {
-      if (block.kind !== "user" || (!all && this.measured.has(element))) continue;
+      if ((block.kind !== "user" && !isAnswered(block)) || (!all && this.measured.has(element))) continue;
       const bubble = element.querySelector<HTMLElement>(".user-bubble");
       const text = bubble?.querySelector<HTMLElement>(".user-text");
       if (bubble === null || bubble === undefined || text === null || text === undefined) continue;
@@ -585,19 +779,22 @@ export class Feed {
       bubble.append(toggle);
     }
     toggle.hidden = false;
-    toggle.textContent = open ? "Свернуть" : "Показать полностью";
+    toggle.textContent = open ? CLOSE_MESSAGE : OPEN_MESSAGE;
     toggle.setAttribute("aria-expanded", String(open));
   }
 
-  /** A chip like the composer's: preview, name («image.png» when it has none), the size once the picture loads. */
-  private tile(image: ImageRef): HTMLElement {
+  /**
+   * A chip like the composer's: preview, name («image.png» when it has none), the size once the picture loads. `inline`
+   * is the one standing in the line of the message — the composer's pill, with no room for a size.
+   */
+  private tile(image: ImageRef, inline: boolean): HTMLElement {
     const label = image.name ?? UNNAMED_IMAGE;
     const tile = el(
       "button",
-      { type: "button", class: "uimg", "data-image": image.id, title: label, "aria-label": `Открыть: ${label}` },
+      { type: "button", class: inline ? "uimg att" : "uimg", "data-image": image.id, title: label, "aria-label": `Открыть: ${label}` },
       el("span", { class: "tn" }),
       el("span", { class: "lbl", "data-role": "image-name" }, label),
-      el("span", { class: "dim", "data-role": "image-size" }),
+      ...(inline ? [] : [el("span", { class: "dim", "data-role": "image-size" })]),
     );
     this.tiles.set(image.id, tile);
     if (this.images.has(image.id)) this.fillTile(tile, image.id);
@@ -614,16 +811,16 @@ export class Feed {
 
   private fillTile(tile: HTMLElement, id: string): void {
     const dataUrl = this.images.get(id) ?? "";
-    const size = tile.querySelector(".dim") as HTMLElement;
+    const size = tile.querySelector<HTMLElement>(".dim"); // the inline chip has none: the line has no room for it
     tile.classList.toggle("missing", dataUrl === "");
     if (dataUrl === "") {
       (tile.querySelector(".tn") as HTMLElement).replaceChildren();
-      size.textContent = "нет превью";
+      if (size !== null) size.textContent = "нет превью";
       return;
     }
     const img = el("img", { src: dataUrl, alt: "" });
     img.addEventListener("load", () => {
-      size.textContent = `${img.naturalWidth}×${img.naturalHeight}`; // the bytes that were sent: their real size
+      if (size !== null) size.textContent = `${img.naturalWidth}×${img.naturalHeight}`; // the bytes that were sent: their real size
     });
     (tile.querySelector(".tn") as HTMLElement).replaceChildren(img);
   }

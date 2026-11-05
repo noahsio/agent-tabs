@@ -1,0 +1,427 @@
+<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Картинки внутри текста</title><style>
+  /* Our theme tokens: the VS Code variable first, the Dark+ value the product falls back to second (see webview/style.css). */
+  :root {
+    --bg: var(--vscode-sideBar-background, var(--vscode-editor-background, #252526));
+    --fg: var(--vscode-foreground, #d4d4d4);
+    --fg-strong: var(--vscode-editor-foreground, #ececec);
+    --muted: var(--vscode-descriptionForeground, #9d9d9d);
+    --line: var(--vscode-widget-border, var(--vscode-panel-border, #3c3c3c));
+    --line-2: var(--vscode-input-border, #454545);
+    --surface: var(--vscode-input-background, #3c3c3c);
+    --bubble-line: color-mix(in srgb, var(--fg) 20%, var(--surface));
+    --code-bg: var(--vscode-textCodeBlock-background, #2d2d2d);
+    --out-bg: var(--vscode-editorWidget-background, #1a1a1a);
+    --dot: var(--vscode-descriptionForeground, #8b8b8b);
+    --rail: var(--vscode-tree-indentGuidesStroke, #3a3a3a);
+    --ok: var(--vscode-testing-iconPassed, #73c991);
+    --run: var(--vscode-editorWarning-foreground, #e0af68);
+    --err: var(--vscode-errorForeground, #f48771);
+    --accent: var(--vscode-focusBorder, #3794ff);
+    --hover: var(--vscode-toolbar-hoverBackground, #333333);
+    --chip: color-mix(in srgb, var(--fg) 10%, var(--surface));
+    --chip-hover: color-mix(in srgb, var(--fg) 16%, var(--surface));
+    --pop-bg: var(--vscode-quickInput-background, #252526);
+    --btn-fg: var(--vscode-button-foreground, #ffffff);
+    --mono: var(--vscode-editor-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+    --page: #181818;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--fg); font: 13px/1.55 var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); }
+  .page { max-width: 948px; margin: 0 auto; padding: 32px 24px 48px; }
+  .intro { max-width: 70ch; margin: 0 0 36px; }
+  .intro h1 { font-size: 18px; font-weight: 600; color: var(--fg-strong); margin: 0 0 6px; }
+  .intro p { margin: 0 0 6px; color: var(--muted); }
+
+  /* One frame: its caption, then a chat window. */
+  .frame { margin: 0 0 44px; }
+  .cap { margin: 0 0 12px; max-width: 900px; }
+  .cap h2 { font-size: 14px; font-weight: 600; color: var(--fg-strong); margin: 0 0 2px; }
+  .cap h2 .letter { display: inline-block; min-width: 1.6em; color: var(--accent); }
+  .cap p { margin: 0; color: var(--muted); font-size: 12px; max-width: 80ch; }
+  .cap + .win { margin-bottom: 14px; }
+  .sub-cap { margin: 0 0 10px; color: var(--muted); font-size: 12px; max-width: 80ch; }
+  .pair { display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; }
+
+  .win { position: relative; width: 900px; max-width: 100%; background: var(--bg); border: 1px solid #333; border-radius: 10px; overflow: hidden; box-shadow: 0 18px 50px rgba(0, 0, 0, .45); }
+  .win.narrow { width: 420px; }
+  .win.tall { min-height: 476px; }
+
+  .header { display: flex; align-items: center; justify-content: space-between; padding: 9px 16px; border-bottom: 1px solid var(--line); }
+  .header .title { font-weight: 600; color: var(--fg-strong); font-size: 14px; }
+  .icons { display: flex; gap: 16px; color: #b8b8b8; }
+  svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; display: block; }
+
+  /* feed: the product's timeline of steps */
+  .feed { padding: 4px 24px 12px; }
+  .feed.short { padding-top: 16px; }
+  .ts { text-align: right; color: var(--muted); font-size: 12px; padding: 14px 0 6px; }
+  .user { background: var(--surface); border: 1px solid var(--bubble-line); border-radius: 7px; padding: 9px 12px; color: var(--fg-strong); margin-bottom: 10px; }
+  .user-text { white-space: pre-wrap; }
+  .step { position: relative; padding-left: 28px; margin: 0 0 10px; }
+  .step::before { content: ""; position: absolute; left: 6px; top: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--dot); }
+  .step:not(:last-child)::after { content: ""; position: absolute; left: 9px; top: 19px; bottom: -12px; width: 1px; background: var(--rail); }
+  .step.ok::before { background: var(--ok); }
+  .step .name { font-weight: 600; color: var(--fg-strong); }
+  .step .mono { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-left: 6px; }
+  .step p { margin: 0; }
+  .step.thought { color: var(--fg); }
+
+  /* composer: the product's box, its toolbar, and the text the person is typing */
+  .dock { padding: 6px 0 16px; }
+  .slot { width: min(860px, calc(100% - 2 * clamp(28px, 6.55%, 60px))); margin: 0 auto; }
+  .win.narrow .slot { width: calc(100% - 32px); }
+  .composer { background: var(--surface); border: 1px solid var(--line-2); border-radius: 12px; }
+  .composer.focused { border-color: var(--accent); }
+  /* Inline pills need a looser line than plain prose: 1.9 keeps a 20 px chip from touching the line above. */
+  .input { position: relative; padding: 13px 16px; color: var(--fg-strong); min-height: 46px; line-height: 1.9; white-space: pre-wrap; }
+  .input.empty { color: var(--vscode-input-placeholderForeground, #8a8a8a); line-height: 1.55; }
+  .bar { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-top: 1px solid var(--line); color: var(--fg); }
+  .bar .spacer { flex: 1; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; background: var(--chip); border-radius: 12px; padding: 2px 10px; font-size: 12.5px; white-space: nowrap; }
+  .pill .d { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .ctx { position: relative; flex: none; display: grid; place-items: center; width: 22px; height: 22px; color: var(--fg); }
+  .ctx svg { width: 20px; height: 20px; fill: none; stroke-width: 2.4; transform: rotate(-90deg); }
+  .ctx .track { stroke: color-mix(in srgb, currentColor 22%, transparent); }
+  .ctx .arc { stroke: currentColor; stroke-linecap: round; }
+  .send { width: 30px; height: 28px; background: var(--accent); border-radius: 6px; display: grid; place-items: center; color: var(--btn-fg); }
+  .send.off { background: var(--chip); color: var(--muted); }
+  .send svg.i { stroke-width: 2; }
+  .caret { display: inline-block; width: 1px; height: 15px; background: var(--fg-strong); margin: 0 1px; vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+
+  /* ---------- the one new thing: an attachment as a chip inside the text ---------- */
+  /* Same chip as today's row above the input (.thumb in style.css), shrunk to sit on a text line. */
+  .att {
+    display: inline-flex; align-items: center; gap: 5px; vertical-align: -4px; margin: 0 1px;
+    height: 20px; max-width: 220px; padding: 0 4px 0 3px;
+    border: 1px solid color-mix(in srgb, var(--fg) 22%, transparent); border-radius: 5px;
+    background: var(--chip); color: var(--fg-strong); font-size: 12.5px; line-height: 1;
+  }
+  .att .tn { flex: none; width: 15px; height: 15px; border-radius: 3px; overflow: hidden; background: var(--code-bg); display: grid; place-items: center; }
+  .att .tn svg { display: block; width: 100%; height: 100%; }
+  .att .lbl { min-width: 0; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  /* The ✕ keeps its space at all times: appearing on hover must not re-wrap the line. */
+  .att .xx { flex: none; width: 12px; text-align: center; color: var(--muted); font-size: 9px; opacity: 0; }
+  .att:hover, .att.is-hover { background: var(--chip-hover); border-color: color-mix(in srgb, var(--fg) 30%, transparent); }
+  .att:hover .xx, .att.is-hover .xx { opacity: 1; }
+  .att.is-hover .xx { color: var(--fg-strong); }
+  /* Still being prepared: no picture yet, so the chip holds a pulsing mark instead. */
+  .att.pending { color: var(--muted); }
+  .att.pending .tn { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--muted); font-size: 11px; font-weight: 700; animation: pulse 1.2s infinite; }
+  /* Refused: the chip stays where it was put, so it is clear which line lost its picture. */
+  .att.bad { border-color: var(--err); color: var(--err); }
+  .att.bad .tn { background: color-mix(in srgb, var(--err) 18%, transparent); color: var(--err); font-size: 11px; font-weight: 700; }
+  .att-note { padding: 4px 16px 0; font-size: 12px; color: var(--muted); }
+  .att-note.err { color: var(--err); }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes pulse { 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .caret, .att.pending .tn, .drop-caret { animation: none; } }
+
+  /* ---------- B: where the file will land ---------- */
+  .drop-caret { display: inline-block; width: 2px; height: 19px; background: var(--accent); margin: 0 2px; vertical-align: -5px; border-radius: 1px; animation: blink 1s steps(1) infinite; }
+  .ghost { position: absolute; display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 7px 0 3px; border: 1px solid var(--accent); border-radius: 5px; background: color-mix(in srgb, var(--accent) 22%, var(--surface)); color: var(--fg-strong); font-size: 12.5px; line-height: 1; opacity: .85; }
+  .ghost .tn { flex: none; width: 15px; height: 15px; border-radius: 3px; overflow: hidden; }
+  .ghost .tn svg { display: block; width: 100%; height: 100%; }
+  .drop-hint { position: absolute; padding: 2px 8px; border-radius: 5px; background: var(--accent); color: var(--btn-fg); font-size: 12px; white-space: nowrap; }
+
+  /* ---------- D: the viewer a click on a sent picture opens ---------- */
+  .lightbox { position: absolute; inset: 0; z-index: 9; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: rgba(0, 0, 0, .82); }
+  .stage { width: 520px; border-radius: 4px; overflow: hidden; box-shadow: 0 10px 40px rgba(0, 0, 0, .6); }
+  .stage svg { display: block; width: 100%; height: auto; }
+  .lb-bar { display: flex; align-items: center; gap: 14px; color: #e6e6e6; font-size: 12px; }
+  .lb-bar .nav { color: var(--muted); }
+
+  /* ---------- E: not UI — what actually goes over the wire ---------- */
+  .panel { width: 900px; max-width: 100%; background: var(--out-bg); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .panel .cols { display: flex; gap: 22px; align-items: flex-start; }
+  .panel .col-text { flex: 1 1 0; min-width: 0; }
+  .panel .col-list { flex: none; width: 272px; }
+  .panel h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--fg); }
+  .wire { margin: 0; background: var(--bg); border: 1px solid var(--line); border-left: 2px solid var(--accent); border-radius: 4px; padding: 8px 10px; font: 12px/1.7 var(--mono); color: var(--fg-strong); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .wire .mark { color: var(--accent); }
+  .imgs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+  .imgs li { display: grid; grid-template-columns: 15px 15px 1fr; align-items: center; column-gap: 8px; padding: 3px 0; font-size: 12px; color: var(--fg); }
+  .imgs .n { color: var(--accent); font-variant-numeric: tabular-nums; text-align: right; font-family: var(--mono); }
+  .imgs .tn { width: 15px; height: 15px; border-radius: 3px; overflow: hidden; }
+  .imgs .tn svg { display: block; width: 100%; height: 100%; }
+  .imgs .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
+  .panel .why { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; max-width: 86ch; }
+  .panel .why + .why { margin-top: 5px; padding-top: 0; border-top: none; }
+  .panel code { font-family: var(--mono); font-size: 11.5px; color: var(--fg); }
+
+  /* ---------- F: three ways to build it, one line of cost each ---------- */
+  .variants { width: 900px; max-width: 100%; display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .variant { padding-top: 9px; border-top: 2px solid var(--line-2); }
+  .variant.pick { border-top-color: var(--accent); }
+  .variant .no { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .variant.pick .no { color: var(--accent); }
+  .variant h3 { margin: 2px 0 0; font-size: 13px; font-weight: 600; color: var(--fg-strong); }
+  .variant .rec { display: block; min-height: 1.55em; margin-top: 2px; font-size: 12px; color: var(--accent); }
+  .variant .mini { margin: 9px 0 8px; padding: 7px 9px; min-height: 48px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 7px; font-size: 12.5px; line-height: 1.9; color: var(--fg-strong); }
+  .variant .mini .m { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .variant .mini .layer { border-bottom: 1px dashed var(--accent); }
+  .variant .cost { margin: 0; font-size: 12px; color: var(--muted); }
+
+  /* screenshot mode: one frame per file, no page chrome */
+  body.shot .page { width: max-content; max-width: none; margin: 0; padding: 20px; }
+  body.shot .frame { margin: 0; }
+  body.shot .cap { display: none; }
+</style></head><body><div class="page">
+
+<header class="intro">
+  <h1>Картинки внутри текста, а не полкой сверху</h1>
+  <p>Сейчас приложенные файлы живут отдельной полкой над строкой ввода: сообщение само по себе, картинки сами по себе, и к какому пункту относится какой скриншот — непонятно. Здесь картинка встаёт плашкой туда, где стоит курсор: посреди фразы, в конце пункта списка, где нужно.</p>
+  <p>Плашка — та же самая, что сейчас в полке над вводом: кусочек картинки, имя файла, ✕. Только теперь она в строке текста и переносится вместе с ним.</p>
+  <p>Тёмная тема Dark+, переменные VS Code с запасными значениями. Окна по 900 px, два последних кадра по 420 px.</p>
+</header>
+
+<!-- A -->
+<section class="frame" data-shot="a-inline-pills">
+  <div class="cap"><h2><span class="letter">A</span>Плашки в тексте</h2><p>Четыре картинки стоят каждая на своём месте: две внутри фразы, две в концах пунктов. Под курсором вторая плашка — видно ✕, которым её убирают. Место под ✕ занято всегда, иначе наведение переносило бы строку.</p></div>
+  <div class="win" data-chat="Каталог">
+    <div class="feed short">
+      <div class="step ok"><span class="name">Read</span><span class="mono">src/catalog/list.ts</span></div>
+      <div class="step thought">Жду, что скажете по скриншотам.</div>
+    </div>
+    <div class="dock"><div class="slot">
+      <div class="composer focused">
+        <div class="input"><span class="user-text">вот тут ошибка <span class="att"><span class="tn" data-s="1"></span><span class="lbl">screen1.png</span><span class="xx">✕</span></span> а на втором экране <span class="att is-hover"><span class="tn" data-s="2"></span><span class="lbl">screen2.png</span><span class="xx">✕</span></span> всё нормально
+
+почини по порядку:
+1. проверь, что каталог не отдаёт пустой список
+2. вот как он выглядит пустым <span class="att"><span class="tn" data-s="3"></span><span class="lbl">empty-list.png</span><span class="xx">✕</span></span>
+3. в логе видно, на чём он падает <span class="att"><span class="tn" data-s="4"></span><span class="lbl">log-tail.png</span><span class="xx">✕</span></span><span class="caret"></span></span></div>
+        <div class="bar" data-bar></div>
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<!-- B -->
+<section class="frame" data-shot="b-drop-point">
+  <div class="cap"><h2><span class="letter">B</span>Файл несут в текст</h2><p>Синей заливки поверх всего ввода больше нет: чтобы прицелиться, текст нужно видеть. Вместо неё — отметка между словами, ровно там, куда встанет картинка, и подпись рядом. Рамка ввода подсвечена, сам файл едет призраком у курсора.</p></div>
+  <div class="win" data-chat="Каталог">
+    <div class="feed short">
+      <div class="step ok"><span class="name">Read</span><span class="mono">src/catalog/list.ts</span></div>
+      <div class="step thought">Жду, что скажете по скриншотам.</div>
+    </div>
+    <div class="dock"><div class="slot">
+      <div class="composer focused">
+        <div class="input"><span class="user-text">вот тут ошибка <span class="att"><span class="tn" data-s="1"></span><span class="lbl">screen1.png</span><span class="xx">✕</span></span> а на втором экране <span class="drop-caret"></span> всё нормально
+
+почини по порядку:
+1. проверь, что каталог не отдаёт пустой список
+2. вот как он выглядит пустым</span>
+          <span class="ghost" style="left: 356px; top: 34px;"><span class="tn" data-s="2"></span>screen2.png</span>
+          <span class="drop-hint" style="left: 356px; top: 60px;">Отпустите — картинка встанет сюда</span>
+        </div>
+        <div class="bar" data-bar></div>
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<!-- C -->
+<section class="frame" data-shot="c-states">
+  <div class="cap"><h2><span class="letter">C</span>Плашка готовится и плашка не прошла</h2><p>Пока картинка сжимается, на её месте уже стоит плашка с точками — место в тексте занято, отправка пока недоступна. Непригодный файл не исчезает: плашка остаётся там, куда её положили, с красной рамкой, а причина — строкой под вводом. ✕ на плашке убирает её, не ломая остальной текст.</p></div>
+  <div class="win" data-chat="Каталог">
+    <div class="feed short">
+      <div class="step thought">Жду, что скажете по скриншотам.</div>
+    </div>
+    <div class="dock"><div class="slot">
+      <div class="composer focused">
+        <div class="input"><span class="user-text">вот тут ошибка <span class="att pending"><span class="tn">…</span><span class="lbl">screen3-4k.png</span><span class="xx">✕</span></span> а разбор я приложил рядом <span class="att bad is-hover"><span class="tn">!</span><span class="lbl">notes.pdf</span><span class="xx">✕</span></span><span class="caret"></span></span></div>
+        <div class="att-note">screen3-4k.png — сжимаю до 2000 px по длинной стороне…</div>
+        <div class="att-note err">notes.pdf — Только картинки png/jpeg/gif/webp</div>
+        <div class="bar" data-bar data-send="off"></div>
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<!-- D -->
+<section class="frame" data-shot="d-sent-feed">
+  <div class="cap"><h2><span class="letter">D</span>Отправленное сообщение в ленте</h2><p>В пузыре те же плашки на тех же местах — текст сохраняет форму, в которой его написали. Плашка кликается и открывает картинку во весь экран; ✕ в ленте нет, убирать уже нечего.</p></div>
+  <div class="win" data-chat="Каталог">
+    <div class="feed">
+      <div class="ts">14:12</div>
+      <div class="user"><div class="user-text">вот тут ошибка <span class="att"><span class="tn" data-s="1"></span><span class="lbl">screen1.png</span></span> а на втором экране <span class="att"><span class="tn" data-s="2"></span><span class="lbl">screen2.png</span></span> всё нормально
+
+почини по порядку:
+1. проверь, что каталог не отдаёт пустой список
+2. вот как он выглядит пустым <span class="att"><span class="tn" data-s="3"></span><span class="lbl">empty-list.png</span></span>
+3. в логе видно, на чём он падает <span class="att"><span class="tn" data-s="4"></span><span class="lbl">log-tail.png</span></span></div></div>
+      <div class="step thought">Смотрю по порядку. На первой картинке падение в list.ts, на третьей — пустой список при живой ноде: это два разных места.</div>
+      <div class="step ok"><span class="name">Read</span><span class="mono">src/catalog/list.ts</span></div>
+      <div class="step ok"><span class="name">Grep</span><span class="mono">node unavailable</span></div>
+    </div>
+  </div>
+
+  <p class="sub-cap">Клик по плашке в ленте: та же картинка во весь экран, стрелками переключаются остальные четыре — в том порядке, в котором они стоят в тексте.</p>
+  <div class="win tall" data-chat="Каталог">
+    <div class="feed">
+      <div class="ts">14:12</div>
+      <div class="user"><div class="user-text">вот тут ошибка <span class="att"><span class="tn" data-s="1"></span><span class="lbl">screen1.png</span></span> а на втором экране <span class="att"><span class="tn" data-s="2"></span><span class="lbl">screen2.png</span></span> всё нормально
+
+почини по порядку:
+1. проверь, что каталог не отдаёт пустой список
+2. вот как он выглядит пустым <span class="att"><span class="tn" data-s="3"></span><span class="lbl">empty-list.png</span></span>
+3. в логе видно, на чём он падает <span class="att"><span class="tn" data-s="4"></span><span class="lbl">log-tail.png</span></span></div></div>
+      <div class="step thought">Смотрю по порядку. На первой картинке падение в list.ts, на третьей — пустой список при живой ноде: это два разных места.</div>
+      <div class="step ok"><span class="name">Read</span><span class="mono">src/catalog/list.ts</span></div>
+    </div>
+    <div class="lightbox">
+      <div class="stage">
+        <svg viewBox="0 0 520 325" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="screen1.png">
+          <rect width="520" height="325" fill="#1d2430"/>
+          <rect width="520" height="26" fill="#2b3647"/>
+          <circle cx="16" cy="13" r="4" fill="#4b5a70"/><circle cx="30" cy="13" r="4" fill="#4b5a70"/><circle cx="44" cy="13" r="4" fill="#4b5a70"/>
+          <rect x="64" y="8" width="130" height="10" rx="3" fill="#3a4759"/>
+          <rect x="0" y="26" width="104" height="299" fill="#222a38"/>
+          <g fill="#3d4a5e"><rect x="12" y="44" width="72" height="7" rx="3"/><rect x="12" y="62" width="58" height="7" rx="3"/><rect x="12" y="80" width="66" height="7" rx="3"/><rect x="12" y="98" width="48" height="7" rx="3"/></g>
+          <g fill="#394657"><rect x="124" y="46" width="300" height="8" rx="4"/><rect x="124" y="66" width="246" height="8" rx="4"/><rect x="124" y="86" width="330" height="8" rx="4"/></g>
+          <rect x="116" y="112" width="388" height="52" rx="5" fill="#3a2a2b" stroke="#f48771"/>
+          <rect x="128" y="126" width="206" height="8" rx="4" fill="#f48771"/>
+          <rect x="128" y="142" width="286" height="7" rx="3.5" fill="#9a6b63"/>
+          <g fill="#394657"><rect x="124" y="182" width="268" height="8" rx="4"/><rect x="124" y="202" width="316" height="8" rx="4"/><rect x="124" y="222" width="188" height="8" rx="4"/><rect x="124" y="242" width="290" height="8" rx="4"/><rect x="124" y="262" width="214" height="8" rx="4"/><rect x="124" y="282" width="252" height="8" rx="4"/></g>
+        </svg>
+      </div>
+      <div class="lb-bar"><span>screen1.png · 1 из 4</span><span class="nav">← →  переключить · Esc закрыть</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- E -->
+<section class="frame" data-shot="e-what-agent-gets">
+  <div class="cap"><h2><span class="letter">E</span>Что из этого получает агент</h2><p>Не интерфейс, а разбор: у OmO в <code>prompt</code> есть только <code>message</code> и плоский массив <code>images</code> (docs/rpc.md, строки 3687 и 3744) — места картинки в тексте протокол не знает. Поэтому на место плашки в текст подставляется метка, а картинки идут тем же порядком.</p></div>
+  <div class="panel">
+    <div class="cols">
+      <div class="col-text">
+        <h3>message — ровно этот текст для кадра A</h3>
+        <pre class="wire">вот тут ошибка <span class="mark">[картинка 1]</span> а на втором экране <span class="mark">[картинка 2]</span> всё нормально
+
+почини по порядку:
+1. проверь, что каталог не отдаёт пустой список
+2. вот как он выглядит пустым <span class="mark">[картинка 3]</span>
+3. в логе видно, на чём он падает <span class="mark">[картинка 4]</span></pre>
+      </div>
+      <div class="col-list">
+        <h3>images — в порядке меток</h3>
+        <ol class="imgs">
+          <li><span class="n">1</span><span class="tn" data-s="1"></span><span class="nm">screen1.png · 1180×740</span></li>
+          <li><span class="n">2</span><span class="tn" data-s="2"></span><span class="nm">screen2.png · 1180×740</span></li>
+          <li><span class="n">3</span><span class="tn" data-s="3"></span><span class="nm">empty-list.png · 980×520</span></li>
+          <li><span class="n">4</span><span class="tn" data-s="4"></span><span class="nm">log-tail.png · 1440×420</span></li>
+        </ol>
+      </div>
+    </div>
+    <p class="why">Метку человек не печатает и в своём сообщении не видит: в ленте на её месте остаётся плашка. Нумерация — от начала текста, а не от порядка прикладывания, так что перетащенная внутрь текста плашка меняет номера у всех, кто за ней.</p>
+    <p class="why">Пять картинок на сообщение и общий предел по объёму остаются как сейчас (webview/attachments.ts); в кадре A их четыре.</p>
+  </div>
+</section>
+
+<!-- F -->
+<section class="frame" data-shot="f-variants">
+  <div class="cap"><h2><span class="letter">F</span>Три способа это построить</h2><p>Слева то, о чём просили, дальше — варианты подешевле и то, чем они платят.</p></div>
+  <div class="variants">
+    <div class="variant pick">
+      <span class="no">1</span>
+      <h3>Поле с настоящими плашками</h3>
+      <span class="rec">моя рекомендация</span>
+      <div class="mini">на втором экране <span class="att"><span class="tn" data-s="2"></span><span class="lbl">screen2.png</span></span> всё ок<span class="caret"></span></div>
+      <p class="cost">Ровно то, о чём просили. Цена: ввод переписывается целиком — IME и диктовка, Enter и ⌥Enter, отмена, вставка, выделение, ↑↓ по истории, свои тесты на всё это.</p>
+    </div>
+    <div class="variant">
+      <span class="no">2</span>
+      <h3>Поле как сейчас, плашки слоем поверх</h3>
+      <span class="rec"></span>
+      <div class="mini">на втором экране <span class="layer">[картинка 2]</span> всё ок<span class="caret"></span></div>
+      <p class="cost">Ввод остаётся сегодняшним, плашки рисует слой-зеркало поверх метки. Цена: выравнивание слоя ломается на переносах, прокрутке и смене шрифта.</p>
+    </div>
+    <div class="variant">
+      <span class="no">3</span>
+      <h3>Метка видна текстом</h3>
+      <span class="rec"></span>
+      <div class="mini">на втором экране <span class="m">[картинка 2]</span> всё ок<span class="caret"></span></div>
+      <p class="cost">Самое дешёвое: в поле метка так и видна, плашка появляется только в отправленном сообщении. Цена: во время набора картинки не видно вообще.</p>
+    </div>
+  </div>
+</section>
+
+<!-- narrow -->
+<div class="pair">
+<section class="frame" data-shot="n1-composer-420">
+  <div class="cap"><h2><span class="letter">A</span>420 px</h2><p>Плашка не рвётся: она переносится целиком, как длинное слово, и имя файла обрезается по месту.</p></div>
+  <div class="win narrow" data-chat="Каталог">
+    <div class="feed short">
+      <div class="step thought">Жду, что скажете по скриншотам.</div>
+    </div>
+    <div class="dock"><div class="slot">
+      <div class="composer focused">
+        <div class="input"><span class="user-text">вот тут ошибка <span class="att"><span class="tn" data-s="1"></span><span class="lbl">screen1.png</span><span class="xx">✕</span></span> а на втором экране <span class="att is-hover"><span class="tn" data-s="2"></span><span class="lbl">screen2.png</span><span class="xx">✕</span></span> всё нормально
+
+2. вот как он выглядит пустым <span class="att"><span class="tn" data-s="3"></span><span class="lbl">empty-list.png</span><span class="xx">✕</span></span><span class="caret"></span></span></div>
+        <div class="bar" data-bar data-narrow></div>
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<section class="frame" data-shot="n2-feed-420">
+  <div class="cap"><h2><span class="letter">D</span>420 px</h2><p>В узком окне порядок виден по-прежнему: плашка остаётся при своём пункте.</p></div>
+  <div class="win narrow" data-chat="Каталог">
+    <div class="feed">
+      <div class="ts">14:12</div>
+      <div class="user"><div class="user-text">вот тут ошибка <span class="att"><span class="tn" data-s="1"></span><span class="lbl">screen1.png</span></span> а на втором экране <span class="att"><span class="tn" data-s="2"></span><span class="lbl">screen2.png</span></span> всё нормально
+
+2. вот как он выглядит пустым <span class="att"><span class="tn" data-s="3"></span><span class="lbl">empty-list.png</span></span></div></div>
+      <div class="step thought">Смотрю по порядку.</div>
+    </div>
+  </div>
+</section>
+</div>
+
+</div>
+<script>
+// Tiny stand-ins for the four pictures: the same drawing serves the 15 px chip and the list in E.
+var SHOTS = {
+  1: "<svg viewBox='0 0 20 20'><rect width='20' height='20' fill='#1d2430'/><rect width='20' height='4.5' fill='#2b3647'/><rect x='2.5' y='8' width='12' height='2.2' rx='1' fill='#f48771'/><rect x='2.5' y='12' width='8' height='2' rx='1' fill='#49566d'/><rect x='2.5' y='15.4' width='14' height='1.8' rx='.9' fill='#333e50'/></svg>",
+  2: "<svg viewBox='0 0 20 20'><rect width='20' height='20' fill='#1d2430'/><rect width='20' height='4.5' fill='#2b3647'/><rect x='2.5' y='8' width='12' height='2.2' rx='1' fill='#73c991'/><rect x='2.5' y='12' width='9' height='2' rx='1' fill='#49566d'/><rect x='2.5' y='15.4' width='13' height='1.8' rx='.9' fill='#333e50'/></svg>",
+  3: "<svg viewBox='0 0 20 20'><rect width='20' height='20' fill='#232a36'/><rect width='20' height='4.5' fill='#2f3a4b'/><rect x='2.5' y='7.5' width='15' height='9.5' rx='1.5' fill='none' stroke='#4a586d' stroke-dasharray='2 1.6'/><rect x='7' y='11.5' width='6' height='1.6' rx='.8' fill='#4a586d'/></svg>",
+  4: "<svg viewBox='0 0 20 20'><rect width='20' height='20' fill='#15181d'/><rect x='2' y='3' width='11' height='1.8' rx='.9' fill='#e0af68'/><rect x='2' y='7' width='15' height='1.8' rx='.9' fill='#5c6470'/><rect x='2' y='11' width='8' height='1.8' rx='.9' fill='#5c6470'/><rect x='2' y='15' width='13' height='1.8' rx='.9' fill='#e0af68'/></svg>"
+};
+document.querySelectorAll('[data-s]').forEach(function (node) { node.innerHTML = SHOTS[node.dataset.s]; });
+
+// Shared chrome: the chat header on every window and the composer toolbar, as the product builds it.
+var ICONS = "<svg class='i' viewBox='0 0 24 24'><path d='M6 3h12v18l-6-4-6 4z'/></svg>" +
+  "<svg class='i' viewBox='0 0 24 24'><circle cx='12' cy='12' r='9'/><path d='M12 7v5l3 2'/></svg>" +
+  "<svg class='i' viewBox='0 0 24 24'><path d='M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z'/><path d='M12 9v6M9 12h6'/></svg>" +
+  "<svg class='i' viewBox='0 0 24 24'><circle cx='12' cy='12' r='3'/><path d='M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1'/></svg>";
+document.querySelectorAll('.win').forEach(function (win) {
+  win.insertAdjacentHTML('afterbegin', "<div class='header'><span class='title'>" + win.dataset.chat + "</span><span class='icons'>" + ICONS + "</span></div>");
+});
+var RING = "<span class='ctx'><svg viewBox='0 0 20 20'><circle class='track' cx='10' cy='10' r='7'/><circle class='arc' cx='10' cy='10' r='7' stroke-dasharray='15.8 43.98'/></svg></span>";
+document.querySelectorAll('[data-bar]').forEach(function (bar) {
+  var off = bar.dataset.send === 'off' ? ' off' : '';
+  bar.innerHTML = "<svg class='i' viewBox='0 0 24 24'><path d='M12 5v14M5 12h14'/></svg>" +
+    "<svg class='i' viewBox='0 0 24 24'><rect x='4' y='4' width='16' height='16' rx='2'/><path d='m14 8-4 8'/></svg>" +
+    (bar.hasAttribute('data-narrow') ? "" : "<span class='pill'><span class='d'></span>1 агент работает</span>") +
+    "<span class='pill'>Auto · Sonnet 4.6</span>" + RING +
+    "<span class='spacer'></span><span class='send" + off + "'><svg class='i' viewBox='0 0 24 24'><path d='M12 19.5v-15'/><path d='m6 10.5 6-6 6 6'/></svg></span>";
+});
+
+// Screenshot mode: #shot=<id> leaves one frame on the page and publishes the size to measure it by.
+var want = (location.hash.match(/^#shot=(.+)$/) || [])[1];
+if (want !== undefined) {
+  document.body.classList.add('shot');
+  var intro = document.querySelector('.intro');
+  if (intro !== null) intro.remove();
+  document.querySelectorAll('[data-shot]').forEach(function (section) { if (section.dataset.shot !== want) section.remove(); });
+}
+requestAnimationFrame(function () {
+  var root = document.documentElement;
+  var box = document.querySelector('.page').getBoundingClientRect();
+  root.setAttribute('data-w', String(Math.ceil(box.width)));
+  root.setAttribute('data-h', String(Math.ceil(box.height)));
+});
+</script></body></html>

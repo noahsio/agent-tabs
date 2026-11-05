@@ -35,6 +35,27 @@ export function buildSessionItems(
 }
 
 /**
+ * The journal of one live session of this environment by its durable id, whatever project it belongs to: a guard
+ * request raised outside the chats names a session this window may have no tab — and no workspace folder — for.
+ */
+export async function liveSessionPath(client: Requester, durableSessionId: string): Promise<string | undefined> {
+  let data: unknown;
+  try {
+    data = await client.request("list_sessions", { observe: true }, LIVE_TIMEOUT_MS);
+  } catch {
+    return undefined;
+  }
+  const sessions = typeof data === "object" && data !== null ? (data as { sessions?: unknown }).sessions : undefined;
+  if (!Array.isArray(sessions)) return undefined;
+  for (const raw of sessions as unknown[]) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const item = raw as { sessionPath?: unknown; durableSessionId?: unknown };
+    if (item.durableSessionId === durableSessionId && typeof item.sessionPath === "string") return item.sessionPath;
+  }
+  return undefined;
+}
+
+/**
  * The daemon's live sessions of this project. `list_sessions` (observe: it must not reset the host's idle timer) carries no running flag, so each one, in parallel, is asked with
  * `get_state {observe}` (not an attachment) and reported as "running" when its turn is in progress. Any failure
  * means "not live": the list still shows the saved sessions.
