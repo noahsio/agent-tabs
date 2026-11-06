@@ -322,12 +322,12 @@ button.icon-btn:disabled {
   border-style: dashed;
 }
 
-/* A long sent message: eight lines that fade out, the toggle in the bubble's bottom-right corner. */
+/* A long sent message folds to a few lines that fade out, the toggle in the bubble's bottom-right corner. */
 .user-bubble.collapsed .user-text {
-  max-height: calc(8 * 1.55em);
+  max-height: calc(4 * 1.55em);
   overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent);
-  mask-image: linear-gradient(to bottom, #000 65%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
+  mask-image: linear-gradient(to bottom, #000 60%, transparent);
 }
 
 .user-bubble button.message-toggle {
@@ -375,7 +375,7 @@ button.icon-btn:disabled {
   height: 0;
 }
 
-/* A long sent message is already folded to eight fading lines by default (`.user-bubble.collapsed` above), so a stuck
+/* A long sent message is already folded to a few fading lines by default (`.user-bubble.collapsed` above), so a stuck
    one never swallows the feed. If the person opened it in full that is their choice: it shows whole, in flow and stuck
    alike — no separate sticky-only cap, since short messages dominate and nothing is ever permanently hidden. */
 

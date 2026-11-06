@@ -109,8 +109,10 @@ function answerCard(answer: Answer): HTMLElement {
   return card;
 }
 
-/** A sent message taller than this many lines is collapsed (to the `.user-bubble.collapsed` height, 8 lines). */
-const LONG_MESSAGE_LINES = 12;
+/** A sent message taller than this many lines is collapsed (to the `.user-bubble.collapsed` height, a few lines). */
+const LONG_MESSAGE_LINES = 6;
+/** An answer card carries structured options worth keeping in view, so it only folds when genuinely huge. */
+const ANSWER_MESSAGE_LINES = 12;
 const TO_BOTTOM_LABEL = "К последнему сообщению";
 const GOTO_PLACE_LABEL = "К сообщению на своём месте";
 /** Where the message lands below the top line when the person scrolls to its real place: clear of the stick line, in flow. */
@@ -792,7 +794,8 @@ export class Feed {
       if (height === 0) continue; // a hidden feed has no layout: measured on a later update
       this.measured.add(element);
       const line = parseFloat(getComputedStyle(text).lineHeight) || FALLBACK_LINE_PX;
-      fits.push({ id, bubble, long: height > LONG_MESSAGE_LINES * line });
+      const trigger = isAnswered(block) ? ANSWER_MESSAGE_LINES : LONG_MESSAGE_LINES;
+      fits.push({ id, bubble, long: height > trigger * line });
     }
     for (const { id, bubble, long } of fits) {
       bubble.classList.toggle("long", long);

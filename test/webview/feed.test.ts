@@ -320,6 +320,13 @@ describe("long sent messages", () => {
     expect(toggle("u1")?.textContent).toBe("Показать полностью");
   });
 
+  it("folds_a_message_over_the_few_line_trigger_but_leaves_a_shorter_one_open", () => {
+    feed.update([{ kind: "user", id: "u1", text: lines(7) }, { kind: "user", id: "u2", text: lines(5) }], false);
+    expect(bubble("u1").classList.contains("collapsed")).toBe(true); // seven lines: over the trigger, folded
+    expect(bubble("u2").classList.contains("collapsed")).toBe(false); // five lines: still shown whole
+    expect(toggle("u2")).toBeNull();
+  });
+
   it("the_choice_is_kept_per_message_across_feed_updates", () => {
     const long: Block = { kind: "user", id: "u1", text: lines(30), delivery: { state: "queued", queuedId: "q_1" } };
     const other: Block = { kind: "user", id: "u2", text: lines(30) };
@@ -336,7 +343,7 @@ describe("long sent messages", () => {
   const frame = (): Promise<void> => new Promise((resolve) => requestAnimationFrame(() => resolve()));
 
   it("a_resize_measures_again_once_per_frame", async () => {
-    feed.update([{ kind: "user", id: "u1", text: lines(10) }], false);
+    feed.update([{ kind: "user", id: "u1", text: lines(5) }], false);
     expect(toggle("u1")).toBeNull();
     wrap = 2; // the tab got narrower: twice the lines
     reads = 0;
