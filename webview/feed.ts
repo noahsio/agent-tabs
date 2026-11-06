@@ -112,11 +112,13 @@ function answerCard(answer: Answer): HTMLElement {
 /** A sent message taller than this many lines is collapsed (to the `.user-bubble.collapsed` height, 8 lines). */
 const LONG_MESSAGE_LINES = 12;
 /**
- * Lines the pinned copy of the last message keeps (CSS clamps it to the same count). Tighter than a collapsed message
- * in the timeline: the copy floats over the feed, so it has to say what was asked without taking the view.
+ * Lines the pinned copy keeps (CSS clamps it to the same count). Tighter than a collapsed message in the timeline:
+ * the copy floats over the feed, so it has to say what was asked without taking the view.
  */
 const PIN_LINES = 3;
-const PIN_LABEL = "Ваше последнее сообщение";
+/** The copy's resting room below the feed's top edge (CSS `.pin { top }`): the push is measured against this line. */
+const PIN_TOP_PX = 6;
+const PIN_LABEL = "Закреплённое сообщение";
 const PIN_JUMP = "Перейти к сообщению";
 const OPEN_MESSAGE = "Показать полностью";
 const CLOSE_MESSAGE = "Свернуть";
@@ -322,14 +324,14 @@ export class Feed {
   private readonly list: HTMLElement;
   private readonly indicator: HTMLElement;
   private readonly verb: HTMLElement;
-  /** The copy of the last sent message over the top of the feed: the slot that holds it, its text and its control. */
+  /** The sticky header of sent messages over the top of the feed: the slot that holds it, its text and its control. */
   private readonly pinSlot: HTMLElement;
   private readonly pin: HTMLElement;
   private readonly pinText: HTMLElement;
   private readonly pinToggle: HTMLButtonElement;
   /** The corner control that scrolls the feed to the real message the copy mirrors. */
   private readonly pinJump: HTMLButtonElement;
-  /** The message the copy shows, and whether the person opened it (the next message is pinned closed again). */
+  /** The message the copy shows now, and whether the person opened it (a swap to another message pins it closed). */
   private pinned: string | undefined;
   private pinOpen = false;
   private scrollFrame: number | undefined;
@@ -509,50 +511,75 @@ export class Feed {
     this.updatePin();
   }
 
-  // ---------- the last message, pinned over the feed ----------
+  // ---------- the sticky header of sent messages ----------
 
-  /** The last message of their own the agent already has: what the copy over the feed stands for. */
-  private lastSent(): UserBlock | undefined {
-    const sent = this.blocks.filter(
+  /** The person's own sent messages the agent already has, in timeline order: the sticky-header candidates. */
+  private sentBlocks(): UserBlock[] {
+    return this.blocks.filter(
       (block): block is UserBlock => block.kind === "user" && block.delivery === undefined && block.answer === undefined && block.text !== "",
     );
-    return sent.at(-1);
   }
 
   /**
-   * The copy over the top of the feed: the last message's text, collapsed to `PIN_LINES`, shown only while the message
-   * itself is out of the view — with it on screen there is nothing to scroll back to.
+   * The sticky header, a grouped-list section header of sent messages: it mirrors the most recent sent message whose
+   * own bubble has scrolled *entirely* above the feed's top edge — never one still in view — collapsed to `PIN_LINES`.
+   * The next sent bubble, rising through the edge, is itself what the person sees crossing; as it arrives it pushes the
+   * resting copy up and out (`pushPin`) and, once fully past, becomes the one the header mirrors. Above the first sent
+   * message, nothing heads the view, so the copy is hidden.
    */
   private updatePin(): void {
-    const block = this.lastSent();
-    if (block === undefined) {
+    const sent = this.sentBlocks();
+    const view = this.root.getBoundingClientRect();
+    if (sent.length === 0 || view.height === 0) {
+      // nothing sent yet, or a hidden tab with no layout: nothing to head
       this.pinned = undefined;
       this.pinSlot.hidden = true;
       return;
     }
-    if (block.id !== this.pinned || block.text !== this.pinText.textContent) {
-      this.pinned = block.id;
-      this.pinOpen = false; // a message they have not read back yet is pinned closed
-      this.pinText.textContent = block.text;
+    // One read pass over the candidates: the last whose bubble sits wholly above the edge heads the view.
+    const rects = sent.map((block) => this.rendered.get(block.id)?.element?.getBoundingClientRect());
+    let current: UserBlock | undefined;
+    let nextRect: DOMRect | undefined;
+    for (let index = 0; index < sent.length; index++) {
+      const rect = rects[index];
+      if (rect !== undefined && rect.bottom <= view.top) {
+        current = sent[index];
+        nextRect = rects[index + 1];
+      }
     }
-    this.pinSlot.hidden = !this.outOfView(block.id);
-    if (!this.pinSlot.hidden) this.showPin(); // measurable only once it is shown
-  }
-
-  /** True while a block's own row is not in the feed's view: its top edge is over or under the viewport. */
-  private outOfView(blockId: string): boolean {
-    const element = this.rendered.get(blockId)?.element;
-    if (element === undefined) return false;
-    const row = element.getBoundingClientRect();
-    const view = this.root.getBoundingClientRect();
-    if (view.height === 0) return false; // a hidden tab has no layout: nothing is out of view
-    return row.top < view.top || row.top > view.bottom;
+    if (current === undefined) {
+      this.pinned = undefined;
+      this.pinSlot.hidden = true;
+      return;
+    }
+    if (current.id !== this.pinned || current.text !== this.pinText.textContent) {
+      this.pinned = current.id;
+      this.pinOpen = false; // a message they have not read back yet is pinned closed
+      this.pinText.textContent = current.text;
+    }
+    this.pinSlot.hidden = false;
+    this.showPin(); // fold to the resting height before the push measures it
+    this.pushPin(view, nextRect);
   }
 
   /**
-   * Scrolls the feed to the real message the copy mirrors. Centred so it lands clear of the top edge where the copy
-   * docks — the view moving it into sight hides the copy through `outOfView`, with no fight for the top line. A target
-   * that is not in the DOM is a no-op.
+   * The push transition: the next sent bubble, rising through the feed's top edge, shoves the resting copy up by how
+   * far it has crossed, until the copy clears the edge just as that bubble is itself fully past (and becomes the one
+   * the header mirrors). Transform-based and driven by the scroll; under `prefers-reduced-motion` the copy snaps.
+   */
+  private pushPin(view: DOMRect, next: DOMRect | undefined): void {
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+    const restOffset = this.pinSlot.getBoundingClientRect().top - view.top + PIN_TOP_PX; // the copy's resting top, from the edge
+    const limit = restOffset + this.pin.getBoundingClientRect().height; // the push that lifts the copy's bottom to the edge
+    const crossed = next === undefined ? 0 : view.top - next.top; // how far the next bubble has gone above the edge
+    const push = reduce ? 0 : Math.max(0, Math.min(limit, crossed));
+    this.pin.style.transform = push > 0 ? `translateY(${-push}px)` : "";
+  }
+
+  /**
+   * Scrolls the feed to the real message the header mirrors now. Centred so it lands clear of the top edge where the
+   * copy docks — the view moving it into sight drops it below that edge, so an earlier message (or none) heads the
+   * view instead, with no fight for the top line. A target that is not in the DOM is a no-op.
    */
   private jumpToPinned(): void {
     if (this.pinned === undefined) return;

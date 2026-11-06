@@ -19,7 +19,8 @@ function isModel(value: unknown): value is ModelInfo {
     typeof value["provider"] === "string" &&
     typeof value["id"] === "string" &&
     (value["name"] === undefined || typeof value["name"] === "string") &&
-    (value["reasoning"] === undefined || typeof value["reasoning"] === "boolean")
+    (value["reasoning"] === undefined || typeof value["reasoning"] === "boolean") &&
+    (value["acceptsImages"] === undefined || typeof value["acceptsImages"] === "boolean")
   );
 }
 

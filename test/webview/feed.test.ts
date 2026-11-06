@@ -962,3 +962,96 @@ describe("the pinned copy of the last message", () => {
     expect(text()).toBe("уже у агента");
   });
 });
+
+describe("the sticky header follows the section in view", () => {
+  const slot = (): HTMLElement => root.querySelector(".pin-slot") as HTMLElement;
+  const pin = (): HTMLElement => root.querySelector('[data-role="pin"]') as HTMLElement;
+  const text = (): string | undefined => pin().querySelector(".user-text")?.textContent ?? undefined;
+  const reply: Block = { kind: "assistant", id: "a1", text: "ок", thinking: "", streaming: false };
+  const reply2: Block = { kind: "assistant", id: "a2", text: "ещё", thinking: "", streaming: false };
+
+  /** jsdom has no layout: the feed is 0–200, the copy's slot/bubble have fixed boxes, and `rects` places each entry. */
+  function place(rects: Record<string, [number, number]>): void {
+    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value(this: HTMLElement): DOMRect {
+        if (this === root) return { top: 0, bottom: 200, height: 200 } as DOMRect;
+        if (this.classList.contains("pin-slot")) return { top: 0, bottom: 0, height: 0 } as DOMRect;
+        if (this.classList.contains("pin")) return { top: 6, bottom: 46, height: 40 } as DOMRect;
+        const box = rects[this.dataset["block"] ?? ""] ?? [80, 120];
+        return { top: box[0], bottom: box[1], height: box[1] - box[0] } as DOMRect;
+      },
+    });
+  }
+
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 0 });
+  });
+
+  afterEach(() => {
+    delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+    delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+  });
+
+  const three: Block[] = [
+    { kind: "user", id: "u1", text: "первый" },
+    reply,
+    { kind: "user", id: "u2", text: "второй" },
+    reply2,
+    { kind: "user", id: "u3", text: "третий" },
+  ];
+
+  it("only_a_message_scrolled_wholly_past_heads_the_view_not_one_still_visible", () => {
+    const blocks: Block[] = [{ kind: "user", id: "u1", text: "первый" }, reply, { kind: "user", id: "u2", text: "второй" }];
+    place({ u1: [-60, -20], u2: [50, 90] }); // u1 fully above the edge, u2 still in view
+    feed.update(blocks, false);
+    expect(slot().hidden).toBe(false);
+    expect(text()).toBe("первый");
+
+    place({ u1: [10, 70], u2: [120, 160] }); // u1 now in view: its bottom is below the edge
+    feed.update(blocks, false);
+    expect(slot().hidden).toBe(true); // nothing is wholly past, so nothing heads the view — no premature stick
+  });
+
+  it("a_message_straddling_the_top_edge_is_in_transition_not_the_header", () => {
+    place({ u1: [-120, -80], u2: [-30, 40], u3: [120, 180] }); // u1 wholly past, u2 crossing the edge, u3 below
+    feed.update(three, false);
+    expect(slot().hidden).toBe(false);
+    expect(text()).toBe("первый"); // the last message wholly past, not the straddling one
+    expect(text()).not.toBe("второй"); // u2 is still visible, so it is never copied into the header
+  });
+
+  it("the_header_swaps_to_an_earlier_message_as_the_scroll_climbs", () => {
+    place({ u1: [-200, -160], u2: [-120, -80], u3: [120, 180] }); // u1 and u2 both wholly past
+    feed.update(three, false);
+    expect(text()).toBe("второй"); // the most recent one wholly past
+
+    place({ u1: [-120, -80], u2: [-30, 40], u3: [120, 180] }); // scrolled up: u2 back into transition
+    feed.update(three, false);
+    expect(text()).toBe("первый"); // swapped to the earlier one
+  });
+
+  it("the_next_bubble_crossing_the_edge_pushes_the_copy_with_a_transform", () => {
+    place({ u1: [-120, -80], u2: [-30, 40], u3: [120, 180] }); // u2 crossing: it pushes the copy of u1 up
+    feed.update(three, false);
+    expect(pin().style.transform).toMatch(/translateY\(-\d/);
+  });
+
+  it("a_resting_header_with_no_bubble_crossing_carries_no_transform", () => {
+    place({ u1: [-120, -80], u2: [120, 160], u3: [200, 240] }); // u2 far below the edge: nothing is pushing
+    feed.update(three, false);
+    expect(pin().style.transform).toBe("");
+  });
+
+  it("reduced_motion_snaps_instead_of_pushing", () => {
+    const prior = window.matchMedia;
+    (window as unknown as { matchMedia: unknown }).matchMedia = () => ({ matches: true });
+    try {
+      place({ u1: [-120, -80], u2: [-30, 40], u3: [120, 180] }); // u2 crossing, as in the push case
+      feed.update(three, false);
+      expect(pin().style.transform).toBe(""); // no transform: an instant swap, not a slide
+    } finally {
+      (window as unknown as { matchMedia: unknown }).matchMedia = prior;
+    }
+  });
+});

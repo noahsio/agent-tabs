@@ -218,7 +218,7 @@ export class ModelLadder {
 
   // ---------- internals ----------
 
-  /** The rung the session's model stands on, else -1: an unknown model starts the search from the top. */
+  /** The rung the session's model stands on, else -1: a model on no rung has nowhere below it, so the walk stops. */
   private rungOfCurrentModel(): number {
     const model = this.session.model();
     if (model === undefined) return -1;
@@ -279,6 +279,15 @@ export class ModelLadder {
   }
 
   private async walkOn(walk: Walk, failure: FailureClass): Promise<void> {
+    if (walk.at < 0) {
+      // The session's model is on no rung, so the ladder has no model *below* it to fall to. The walk only ever steps
+      // down from where the session stands; with nowhere below it, it stops and asks rather than climbing from the top
+      // to a model the person did not choose — «на Sol? не тащи меня в Claude».
+      this.walk = undefined;
+      this.show(undefined);
+      this.session.note("warn", `${REASON[failure]} — текущая модель не на лесенке, дальше решайте сами`);
+      return;
+    }
     const { rungs } = this.session.ladder();
     const served = await this.session.models();
     if (this.walk !== walk) return; // interrupted, or another message took over

@@ -594,11 +594,58 @@ describe("the ladder's walk", () => {
     expect(session.lastNote).toBe("Дальше некуда: перепробовал 1 модель");
   });
 
-  it("a_session_on_a_model_outside_the_ladder_starts_from_the_top", async () => {
+  it("a_session_on_a_model_outside_the_ladder_stops_and_asks_rather_than_climbing", async () => {
+    // The model the session is on is on no rung, so the ladder has nothing *below* it to fall to. It must never climb
+    // to a model the person did not choose, so it stops and asks instead of starting from the top.
     session.current = { provider: "gw-q", id: "dsv41-flash-uncensored" };
     begin();
     await emptyTurn();
-    expect(session.switched).toEqual([OPUS_5]);
+    expect(session.switched).toEqual([]);
+    expect(session.sent).toEqual([]);
+    expect(session.lastNote).toBe("Модель ответила пусто — текущая модель не на лесенке, дальше решайте сами");
+    expect(session.notes.at(-1)?.level).toBe("warn");
+    expect(session.views.at(-1)).toBeUndefined();
+  });
+
+  it("a_session_on_the_bottom_model_rung_never_climbs_to_a_higher_one", async () => {
+    // The person's own case: on GPT 6.1 Sol (the ladder's last model rung), a refusal must go *down* to «спросить»,
+    // never back up to a Claude rung above it.
+    session.current = GPT;
+    begin();
+    ladder.observe(refusalEnd());
+    await flush();
+    expect(session.switched).toEqual([]);
+    expect(session.sent).toEqual([]);
+    expect(session.lastNote).toBe("Модель отказалась — дальше решайте сами");
+    expect(session.views.at(-1)).toBeUndefined();
+  });
+
+  it("a_session_on_a_middle_rung_steps_down_only", async () => {
+    // Anchored at Opus 4.8 (rung 3), an empty answer goes to the rung below (GPT), never back up to Opus 5 / Opus 5.5.
+    session.current = OPUS_4_8;
+    begin();
+    await emptyTurn();
+    expect(session.switched).toEqual([GPT]);
+  });
+
+  it("return_after_a_walk_from_a_lower_rung_goes_back_to_that_model_not_rung_one", async () => {
+    // The session started the message on Opus 4.8 (not the top rung). After a rescue, «вернуться» offers that model
+    // back — the one the message started on — not the ladder's rung 1.
+    session.current = OPUS_4_8;
+    begin();
+    await emptyTurn(); // steps down to GPT
+    expect(session.switched).toEqual([GPT]);
+    session.isRunning = true;
+    ladder.observe({ type: "agent_start" });
+    ladder.observe(goodEnd());
+    session.isRunning = false;
+    ladder.observe({ type: "agent_settled" });
+    await flush();
+    expect(session.views.at(-1)).toEqual({
+      state: "settled",
+      model: "GPT 6.1 Sol",
+      back: { provider: "gw-anthropic", id: "claude-opus-4-8", label: "Opus 4.8" },
+    });
   });
 
   /**

@@ -406,6 +406,49 @@ describe("SessionController", () => {
       expect(await controller.dequeue("nope")).toEqual({ outcome: "delivered" });
       expect(ofType("dequeue_message")).toHaveLength(0);
     });
+
+    // «Стоп» ends the running turn, but OmO does not start what was queued behind it (measured on 5.1.59: the follow_up
+    // stays `queued` forever). The person expects it to go out, so the tab delivers the queue once the turn has ended.
+    it("stop_delivers_the_queued_message_once_the_turn_ends", async () => {
+      daemon.on("dequeue_message", (request) => ({ data: { queuedId: request["queuedId"], status: "removed" } }));
+      controller = await SessionController.create(manager, "/tmp");
+      await queued("m-1", "позже");
+      await controller.stop();
+      expect(ofType("dequeue_message")).toHaveLength(0); // the turn is still ending: not yet
+      daemon.push(frame({ type: "agent_end", aborted: true }));
+      daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "done", runId: "r1" } }));
+      await settle(() => ofType("prompt").length === 1);
+
+      expect(ofType("dequeue_message")[0]).toMatchObject({ queuedId: "q_1" }); // taken out of OmO's queue first
+      expect((ofType("prompt")[0] as Frame)["message"]).toBe("позже"); // then sent as the next turn
+      expect(ofType("prompt")).toHaveLength(1); // exactly once
+      expect(controller.state.blocks.some((block) => block.kind === "user" && block.text === "позже" && block.delivery?.state !== "queued")).toBe(true);
+    });
+
+    it("stop_with_an_empty_queue_sends_only_the_abort", async () => {
+      controller = await SessionController.create(manager, "/tmp");
+      daemon.push(frame({ type: "agent_start" }));
+      await settle(() => controller?.state.running === true);
+      await controller.stop();
+      daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "done", runId: "r1" } }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(ofType("abort")).toHaveLength(1);
+      expect(ofType("dequeue_message")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(0);
+    });
+
+    it("a_queued_message_omo_delivered_after_the_stop_is_not_sent_again", async () => {
+      daemon.on("dequeue_message", () => ({ data: { queuedId: "q_1", status: "already_delivered", reason: "delivered", action: "none" } }));
+      controller = await SessionController.create(manager, "/tmp");
+      await queued("m-1", "позже");
+      await controller.stop();
+      daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "done", runId: "r1" } }));
+      await settle(() => ofType("dequeue_message").length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      expect(ofType("prompt")).toHaveLength(0); // OmO ran it after all: never a second copy
+    });
   });
 
   describe("agents history", () => {
@@ -1267,6 +1310,13 @@ describe("SessionController", () => {
         },
       });
 
+    /** A real turn result: the model answered, so the message that turn answered is delivered and must not be resent. */
+    const goodTurn = (): Frame =>
+      frame({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "готово" }], stopReason: "endTurn", timing: { requestedAt: 1, endedAt: 5000 } },
+      });
+
     /** OmO's own stall row, as `entry_appended` carries it. */
     const stall = (openWork: Frame = { kind: "active-goal", goalId: "81ebe93c" }): Frame =>
       frame({
@@ -1374,6 +1424,46 @@ describe("SessionController", () => {
       expect(notices()).toEqual([]);
       expect(ofType("unload_session")).toHaveLength(0);
       expect(ofType("prompt")).toHaveLength(1);
+    });
+
+    it("does_not_resend_a_delivered_message_when_a_later_autonomous_turn_is_aborted", async () => {
+      // The person's own shape: a message they sent earlier was answered (delivered), then OmO continued the goal by
+      // itself and killed that autonomous turn — with no new message from the person. The earlier message must not be
+      // put back in, or the person sees a second copy of what they already sent.
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(goodTurn()); // the model answered: the message is delivered
+      daemon.push(frame({ type: "agent_settled" }));
+      daemon.push(frame({ type: "agent_start" })); // OmO carries the goal on by itself
+      daemon.push(deadTurn());
+      daemon.push(stall()); // active-goal
+      await settle(() => notices().length > 0);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(ofType("unload_session")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(1); // the earlier, delivered message is never resent
+      expect(notices()).toContain("Отправьте сообщение заново — а если повторится, перезапустите сессию кнопкой «Снять зависание»");
+    });
+
+    it("resends_only_the_newly_aborted_message_after_an_earlier_one_was_delivered", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("первое сообщение", "auto", [], "m-a");
+      daemon.push(frame({ type: "agent_start" }));
+      await settle(() => controller?.state.running === true);
+      daemon.push(goodTurn()); // first message delivered
+      daemon.push(frame({ type: "agent_settled" }));
+      await settle(() => controller?.state.running === false);
+      await controller.send("второе сообщение", "auto", [], "m-b"); // a fresh message whose turn dies instantly
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall({ kind: "none" }));
+      await settle(() => ofType("prompt").length === 3);
+
+      const messages = (ofType("prompt") as Frame[]).map((request) => request["message"]);
+      expect(messages).toEqual(["первое сообщение", "второе сообщение", "второе сообщение"]); // only the second one is put back
+      expect((ofType("prompt")[2] as Frame)["clientMessageId"]).not.toBe("m-b"); // and under a new id
+      expect(ofType("unload_session")).toHaveLength(1);
     });
 
     it("needs_both_records_and_only_this_shape", async () => {

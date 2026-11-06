@@ -320,9 +320,11 @@ button.icon-btn:disabled {
   color: var(--fg);
 }
 
-/* ---------- the last message, pinned over the feed ----------
+/* ---------- the sticky header of sent messages ----------
    A sticky slot of no height at the top of the scroll content: the copy floats over the timeline without taking any of
-   the feed's height, so it can come and go without moving the line the person is reading. */
+   the feed's height, so it can come and go without moving the line the person is reading. It mirrors the sent message
+   heading the view; the next one, rising through the top edge, pushes it up and out (a scroll-driven transform set on
+   `.pin`, so no CSS transition fights the scroll — reduced motion snaps it in feed.ts). */
 
 .pin-slot {
   position: sticky;
@@ -2312,6 +2314,13 @@ button.uimg.att {
   font-size: 12px;
 }
 
+.image-warn {
+  padding: 6px 16px 0;
+  color: var(--err);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 /* ---------- drop veil and picture viewer ---------- */
 
 .drop {
@@ -3208,13 +3217,16 @@ button.am-node:focus-visible {
   border-radius: 11px 0 0 11px;
 }
 
-/* The fill ends under the knob's centre. */
+/* The fill runs the whole knob cell, so the blue reaches under the knob, not just to its centre (Claude's slider). */
 .pop .slider .notch.cur {
-  background: linear-gradient(to right, var(--vscode-button-background, #0078d4) 50%, transparent 50%);
+  background: var(--vscode-button-background, #0078d4);
 }
 
 .pop .slider .notch:first-child.cur {
-  background: linear-gradient(to right, var(--vscode-button-background, #0078d4) 60%, transparent 60%);
+  background: var(--vscode-button-background, #0078d4);
+  margin-left: -2px;
+  padding-left: 2px;
+  border-radius: 11px 0 0 11px;
 }
 
 .pop .slider .notch.cur::before {

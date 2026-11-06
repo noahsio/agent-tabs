@@ -77,6 +77,9 @@ const PENDING_MODE_MS = 3_000;
 /** The send button's own words: idle it prompts, mid-turn the message goes behind the turn. */
 const SEND_LABEL = "Отправить";
 const QUEUE_LABEL = "В очередь после текущего хода";
+/** The warning line and the send button's reason while a text-only model has an image attached. */
+const IMAGE_WARN = (model: string): string => `${model} не принимает картинки — они не уйдут. Смени модель или убери вложение.`;
+const SEND_BLOCKED_IMAGE = "Модель не принимает картинки — убери вложение или смени модель";
 
 /**
  * A turn still running this long after «Стоп» is wedged: OmO answered the abort but the turn never ended. That one
@@ -185,6 +188,8 @@ export class Composer {
   readonly box: HTMLElement;
   private readonly thumbs: HTMLElement;
   private readonly errors: HTMLElement;
+  /** The quiet line that warns a text-only model will drop the attached image; hidden otherwise. */
+  private readonly imageWarn: HTMLElement;
   private readonly notice: HTMLElement;
   private noticeTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly picker: HTMLInputElement;
@@ -222,6 +227,10 @@ export class Composer {
   /** A toggle the host has not echoed yet. */
   private pendingMode: { mode: NextMode | undefined; timer: ReturnType<typeof setTimeout> } | undefined;
   private readonly codec: ImageCodec;
+  /** The selected model's image capability as the catalog last said: `false` is known text-only; `undefined` is unknown (never warned). */
+  private modelAcceptsImages: boolean | undefined;
+  /** The selected model's display name, for the warning line. */
+  private selectedModelName: string | undefined;
   private attachments: Attachment[] = [];
   /** Pills the text lost, kept in case the editor's own undo brings one back. */
   private readonly retired = new Map<string, Attachment>();
@@ -279,6 +288,8 @@ export class Composer {
 
     this.thumbs = el("div", { class: "thumbs", "data-role": "thumbs" });
     this.errors = el("div", { class: "attach-notes", "data-role": "attach-notes", role: "status" });
+    this.imageWarn = el("div", { class: "image-warn", "data-role": "image-warn", role: "alert" });
+    this.imageWarn.hidden = true;
     this.notice = el("div", { class: "attach-notice", "data-role": "attach-notice", role: "status" });
     this.notice.hidden = true;
     this.picker = el("input", { type: "file", accept: "image/*", multiple: "", "data-role": "picker" });
@@ -360,6 +371,7 @@ export class Composer {
       { class: "composer-box" },
       this.thumbs,
       this.errors,
+      this.imageWarn,
       this.notice,
       this.input,
       this.dropCaret,
@@ -378,6 +390,14 @@ export class Composer {
     this.updateHistory(state.blocks);
     this.running = state.running;
     this.stop.hidden = !state.running;
+
+    const models = message.models ?? [];
+    const auto = tab.modelMode === "auto";
+    const selected = auto ? (state.autoModel ?? state.model) : state.model;
+    const name = modelName(selected, models);
+    this.selectedModelName = name;
+    this.modelAcceptsImages = selected === undefined ? undefined : models.find((item) => item.provider === selected.provider && item.id === selected.id)?.acceptsImages;
+
     this.refreshSend();
     this.watchWedge(state);
 
@@ -385,9 +405,6 @@ export class Composer {
     this.agentsText.textContent = label;
     this.agentsDot.classList.toggle("on", label !== "0 агентов");
 
-    const models = message.models ?? [];
-    const auto = tab.modelMode === "auto";
-    const name = modelName(auto ? (state.autoModel ?? state.model) : state.model, models);
     this.modelText.textContent = auto ? (name !== undefined ? `Auto · ${name}` : "Auto") : (name ?? "Модель");
     this.modelLevel.textContent = state.thinkingLevel ?? "";
     this.modelLevel.hidden = state.thinkingLevel === undefined || state.thinkingLevel === "";
@@ -983,14 +1000,28 @@ export class Composer {
    */
   private get sendable(): boolean {
     if (this.wedgeState === "working") return false;
+    if (this.imageBlocked) return false;
     if (this.attachments.some((attachment) => attachment.status === "pending")) return false;
     return this.field.value.trim() !== "" || this.attachments.some(isReady);
   }
 
-  /** The send button: muted while there is nothing to send, and it says where the message goes. */
+  /** A picture is attached (ready or still being prepared); an errored one would not go out, so it does not count. */
+  private get hasImageAttachment(): boolean {
+    return this.attachments.some((attachment) => attachment.status === "ready" || attachment.status === "pending");
+  }
+
+  /** A known-text-only model has an image attached: the image would be silently dropped, so the send is held. */
+  private get imageBlocked(): boolean {
+    return this.modelAcceptsImages === false && this.hasImageAttachment;
+  }
+
+  /** The send button: muted while there is nothing to send, and it says where the message goes; the image warning follows the same condition. */
   private refreshSend(): void {
+    const blocked = this.imageBlocked;
+    this.imageWarn.hidden = !blocked;
+    if (blocked) this.imageWarn.textContent = IMAGE_WARN(this.selectedModelName ?? "Эта модель");
     this.send.disabled = !this.sendable;
-    const label = this.running ? QUEUE_LABEL : SEND_LABEL;
+    const label = blocked ? SEND_BLOCKED_IMAGE : this.running ? QUEUE_LABEL : SEND_LABEL;
     this.send.title = label;
     this.send.setAttribute("aria-label", label);
   }

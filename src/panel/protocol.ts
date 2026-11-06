@@ -7,8 +7,21 @@ import type { ReconnectView } from "../sessions/reconnect";
 import type { LoginEvent } from "../settings/accounts";
 import { isSettingsSection, type FieldError, type SettingsSection, type SettingsState } from "../settings/protocol";
 
-/** `reasoning`: OmO's own word on whether the model thinks (absent when its catalog does not say). */
-export type ModelInfo = { provider: string; id: string; name?: string; reasoning?: boolean };
+/**
+ * `reasoning`: OmO's own word on whether the model thinks (absent when its catalog does not say).
+ * `acceptsImages`: whether the model takes image input (from its `input` modalities); absent when the catalog says
+ * nothing about `input`, so a model of unknown capability is never warned against.
+ */
+export type ModelInfo = { provider: string; id: string; name?: string; reasoning?: boolean; acceptsImages?: boolean };
+
+/**
+ * Whether a model takes image input, read from the OmO Model object's `input` modalities. `undefined` when `input` is
+ * not a list (the catalog is silent): a model of unknown capability must never be warned against.
+ */
+export function acceptsImageInput(input: unknown): boolean | undefined {
+  if (!Array.isArray(input)) return undefined;
+  return input.includes("image");
+}
 
 /**
  * The tab as the webview sees it: its saved state plus whether its session is pinned (the one source of that flag),

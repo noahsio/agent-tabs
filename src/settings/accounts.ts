@@ -1,7 +1,7 @@
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { redact } from "../env";
-import type { ModelInfo } from "../panel/protocol";
+import { acceptsImageInput, type ModelInfo } from "../panel/protocol";
 import type { RpcClient } from "../rpc/client";
 
 export type SubscriptionProvider = "anthropic-subscription" | "chatgpt-subscription";
@@ -114,6 +114,8 @@ export class AccountsService {
       const model: ModelInfo = { provider: item["provider"], id: item["id"] };
       if (typeof item["name"] === "string") model.name = item["name"];
       if (typeof item["reasoning"] === "boolean") model.reasoning = item["reasoning"];
+      const accepts = acceptsImageInput(item["input"]);
+      if (accepts !== undefined) model.acceptsImages = accepts;
       models.push(model);
     }
     return models;

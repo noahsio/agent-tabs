@@ -5,7 +5,7 @@ import type { ChatState, ImageRef, ModelRef } from "../chat/model";
 import { addOutgoing, applyEntries, applyFrame, applyLifecycle, applyTaskList, dropOutgoing, goalCardNotice, initialState, lifecycleRunning, resolveDialog, reviseQueued, stoppedGoalNotice, taskStatus } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import { redact } from "../env";
-import type { AgentDetails } from "../panel/protocol";
+import { acceptsImageInput, type AgentDetails } from "../panel/protocol";
 import { BARRIER_DEADLINE_MS, type Checkpointer } from "../rewind/checkpointer";
 import { readSessionHeader } from "../rewind/fork";
 import type { SentMode } from "../rewind/store";
@@ -197,10 +197,19 @@ export class SessionController extends EventEmitter {
   /**
    * The message a turn of ours is answering, and whether its one automatic recovery from a liveness abort is spent.
    * `key` is the person's own message id — a recovery's resend inherits it, so its own death cannot buy a second try.
+   * `delivered` is set once a real turn result landed for it: a later `"system"` abort (an autonomous goal-continuation
+   * turn OmO killed by itself) must never resend a message the model already answered — that is the second copy the
+   * person saw. Only a message whose own turn died with zero effect is safe to put back.
    */
-  private answering: { key: string; id: string; text: string; images: OutgoingImage[]; recovered: boolean } | undefined;
+  private answering: { key: string; id: string; text: string; images: OutgoingImage[]; recovered: boolean; delivered: boolean } | undefined;
   /** Set while a recovery's resend goes out: it inherits the spent attempt instead of starting a new one. */
   private resending = false;
+  /**
+   * The person pressed «Стоп» while a message was queued behind the running turn. OmO aborts the turn but does not
+   * start the queued message by itself (measured on 5.1.59: the follow_up stays `queued` with its `queuedId` forever),
+   * so once the turn has actually ended the tab delivers the queue itself — the next turn is what the person queued.
+   */
+  private drainOnStop = false;
   /** The turn's last assistant message was one OmO abandoned as it was being made; the id it was answering, if named. */
   private deadTurn: { id: string | undefined } | undefined;
   /** A compaction of ours is in flight: the abort it sends is `"system"` too, and it is not a hang. */
@@ -379,7 +388,7 @@ export class SessionController extends EventEmitter {
       !this.nameSent && normalizeSessionName(text) !== "" && this.current.title === undefined && !this.current.blocks.some((block) => block.kind === "user" && block.text.trim() !== "");
     // What the next turn is answering, for a liveness abort to put back; a recovery's own resend inherits the attempt.
     const inherited = this.resending ? this.answering : undefined;
-    this.answering = { key: inherited?.key ?? clientMessageId, id: clientMessageId, text, images, recovered: inherited !== undefined };
+    this.answering = { key: inherited?.key ?? clientMessageId, id: clientMessageId, text, images, recovered: inherited !== undefined, delivered: false };
     this.showOutgoing(clientMessageId, text, images);
     const fields = { message: text, clientMessageId, ...imageParts };
     /**
@@ -507,10 +516,45 @@ export class SessionController extends EventEmitter {
         // a dialog that is already gone must not block the abort
       }
     }
+    const hadQueue = this.current.blocks.some((block) => block.kind === "user" && block.delivery?.state === "queued");
     try {
       await this.request("abort");
     } catch (error) {
       this.fail(error);
+      return;
+    }
+    // The person expects what they queued to go out now. OmO's abort does not drain the queue, so the tab does: if the
+    // turn has already ended, deliver it at once; otherwise mark it and let the turn-end do it (never twice — the drain
+    // takes each message out of OmO's queue before re-sending, so a message OmO did run is skipped).
+    if (!hadQueue) return;
+    if (this.current.running) this.drainOnStop = true;
+    else await this.drainQueueAfterStop();
+  }
+
+  /**
+   * Delivers what was queued behind a turn the person stopped. Each still-queued message is first removed from OmO's
+   * own queue (`dequeue_message`); only if that removal succeeds is it re-sent, so a message OmO delivered after all is
+   * never sent a second time. Order is kept, and the first one prompts a new turn.
+   */
+  private async drainQueueAfterStop(): Promise<void> {
+    const queued = this.current.blocks.filter((block) => block.kind === "user" && block.delivery?.state === "queued");
+    for (const block of queued) {
+      const queuedId = this.queuedId(block.id);
+      if (queuedId === undefined) continue;
+      let removed: boolean;
+      try {
+        const data = await this.request<Frame>("dequeue_message", { queuedId });
+        removed = data?.["status"] === "removed";
+      } catch (error) {
+        this.fail(error);
+        return;
+      }
+      if (!removed) continue; // OmO delivered it after all: it must not be sent again
+      const sent = this.outbox.get(block.id);
+      const text = sent?.text ?? (block.kind === "user" ? block.text : "");
+      const images = sent?.images ?? [];
+      this.takeBack(block.id);
+      if (text.trim() !== "" || images.length > 0) await this.send(text, "auto", images);
     }
   }
 
@@ -608,10 +652,16 @@ export class SessionController extends EventEmitter {
     const type = frame["type"];
     if (type === "agent_start" || type === "turn_start") this.deadTurn = undefined; // a new turn: the old one's shape is spent
     if (type === "compaction_end") this.ownCompact = false;
-    if (type === "message_end" && instantDeadTurn(frame["message"])) {
+    if (type === "message_end") {
       const message = isObject(frame["message"]) ? frame["message"] : {};
-      const id = typeof frame["clientMessageId"] === "string" ? frame["clientMessageId"] : typeof message["clientMessageId"] === "string" ? message["clientMessageId"] : undefined;
-      this.deadTurn = { id };
+      if (instantDeadTurn(frame["message"])) {
+        const id = typeof frame["clientMessageId"] === "string" ? frame["clientMessageId"] : typeof message["clientMessageId"] === "string" ? message["clientMessageId"] : undefined;
+        this.deadTurn = { id };
+      } else if ((message["role"] === undefined || message["role"] === "assistant") && this.answering !== undefined) {
+        // A real assistant turn result landed (words, a tool call, or any non-instant-dead end): the message it answered
+        // is delivered and must never be auto-resent — otherwise a later autonomous abort puts a second copy of it in.
+        this.answering.delivered = true;
+      }
     }
     if (type !== "entry_appended") return;
     const work = systemAbortStall(frame["entry"]);
@@ -643,6 +693,7 @@ export class SessionController extends EventEmitter {
     if (
       answering === undefined ||
       answering.recovered ||
+      answering.delivered || // a real turn already answered this message: the abort was a later autonomous turn, not this one
       this.released ||
       durableId === undefined ||
       (deadId !== undefined && deadId !== answering.id) || // the dead turn was answering some other message
@@ -823,7 +874,7 @@ export class SessionController extends EventEmitter {
     this.log?.(text);
   }
 
-  async models(): Promise<{ provider: string; id: string; name?: string }[]> {
+  async models(): Promise<{ provider: string; id: string; name?: string; acceptsImages?: boolean }[]> {
     let data: Frame;
     try {
       data = await this.request<Frame>("get_available_models");
@@ -831,13 +882,15 @@ export class SessionController extends EventEmitter {
       throw new Error(redact(errorText(error), this.dm.secrets));
     }
     const list: unknown[] = Array.isArray(data?.["models"]) ? data["models"] : [];
-    const result: { provider: string; id: string; name?: string }[] = [];
+    const result: { provider: string; id: string; name?: string; acceptsImages?: boolean }[] = [];
     for (const item of list) {
       if (!isObject(item) || typeof item["provider"] !== "string" || typeof item["id"] !== "string") continue;
+      const accepts = acceptsImageInput(item["input"]);
       result.push({
         provider: item["provider"],
         id: item["id"],
         ...(typeof item["name"] === "string" ? { name: item["name"] } : {}),
+        ...(accepts !== undefined ? { acceptsImages: accepts } : {}),
       });
     }
     return result;
@@ -1253,9 +1306,14 @@ export class SessionController extends EventEmitter {
     if (this.checkpointer !== undefined && this.durableId !== undefined && this.sessionCwd !== undefined) {
       this.checkpointer.observe(this.durableId, this.sessionCwd, frame);
     }
+    const wasRunning = this.current.running;
     this.commit(applyFrame(this.current, frame, this.sink));
     const type = frame["type"];
     if (type === "agent_settled" || (type === "session_lifecycle" && lifecycleRunning(frame["lifecycle"]) === false)) this.turnStarting = false;
+    if (this.drainOnStop && wasRunning && !this.current.running) {
+      this.drainOnStop = false; // the stopped turn has ended: deliver the queue once
+      void this.drainQueueAfterStop();
+    }
     if (type === "agent_settled" || type === "queue_update" || (type === "message_start" && frame["message"]?.["role"] === "user")) this.pruneOutbox();
     if (frame["type"] === "model_changed") this.emit("model");
     if (frame["type"] === "agent_settled" || frame["type"] === "compaction_end") void this.refreshContext();

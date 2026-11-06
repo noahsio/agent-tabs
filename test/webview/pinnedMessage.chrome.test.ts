@@ -132,7 +132,13 @@ describe.skipIf(!hasChrome)("the last message pinned over the feed (headless Chr
       `(() => { const r = document.querySelector('[data-role="pin-jump"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
     );
     await page.click(jump);
-    await waitFor(page, `document.querySelector(".pin-slot").hidden === true`); // the message came into view, so the copy went
+    // The smooth scroll settles with the message back in view (and so the copy gone); waiting on its position, not just
+    // on the copy, lets the animation finish — the copy now leaves the moment the message's bottom clears the top edge.
+    await waitFor(
+      page,
+      `(() => { const r = document.querySelector('[data-block="u1"]').getBoundingClientRect(); const f = document.querySelector("main.feed").getBoundingClientRect(); return r.top >= f.top && r.top <= f.bottom; })()`,
+    );
+    expect(await page.evaluate<boolean>(`document.querySelector(".pin-slot").hidden`)).toBe(true); // the message is in view, so the copy went
     const after = await page.evaluate<number>(`document.querySelector("main.feed").scrollTop`);
     expect(after).toBeLessThan(before); // the feed moved up toward the message at the top
 
