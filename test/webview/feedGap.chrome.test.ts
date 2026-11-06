@@ -53,40 +53,41 @@ describe.skipIf(!hasChrome)("a sent bubble sits close under what came before (he
     await page.screenshot(`${SHOTS}/stuck-snug.png`);
   });
 
-  it("a_stuck_head_has_an_opaque_full_width_backing_so_nothing_bleeds_through", async () => {
-    await page.evaluate(`(() => { const f=document.querySelector("main.feed"); const r=document.querySelector('[data-block="u1"]').getBoundingClientRect(); f.scrollTop=(r.top-f.getBoundingClientRect().top)+170; })()`);
+  it("a_stuck_head_has_a_soft_edged_full_width_backing_that_reaches_the_top", async () => {
+    await page.evaluate(`(() => { const f=document.querySelector("main.feed"); const r=document.querySelector('[data-block="u1"]').getBoundingClientRect(); f.scrollTop=(r.top-f.getBoundingClientRect().top)+320; })()`);
     await settle(page);
-    const band = await page.evaluate<{ stuck: boolean; bg: string; alpha: number; left: number; right: number; feedLeft: number; feedRight: number; aboveFade: boolean }>(`(() => {
+    const band = await page.evaluate<{ stuck: boolean; aboveFade: boolean; content: string; bg: string; left: number; right: number; top: number }>(`(() => {
       const e = document.querySelector('[data-block="u1"]');
       const cs = getComputedStyle(e);
-      const m = cs.backgroundColor.match(/[\\d.]+/g) || [];
-      const r = e.getBoundingClientRect();
-      const f = document.querySelector("main.feed").getBoundingClientRect();
+      const bf = getComputedStyle(e, "::before"); // the backing is a pseudo, not a solid entry fill
       return {
         stuck: e.classList.contains("is-stuck"),
-        bg: cs.backgroundColor,
-        alpha: m.length === 4 ? Number(m[3]) : 1, // rgb (no alpha) counts as fully opaque
-        left: r.left, right: r.right, feedLeft: f.left, feedRight: f.right,
         aboveFade: Number(cs.zIndex) > 3, // over the top fade, so the time stays crisp
+        content: bf.content,
+        bg: bf.backgroundImage,
+        left: parseFloat(bf.left), right: parseFloat(bf.right), top: parseFloat(bf.top),
       };
     })()`);
     expect(band.stuck).toBe(true);
-    expect(band.alpha).toBe(1); // a solid fill: earlier rows cannot show through it
-    expect(band.bg).not.toMatch(/rgba\\(0, 0, 0, 0\\)|transparent/); // and it is an actual colour, not none
-    expect(band.left).toBeLessThanOrEqual(band.feedLeft + 1); // the band spans the full feed width, into the gutters
-    expect(band.right).toBeGreaterThanOrEqual(band.feedRight - 1);
     expect(band.aboveFade).toBe(true); // the head sits over the fade, so the timestamp is fully visible
+    expect(band.content).not.toBe("none"); // the backing pseudo is present
+    expect(band.bg).toMatch(/linear-gradient/); // a soft-edged fill, not a hard-edged solid box
+    expect(band.bg).toMatch(/,\s*0\)/); // it dissolves to transparent at an edge (no rectangle line)
+    expect(band.left).toBeLessThan(0); // stretches into the side gutters: the full feed width, no bleed beside the bubble
+    expect(band.right).toBeLessThan(0);
+    expect(band.top).toBeLessThan(0); // reaches up past the feed's top edge (clipped under the header): no strip above
+    await page.screenshot(`/tmp/agent-tabs-shots/stuck-blend/stuck.png`); // rows scrolling behind: no rectangle, no gap, no bleed
   });
 
-  it("an_in_flow_sent_bubble_keeps_the_transparent_spacing", async () => {
+  it("an_in_flow_sent_bubble_has_no_backing_at_all", async () => {
     await page.evaluate(`document.querySelector("main.feed").scrollTop = 0`); // u1 back in its place, not stuck
     await settle(page);
-    const inflow = await page.evaluate<{ stuck: boolean; alpha: number }>(`(() => {
+    await page.screenshot(`/tmp/agent-tabs-shots/stuck-blend/inflow.png`); // unchanged: thin time, snug bubble, no backing
+    const inflow = await page.evaluate<{ stuck: boolean; bg: string }>(`(() => {
       const e = document.querySelector('[data-block="u1"]');
-      const m = getComputedStyle(e).backgroundColor.match(/[\\d.]+/g) || [];
-      return { stuck: e.classList.contains("is-stuck"), alpha: m.length === 4 ? Number(m[3]) : 1 };
+      return { stuck: e.classList.contains("is-stuck"), bg: getComputedStyle(e, "::before").backgroundImage };
     })()`);
     expect(inflow.stuck).toBe(false);
-    expect(inflow.alpha).toBe(0); // in flow the entry is transparent — the opaque backing is the stuck state only
+    expect(inflow.bg).toBe("none"); // in flow there is no backing pseudo — the opaque fill is the stuck state only
   });
 });
