@@ -135,6 +135,21 @@ const policyRejection = (): Record<string, unknown> => ({
   type: "session_lifecycle",
   lifecycle: { state: "done", lastTurnEnd: { endedBy: "policy-rejection", budgetSpent: false, deadlineStop: false } },
 });
+/** The turn the person stopped: aborted having answered nothing, but not instant-dead — it ran a while first. */
+const userAbortEnd = (): Record<string, unknown> => ({
+  type: "message_end",
+  message: { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "aborted", errorMessage: "The operation was aborted.", timing: { requestedAt: 1, endedAt: 9_000 } },
+});
+/** OmO's own verdict on the turn the person stopped (research doc §2): `lastTurnEnd.endedBy === "user-abort"`. */
+const userAbortLifecycle = (): Record<string, unknown> => ({
+  type: "session_lifecycle",
+  lifecycle: { state: "done", lastTurnEnd: { endedBy: "user-abort", budgetSpent: false, deadlineStop: false } },
+});
+/** A compaction/deadline/liveness abort of OmO's own: aborted, `"system"`, and no failure of any model. */
+const systemAbortLifecycle = (): Record<string, unknown> => ({
+  type: "session_lifecycle",
+  lifecycle: { state: "done", lastTurnEnd: { endedBy: "system-abort", budgetSpent: false, deadlineStop: false } },
+});
 
 /** Lets every await inside a step run, without crossing the abort or silence deadlines. */
 const flush = (): Promise<void> => vi.advanceTimersByTimeAsync(5).then(() => undefined);
@@ -214,6 +229,64 @@ describe("the ladder's walk", () => {
     expect(session.calls).toEqual([]);
     expect(session.noteTexts).toEqual([]);
     expect(session.views.at(-1)).toBeUndefined();
+  });
+
+  /**
+   * THE BUG (user Stop must not step the ladder): the person typed a message, saw the agents working, and pressed
+   * STOP. The turn ended aborted having produced no text or tool call — an "empty answer" by shape — but a user Stop
+   * is their own, deliberate decision, never a model failure. The ladder must not step, switch the model, send
+   * «продолжай», or ask for a compaction. Stop means stop.
+   */
+  it("a_user_stop_must_not_step_the_ladder", async () => {
+    begin();
+    ladder.noteStop(); // the composer's «Стоп» reaches the ladder the moment the click lands
+    session.isRunning = false;
+    ladder.observe(userAbortEnd());
+    ladder.observe(userAbortLifecycle());
+    ladder.observe({ type: "agent_settled" });
+    await flush();
+    expect(session.switched).toEqual([]); // no model switch
+    expect(session.sent).toEqual([]); // no «продолжай», no resend of any kind
+    expect(session.calls).toEqual([]); // nothing aborted, switched, sent or asked
+    expect(session.noteTexts).toEqual([]);
+    expect(session.views.at(-1)).toBeUndefined();
+  });
+
+  it("a_user_abort_seen_only_in_the_frames_still_never_steps", async () => {
+    // even with no composer signal — an abort OmO lays at the person's feet, read off the frames alone, in either order
+    for (const order of [[userAbortEnd(), userAbortLifecycle()], [userAbortEnd(), { type: "agent_settled" }, userAbortLifecycle()]]) {
+      session = new FakeSession();
+      ladder = new ModelLadder(session);
+      begin();
+      session.isRunning = false;
+      for (const frame of order) ladder.observe(frame);
+      await flush();
+      expect(session.switched).toEqual([]);
+      expect(session.sent).toEqual([]);
+      expect(session.calls).toEqual([]);
+    }
+  });
+
+  it("a_system_compaction_abort_shows_no_step_either", async () => {
+    // OmO aborted the turn itself (compaction, a deadline, its own liveness): empty by shape, but no failure to step on
+    begin();
+    session.isRunning = false;
+    ladder.observe(userAbortEnd()); // aborted, no source named yet
+    ladder.observe(systemAbortLifecycle()); // …and OmO calls it its own
+    ladder.observe({ type: "agent_settled" });
+    await flush();
+    expect(session.switched).toEqual([]);
+    expect(session.sent).toEqual([]);
+    expect(session.calls).toEqual([]);
+    expect(session.views.at(-1)).toBeUndefined();
+  });
+
+  it("a_genuine_empty_answer_still_steps_after_the_user_stop_fix", async () => {
+    // the regression's mirror: a turn that ended on its own with nothing — not aborted — must step exactly as before
+    begin();
+    await emptyTurn();
+    expect(session.switched).toEqual([OPUS_5]);
+    expect(session.sent.map((item) => item.text)).toEqual(["продолжай"]);
   });
 
   it("a_provider_rejection_descends_the_ladder_one_rung_at_a_time", async () => {

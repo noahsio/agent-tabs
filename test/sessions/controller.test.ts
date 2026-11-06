@@ -1707,6 +1707,28 @@ describe("SessionController", () => {
       expect(views).toEqual([]);
     });
 
+    it("the_persons_stop_disarms_the_ladder_so_the_aborted_turn_never_steps", async () => {
+      // THE BUG, end to end: the person sent a message, saw the agents working, and pressed STOP. The turn ends
+      // aborted having answered nothing — empty by shape — but a user Stop is their own decision, never a model
+      // failure. No model switch, no «продолжай» resend, no second abort of the ladder's own.
+      controller = await SessionController.attach(manager, SESSION_FILE, undefined, undefined, undefined, (text) => lines.push(text));
+      withLadder();
+      controller.watchForLadder("m-own", "собери статистику каналов", []);
+      await controller.send("собери статистику каналов", "auto", [], "m-own");
+      daemon.push(frame({ type: "message_start", message: { role: "user", clientMessageId: "m-own", content: [{ type: "text", text: "собери статистику каналов" }] } }));
+      daemon.push(frame({ type: "agent_start" }));
+      await controller.stop(); // the person presses «Стоп»
+      daemon.push(frame({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "aborted", errorMessage: "The operation was aborted.", timing: { requestedAt: 1, endedAt: 9_000 } } }));
+      daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "done", lastTurnEnd: { endedBy: "user-abort", budgetSpent: false, deadlineStop: false } } }));
+      daemon.push(frame({ type: "agent_settled" }));
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(ofType("set_model")).toHaveLength(0); // no step down the ladder
+      expect(ofType("prompt")).toHaveLength(1); // only the person's own send — no «продолжай»
+      expect(ofType("abort")).toHaveLength(1); // only the «Стоп» abort; the ladder sent none of its own
+      expect(lines.filter((text) => text.startsWith("Прерываю ход: лесенка"))).toEqual([]);
+    });
+
     it("without_a_ladder_a_refusal_changes_nothing", async () => {
       controller = await SessionController.attach(manager, SESSION_FILE);
       controller.watchForLadder("m-own", "привет", []);

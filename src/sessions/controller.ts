@@ -524,6 +524,7 @@ export class SessionController extends EventEmitter {
   /** Cancels every pending dialog (abort is ignored while one is open), then aborts the turn. */
   async stop(): Promise<void> {
     this.noteInterrupt("Прерываю ход: «Стоп» — попросил человек");
+    this.modelLadder?.noteStop(); // the person's own end to the turn: the ladder stops watching, never steps on it
     for (const dialog of this.current.dialogs) {
       try {
         await this.request("extension_ui_response", { uiRequestId: dialog.id, cancelled: true });
