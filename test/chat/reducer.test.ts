@@ -171,6 +171,40 @@ describe("chat reducer", () => {
       state = reviseQueued(state, "m1", "new", 2);
       expect(state.blocks[0]).toEqual({ kind: "user", id: "m1", text: "new", delivery: { state: "queued", queuedId: "q_1", revision: 2 } });
     });
+
+    describe("a resend that supersedes an earlier bubble (liveness recovery)", () => {
+      // The old bubble is queued (OmO restored it on the reopen); the resend under a new id carries its old id.
+      const withQueued = (): ChatState =>
+        applyFrame(sending("m-old", "что происходит?"), { type: "queue_update", ordered: [{ text: "что происходит?", mode: "prompt", queuedId: "q_1", clientMessageId: "m-old" }] });
+
+      it("drops_the_superseded_bubble_the_moment_the_resend_appears", () => {
+        const state = addOutgoing(withQueued(), { id: "m-new", text: "что происходит?", supersedes: "m-old" });
+        expect(state.blocks).toEqual([{ kind: "user", id: "m-new", text: "что происходит?", delivery: { state: "sending" }, supersedes: "m-old" }]);
+      });
+
+      it("never_relets_a_restored_queue_bring_the_old_id_back", () => {
+        let state = addOutgoing(withQueued(), { id: "m-new", text: "что происходит?", supersedes: "m-old" });
+        state = applyFrame(state, { type: "message_start", message: { role: "user", content: "что происходит?", clientMessageId: "m-new", timestamp: 7 } });
+        expect(state.blocks).toEqual([{ kind: "user", id: "m-new", text: "что происходит?", timestamp: 7, supersedes: "m-old" }]); // delivered, keeps the marker
+        state = applyFrame(state, { type: "queue_update", ordered: [{ text: "что происходит?", mode: "prompt", queuedId: "q_1", clientMessageId: "m-old" }] });
+        expect(state.blocks).toEqual([{ kind: "user", id: "m-new", text: "что происходит?", timestamp: 7, supersedes: "m-old" }]); // the old id stayed gone
+      });
+
+      it("keeps_a_genuinely_different_queued_message", () => {
+        let state = addOutgoing(withQueued(), { id: "m-new", text: "что происходит?", supersedes: "m-old" });
+        state = applyFrame(state, {
+          type: "queue_update",
+          ordered: [
+            { text: "что происходит?", mode: "prompt", queuedId: "q_1", clientMessageId: "m-old" }, // superseded: gone
+            { text: "и логи тоже", mode: "follow_up", queuedId: "q_2", clientMessageId: "m-two" }, // different: stays
+          ],
+        });
+        expect(state.blocks.map((block) => block.kind === "user" && { id: block.id, state: block.delivery?.state })).toEqual([
+          { id: "m-new", state: "sending" },
+          { id: "m-two", state: "queued" },
+        ]);
+      });
+    });
   });
 
   it("abort_ends_the_turn_with_a_notice", () => {

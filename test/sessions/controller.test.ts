@@ -1366,6 +1366,65 @@ describe("SessionController", () => {
       expect(notices()).toContain("Перезапустил сессию и отправил сообщение заново");
     });
 
+    /** The resend's new id, once the recovery has put the message back in. */
+    async function recovered(text: string, id: string): Promise<string> {
+      await controller!.send(text, "auto", [], id);
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall({ kind: "none" }));
+      await settle(() => ofType("prompt").length === 2);
+      return String((ofType("prompt")[1] as Frame)["clientMessageId"]);
+    }
+
+    function userBlocks(text: string): { id: string; queued: boolean }[] {
+      return (controller as SessionController).state.blocks.flatMap((block) =>
+        block.kind === "user" && block.text === text ? [{ id: block.id, queued: block.delivery?.state === "queued" }] : [],
+      );
+    }
+
+    // The person's own bug: the message shows delivered (the resend) and still queued (the old id OmO restored on
+    // the reopen) at the same time. The resend supersedes the old id, so the old bubble must leave the feed.
+    it("removes_the_old_queued_bubble_the_resend_superseded", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      const newId = await recovered("что происходит?", "m-own");
+      // OmO restored its queue on the reopen: the old message is listed queued again, both before and after the
+      // resend is delivered under its new id — neither listing may leave a second bubble on screen.
+      const requeue = (): void =>
+        daemon.push(frame({ type: "queue_update", ordered: [{ text: "что происходит?", mode: "prompt", queuedId: "q_old", clientMessageId: "m-own" }] }));
+      requeue();
+      daemon.push(frame({ type: "message_start", message: { role: "user", content: "что происходит?", clientMessageId: newId, timestamp: 2 } }));
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(goodTurn());
+      daemon.push(frame({ type: "agent_settled" }));
+      requeue();
+      await settle(() => controller?.state.blocks.some((block) => block.kind === "assistant" && block.text === "готово") === true);
+
+      const shown = userBlocks("что происходит?");
+      expect(shown).toEqual([{ id: newId, queued: false }]); // once, delivered, never also queued
+    });
+
+    // A different message the person genuinely queued behind the resend must survive — only the superseded old id goes.
+    it("leaves_a_genuinely_different_queued_message_alone", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      const newId = await recovered("что происходит?", "m-own");
+      daemon.push(
+        frame({
+          type: "queue_update",
+          ordered: [
+            { text: "что происходит?", mode: "prompt", queuedId: "q_old", clientMessageId: "m-own" }, // the superseded old id
+            { text: "а потом посмотри логи", mode: "follow_up", queuedId: "q_two", clientMessageId: "m-other" }, // a real, different one
+          ],
+        }),
+      );
+      daemon.push(frame({ type: "message_start", message: { role: "user", content: "что происходит?", clientMessageId: newId, timestamp: 2 } }));
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(goodTurn());
+      await settle(() => controller?.state.blocks.some((block) => block.kind === "assistant" && block.text === "готово") === true);
+
+      expect(userBlocks("что происходит?")).toEqual([{ id: newId, queued: false }]);
+      expect(userBlocks("а потом посмотри логи")).toEqual([{ id: "m-other", queued: true }]); // still queued, still the person's to edit
+    });
+
     it("never_recovers_the_same_message_twice", async () => {
       controller = await SessionController.attach(manager, SESSION_FILE);
       await controller.send("разбери кошельки", "auto", [], "m-own");
