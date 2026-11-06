@@ -232,6 +232,22 @@ describe("sandbox profile", () => {
     expect(denied(`echo x > ${repo}/.claude/notes.md`)).toBe(false);
   });
 
+  it.runIf(darwin)("ssh_control_socket_is_writable_but_keys_and_links_are_not", () => {
+    // ssh ControlMaster multiplexing binds/unlinks a unix socket under ~/.ssh; only socket vnodes may be written
+    const p = buildProfile(spec);
+    expect(p.indexOf(`(allow file-write* (require-all (subpath "${home}/.ssh") (vnode-type SOCKET)))`)).toBeGreaterThan(
+      p.indexOf(`  (subpath "${home}/.ssh")`),
+    );
+    const sock = `${home}/.ssh/cm-test`;
+    const bind = (file: string): string =>
+      spawnSync("/usr/bin/sandbox-exec", ["-f", profileFile, process.execPath, "-e",
+        `const fs=require("fs");const s=require("net").createServer();s.listen(${JSON.stringify(file)},()=>{fs.unlinkSync(${JSON.stringify(file)});console.log("ok");process.exit(0)}).on("error",(e)=>{console.log(e.code);process.exit(1)})`],
+        { encoding: "utf8" }).stdout.trim();
+    expect(bind(sock)).toBe("ok"); // bind + unlink the control socket both allowed
+    expect(denied(`echo x > ${home}/.ssh/id_evil`)).toBe(true); // a regular file (e.g. a planted key) stays denied
+    expect(denied(`ln -s ${home}/.zshenv ${home}/.ssh/evil-link`)).toBe(true); // a symlink stays denied
+  });
+
   it.runIf(darwin)("files_the_person_runs_later_are_closed", () => {
     expect(denied(`echo x > ${home}/.ssh/config`)).toBe(true);
     expect(denied(`echo x > ${home}/.ssh/authorized_keys`)).toBe(true);
