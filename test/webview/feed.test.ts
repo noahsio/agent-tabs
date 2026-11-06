@@ -490,6 +490,18 @@ describe("long sent messages", () => {
       expect(action("m1", "message-actions")).not.toBeNull();
     });
 
+    it("a_resend_that_superseded_a_queued_bubble_shows_once_delivered_never_also_queued", () => {
+      // The reducer leaves only the resend's delivered block (it carries `supersedes`); the feed must render it as a
+      // plain, delivered message — no queued label, no «Отозвать»/«Изменить» — so the person sees the message once.
+      feed.update([{ kind: "user", id: "m-new", text: "что происходит?", supersedes: "m-old" }, reply], true);
+      expect(root.querySelectorAll(".user-bubble")).toHaveLength(1);
+      expect(label("m-new")).toBeUndefined();
+      expect(entry("m-new").querySelector(".user-bubble")?.classList.contains("queued")).toBe(false);
+      expect(action("m-new", "dequeue")).toBeNull();
+      expect(action("m-new", "edit-queued")).toBeNull();
+      expect(action("m-new", "message-actions")).not.toBeNull(); // it is a real conversation message
+    });
+
     it("queued_offers_take_back_which_asks_the_host_once", () => {
       feed.update([{ kind: "user", id: "m1", text: "later", delivery: { state: "queued", queuedId: "q_1" } }], true);
       expect(label("m1")).toBe("в очереди — ждёт агента");

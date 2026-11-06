@@ -33,7 +33,10 @@ export type AnsweredQuestion = {
 export type Answer = { questionId: string; questions: AnsweredQuestion[]; forkFrom?: string };
 
 export type Block =
-  | { kind: "user"; id: string; text: string; delivery?: Delivery; timestamp?: number; images?: ImageRef[]; answer?: Answer }
+  // `supersedes` is the clientMessageId of an earlier bubble for the same message that this one replaces: a resend
+  // under a new id (a liveness recovery) carries it so the reducer drops the old queued/optimistic copy and never
+  // re-lists it from a restored queue — the message is shown once, delivered, never also queued.
+  | { kind: "user"; id: string; text: string; delivery?: Delivery; timestamp?: number; images?: ImageRef[]; answer?: Answer; supersedes?: string }
   | {
       kind: "assistant";
       id: string;

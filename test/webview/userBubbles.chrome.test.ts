@@ -65,6 +65,53 @@ describe.skipIf(!hasChrome)("long sent messages in a real layout (headless Chrom
   }, 15_000);
 });
 
+/**
+ * After a liveness recovery the reducer leaves only the resend's delivered block (it carries `supersedes`); the old
+ * queued bubble is gone. The feed must show the message once, delivered — never also as a queued «в очереди» copy.
+ */
+const SUPERSEDE_STUB = `
+(function () {
+  var blocks = [
+    { kind: "user", id: "m-new", text: "что происходит?", supersedes: "m-old" },
+    { kind: "assistant", id: "a1", text: "готово", thinking: "", streaming: false },
+  ];
+  window.acquireVsCodeApi = function () {
+    return {
+      getState: function () { return undefined; },
+      setState: function () {},
+      postMessage: function (message) {
+        if (message.type !== "ready") return;
+        var state = { type: "state", reconnectable: true, tab: { modelMode: "auto", durableId: "id-1" }, state: { blocks: blocks, dialogs: [], agents: [], running: false } };
+        setTimeout(function () { window.postMessage(JSON.stringify(state), "*"); }, 5);
+      },
+    };
+  };
+})();`;
+
+describe.skipIf(!hasChrome)("a resend's delivered bubble is shown once, never also queued (headless Chrome)", () => {
+  let page: Page;
+
+  beforeAll(async () => {
+    page = await openPage(await webviewPage(SUPERSEDE_STUB));
+    await waitFor(page, `document.querySelector('[data-block="m-new"]') !== null`);
+  }, 30_000);
+
+  afterAll(() => page?.close());
+
+  it("renders_one_delivered_bubble_with_no_queue_label_or_actions", async () => {
+    const seen = await page.evaluate<{ bubbles: number; queued: number; label: number; dequeue: number }>(`(() => ({
+      bubbles: document.querySelectorAll('[data-block="m-new"] .user-bubble').length,
+      queued: document.querySelectorAll('[data-block="m-new"] .user-bubble.queued').length,
+      label: document.querySelectorAll('[data-block="m-new"] .queued-label').length,
+      dequeue: document.querySelectorAll('[data-block="m-new"] [data-role="dequeue"]').length,
+    }))()`);
+    expect(seen.bubbles).toBe(1); // the message once
+    expect(seen.queued).toBe(0); // not marked queued
+    expect(seen.label).toBe(0); // no «в очереди — ждёт агента»
+    expect(seen.dequeue).toBe(0); // no «Отозвать»
+  }, 15_000);
+});
+
 /** A sent message that is one long unbreakable token (a hex blob): it must wrap, never scroll the bubble sideways. */
 const HEX_STUB = `
 (function () {

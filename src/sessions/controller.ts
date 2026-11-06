@@ -405,7 +405,9 @@ export class SessionController extends EventEmitter {
     // What the next turn is answering, for a liveness abort to put back; a recovery's own resend inherits the attempt.
     const inherited = this.resending ? this.answering : undefined;
     this.answering = { key: inherited?.key ?? clientMessageId, id: clientMessageId, text, images, recovered: inherited !== undefined, delivered: false };
-    this.showOutgoing(clientMessageId, text, images);
+    // A recovery resends under a new id; the earlier bubble (its old id, perhaps re-queued when OmO restored the queue)
+    // is the same message and must leave the feed, so the person sees it once — delivered, never also queued.
+    this.showOutgoing(clientMessageId, text, images, inherited?.key);
     const fields = { message: text, clientMessageId, ...imageParts };
     /**
      * Messages leave in the order they were sent, through one chain: preparing a barrier must not let a later message
@@ -1077,11 +1079,12 @@ export class SessionController extends EventEmitter {
   // ---------- internals ----------
 
   /** The message in the feed at once, its images under the ids the real message will use. */
-  private showOutgoing(id: string, text: string, images: OutgoingImage[]): void {
+  private showOutgoing(id: string, text: string, images: OutgoingImage[], supersedes?: string): void {
     const refs = images.map((image, index): ImageRef => ({ id: `${id}:${index}`, mimeType: image.mimeType, ...(image.name !== undefined ? { name: image.name } : {}) }));
     refs.forEach((ref, index) => this.sink(ref, (images[index] as OutgoingImage).data));
     this.outbox.set(id, { text, images });
-    this.commit(addOutgoing(this.current, { id, text, images: refs }));
+    if (supersedes !== undefined) this.outbox.delete(supersedes); // the superseded bubble leaves the feed; drop its images too
+    this.commit(addOutgoing(this.current, { id, text, images: refs, ...(supersedes !== undefined ? { supersedes } : {}) }));
   }
 
   /** A message that will not reach the conversation leaves the feed. */

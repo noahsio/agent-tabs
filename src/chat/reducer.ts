@@ -507,7 +507,10 @@ function onMessageStart(s: ChatState, frame: Json, sink: ImageSink | undefined):
     const withoutQueued = removeQueuedByText(pending, text);
     if (withoutQueued.some((block) => block.id === id)) return { ...s, blocks: withoutQueued };
     sinkImages(message, id, sink);
-    return { ...s, blocks: [...withoutQueued, userBlock(message, id, text, withoutQueued)] };
+    const block = userBlock(message, id, text, withoutQueued);
+    // A resend keeps suppressing the old id after it is delivered, so a late restored-queue frame can never re-list it.
+    if (existing?.kind === "user" && existing.supersedes !== undefined) block.supersedes = existing.supersedes;
+    return { ...s, blocks: [...withoutQueued, block] };
   }
   return s; // custom/toolResult are not chat bubbles
 }
@@ -675,11 +678,14 @@ function onToolOutput(s: ChatState, frame: Json, final: boolean, now: Clock): Ch
  */
 function onQueueUpdate(s: ChatState, frame: Json): ChatState {
   const ordered: unknown[] = Array.isArray(frame["ordered"]) ? frame["ordered"] : [];
+  // A message a resend already superseded must never come back from a restored queue under its old id.
+  const superseded = new Set(s.blocks.flatMap((block) => (block.kind === "user" && block.supersedes !== undefined ? [block.supersedes] : [])));
   const listed = new Map<string, UserBlock>();
   for (const item of ordered) {
     if (!isObject(item) || typeof item["text"] !== "string") continue;
     const queuedId = asString(item["queuedId"]);
     const id = asString(item["clientMessageId"]) ?? `${FOREIGN_QUEUED}${queuedId ?? listed.size}`;
+    if (superseded.has(id)) continue;
     const revision = typeof item["revision"] === "number" ? { revision: item["revision"] } : {};
     const answer = answerFromText(s.blocks, item["text"]); // an answer waiting in the queue is already a card, never its protocol text
     listed.set(id, {
@@ -701,13 +707,20 @@ function onQueueUpdate(s: ChatState, frame: Json): ChatState {
   return { ...s, blocks: [...blocks, ...listed.values()] };
 }
 
-/** A message just sent: shown at once, as sending; a resend of the same id replaces its old undelivered block. */
-export function addOutgoing(s: ChatState, message: { id: string; text: string; images?: ImageRef[] }): ChatState {
+/**
+ * A message just sent: shown at once, as sending; a resend of the same id replaces its old undelivered block.
+ * `supersedes` is set when the message is a resend under a new id (a liveness recovery): the earlier undelivered
+ * bubble for the same message leaves the feed here, so the person never sees it both delivered and queued.
+ */
+export function addOutgoing(s: ChatState, message: { id: string; text: string; images?: ImageRef[]; supersedes?: string }): ChatState {
   const existing = s.blocks.find((block) => block.id === message.id);
   if (existing !== undefined && (existing.kind !== "user" || existing.delivery === undefined)) return s;
   const block: UserBlock = { kind: "user", id: message.id, text: message.text, delivery: { state: "sending" } };
   if (message.images !== undefined && message.images.length > 0) block.images = message.images;
-  return { ...s, blocks: [...s.blocks.filter((other) => other !== existing), block] };
+  if (message.supersedes !== undefined) block.supersedes = message.supersedes;
+  const superseded = (other: Block): boolean =>
+    message.supersedes !== undefined && other.kind === "user" && other.id === message.supersedes && other.delivery !== undefined;
+  return { ...s, blocks: [...s.blocks.filter((other) => other !== existing && !superseded(other)), block] };
 }
 
 /** Takes back a message that never reached the conversation (refused, handled by a command, or dequeued). */
@@ -1205,7 +1218,8 @@ export function applyEntries(s: ChatState, entries: any[], sink?: ImageSink): Ch
         if (existing?.kind === "user" && existing.delivery !== undefined && block.kind === "user") {
           // the journal has the message we showed as undelivered: it is in the conversation now
           if (block.images && isObject(entry["message"])) sinkImages(entry["message"], block.id, sink);
-          blocks = upsertBlock(blocks, block);
+          // a resend keeps suppressing the old id it replaced, even after another reopen delivers it from the journal
+          blocks = upsertBlock(blocks, existing.supersedes !== undefined ? { ...block, supersedes: existing.supersedes } : block);
           continue;
         }
         if (existing?.kind === "user" && block.kind === "user") {
