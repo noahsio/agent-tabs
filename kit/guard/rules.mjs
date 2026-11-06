@@ -316,6 +316,11 @@ export function compileRules(rules) {
         regex: new RegExp(entry.pattern),
         denyIf: entry.denyIf.map((pattern) => new RegExp(pattern)),
         escalateIf: [], // P45: retired with the rest of the ask list; denyIf below is untouched
+        // The person's own «always allow» entries carry `user`; a clean match on one is attributed to the whitelist in
+        // the decision record. `scope` is the legible glob they confirmed (program + leading flags).
+        user: entry.user === true,
+        label: typeof entry.label === "string" ? entry.label : entry.id,
+        scope: typeof entry.scope === "string" ? entry.scope : undefined,
       })),
       // P45: the bare-public-IP check is retired. REMOTE_CHECKS is not: every line of it, deny and ask alike, is a
       // destructive form, and the person's Seatbelt sandbox does not reach the other machine — so `rm -rf /srv/app`,
@@ -328,4 +333,38 @@ export function compileRules(rules) {
     compiled.set(rules, result);
   }
   return result;
+}
+
+// ---------- user «always allow» whitelist ----------
+
+/** Every user-owned whitelist entry starts with this; a built-in allow entry never does. */
+export const WHITELIST_ID_PREFIX = "user-";
+
+/** True for an allow entry the person added themselves (the «always allow» whitelist), not a built-in one. */
+export const isUserAllow = (entry) => isObject(entry) && entry.user === true;
+
+/**
+ * A glob (`*`, `?`, `[...]`) -> the regex source an `allow` entry's `pattern` holds. The whole leaf command must match,
+ * so it is anchored. The person edits and reads the glob (`scope`); this is only how the matcher sees it.
+ */
+export const globPattern = (glob) => globToRegExp(glob).source;
+
+/**
+ * One «always allow» whitelist entry for `scope` (a glob over the normalized command the classifier reads: program +
+ * its leading flags + `*`). Stored in the v2 `allow` list, so it is consulted only AFTER the deny set (hard-deny and
+ * the remote destructive forms run first in classify) — a whitelist entry can never turn a deny into an allow.
+ * `denyIf` stays empty: the person is marking a shape safe, not writing new deny guards.
+ */
+export function makeWhitelistEntry({ scope, session, now = Date.now, id }) {
+  const at = now();
+  return {
+    id: id ?? `${WHITELIST_ID_PREFIX}${at.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    label: `всегда разрешать: ${scope}`,
+    pattern: globPattern(scope),
+    denyIf: [],
+    user: true,
+    scope,
+    addedAt: new Date(at).toISOString(),
+    ...(typeof session === "string" && session ? { session } : {}),
+  };
 }

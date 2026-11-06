@@ -38,7 +38,7 @@ import { fileURLToPath } from "node:url";
 import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets, isReadTool } from "./classify.mjs";
 import { askDecider, catReferencePath, DEFAULT_OMO_PATH, readCache, resolveDeciderTransport, writeCache, writeJsonAtomic } from "./decider.mjs";
 import { commandText, guardStateReason, protectedTarget } from "./protect.mjs";
-import { loadDefaultRules, parseRules, validateRules } from "./rules.mjs";
+import { loadDefaultRules, makeWhitelistEntry, parseRules, validateRules } from "./rules.mjs";
 import { checkSocketPath, ensurePrivateDir, listen, LOCK_STARTING_MS, readLines, servicePaths, socketAlive, writeLine } from "./sockets.mjs";
 import { createTelegram, DEFAULT_TG_ENV, httpTransport, loadTelegramConfig, resolveTelegramConfig, telegramKeyFile } from "./telegram.mjs";
 
@@ -547,6 +547,45 @@ export async function startService({
     return allow(`[guard] решатель разрешил: ${decider.reason}${decider.cached ? " (кэш)" : ""}`);
   }
 
+  /**
+   * An allow the person's own whitelist made — no card, no decider. It is published to the feed as its own step (by
+   * "whitelist"), so it reads apart from a one-time or a decider allow, and the hook's reason names the matched shape.
+   */
+  function allowedByWhitelist(call, verdict) {
+    const redact = redactor();
+    const scopes = verdict.whitelisted.map((hit) => hit.scope ?? hit.label);
+    const toolName = call.tool.toLowerCase();
+    const id = newId();
+    const item = {
+      id,
+      session: call.session,
+      cwd: redact(call.cwd).slice(0, MAX_VIEW_COMMAND),
+      tool: toolName,
+      command: redact(commandText(toolName, call.input)).slice(0, MAX_VIEW_COMMAND),
+      reasons: [],
+      createdAt: iso(now()),
+    };
+    broadcast({ event: "resolved", id, decision: "allow", by: "whitelist", session: call.session, whitelist: { scopes }, item });
+    return allow(`[guard] разрешено по вашему вайтлисту: ${scopes.join(", ")}`);
+  }
+
+  /**
+   * Writes one «always allow» entry per proposed shape (as the card showed it) into the v2 `allow` list and persists the
+   * rules, skipping shapes already present. Returns the scopes written, or null when nothing could be saved. The shapes
+   * come from classify, which never proposes a deny shape — and the deny set runs before the allow list in any case.
+   */
+  function saveWhitelist(record) {
+    const proposal = record.view.proposal;
+    if (!rulesState.ok || !Array.isArray(proposal) || proposal.length === 0) return null;
+    const present = new Set(rulesState.rules.allow.filter((entry) => typeof entry?.scope === "string").map((entry) => entry.scope));
+    const entries = proposal.filter((item) => !present.has(item.scope)).map((item) => makeWhitelistEntry({ scope: item.scope, session: record.session, now }));
+    const rules = { ...rulesState.rules, allow: [...rulesState.rules.allow, ...entries] };
+    if (validateRules(rules).length > 0) return null;
+    writeJsonAtomic(paths.rules, rules);
+    rulesState = { ok: true, rules };
+    return proposal.map((item) => item.scope);
+  }
+
   function openRequest(rules, key, tool, view, decider) {
     const open = openRecords();
     if (open.length >= LIMITS.openTotal || open.filter((record) => record.session === view.session).length >= LIMITS.openPerSession) {
@@ -603,7 +642,11 @@ export async function startService({
     const verdict = classify({ tool_name: call.tool, tool_input: call.input, cwd: call.cwd, agent_dir: agentDir, home }, rules);
     const text = commandText(tool, call.input);
     const guardState = guardStateReason(text, where, isReadTool(tool));
-    if (verdict.tier === "allow" && !guardState) return allow("[guard] разрешено");
+    // A whitelist entry is consulted inside classify, after the deny set — so a guard-state touch still overrides it here
+    // (guardState keeps the call for the person however `allow` it looked): a whitelist can never bypass guard-state.
+    if (verdict.tier === "allow" && !guardState) {
+      return Array.isArray(verdict.whitelisted) && verdict.whitelisted.length > 0 ? allowedByWhitelist(call, verdict) : allow("[guard] разрешено");
+    }
 
     const redact = redactor();
     const shown = (reason) => capReason(redact(reason));
@@ -622,6 +665,9 @@ export async function startService({
       command: capped(commands),
       ...(commands !== text ? { code: capped(text) } : {}),
       reasons,
+      // The legible «always allow» shapes the card offers; written to the whitelist on an «allow-always» answer. Program
+      // and flags only (operands hidden as `*`), so there is nothing secret to redact.
+      ...(Array.isArray(verdict.proposal) && verdict.proposal.length > 0 ? { proposal: verdict.proposal } : {}),
     };
 
     const reused = reuse(verdict.key, call.session, tool);
@@ -659,7 +705,8 @@ export async function startService({
 
   function answerRequest(id, decision, by, message) {
     if (!ANSWERERS.has(by)) return { ok: false, error: "by: agent-tabs | cli | telegram" };
-    if (decision !== "allow-once" && decision !== "deny") return { ok: false, error: "decision: allow-once | deny" };
+    // «allow-always» (the card's «Разрешать такое впредь») writes the whitelist entry, then allows this call once.
+    if (decision !== "allow-once" && decision !== "deny" && decision !== "allow-always") return { ok: false, error: "decision: allow-once | allow-always | deny" };
     if (message !== undefined) {
       if (decision !== "deny") return { ok: false, error: "message: only with a deny" };
       if (typeof message !== "string" || message.trim() === "" || message.length > MAX_ANSWER_MESSAGE) {
@@ -669,8 +716,9 @@ export async function startService({
     const record = typeof id === "string" ? requests.get(id) : undefined;
     if (!record) return { ok: false, error: "запрос не найден" };
     if (record.answer) return { ok: false, error: "запрос уже отвечен" };
+    if (decision === "allow-always" && saveWhitelist(record) === null) return { ok: false, error: "нечего внести в вайтлист или правила не сохранить" };
     const words = message !== undefined ? redactor()(message.trim()) : undefined;
-    record.answer = { decision: decision === "allow-once" ? "allow" : "deny", by, at: now(), ...(words !== undefined ? { message: words } : {}) };
+    record.answer = { decision: decision === "deny" ? "deny" : "allow", by, at: now(), ...(words !== undefined ? { message: words } : {}) };
     release(record, (tool) => settle(record, tool));
     broadcast({
       event: "resolved",

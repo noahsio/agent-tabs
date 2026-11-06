@@ -91,12 +91,14 @@ export type AgentDetails = {
 /** Host → webview: the answer to an `agentDetails` request. */
 export type AgentDetailsMessage = { type: "agentDetails"; taskId: string } & (({ ok: true } & AgentDetails) | { ok: false; reason: string });
 
-/** A decider's verdict on one guarded call, as the feed's «Решатель» step shows it. */
+/** A verdict on one guarded call with no card before it, as the feed shows it: a decider's, or the person's whitelist. */
 export type GuardStep = {
   id: string;
   tool: string;
   command: string;
-  decider: NonNullable<PendingView["decider"]>;
+  /** Exactly one of these is set: a decider's verdict, or the person's own whitelist allowing the call. */
+  decider?: NonNullable<PendingView["decider"]>;
+  whitelist?: { scopes: string[] };
   at: string;
   /** Only for a session no tab shows: the step names where it ran. */
   cwd?: string;
@@ -259,7 +261,7 @@ export type WebviewMessage =
    * «Разрешить один раз» / «Запретить» on an approval panel; answered over the service's admin socket. `message`: a
    * deny's words for the agent (non-blank, at most GUARD_MESSAGE_MAX characters); free text, never logged.
    */
-  | { type: "guardAnswer"; id: string; decision: "allow-once" | "deny"; message?: string }
+  | { type: "guardAnswer"; id: string; decision: "allow-once" | "allow-always" | "deny"; message?: string }
   | { type: "messageActions"; blockId: string }
   | { type: "rewindPreview"; blockId: string; fork: boolean }
   | { type: "rewind"; blockId: string; fork: boolean; fingerprint: string }
@@ -384,7 +386,7 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
     }
     case "guardAnswer": {
       const { id, decision, message } = raw;
-      if (typeof id !== "string" || (decision !== "allow-once" && decision !== "deny")) return undefined;
+      if (typeof id !== "string" || (decision !== "allow-once" && decision !== "allow-always" && decision !== "deny")) return undefined;
       if (message === undefined) return { type: "guardAnswer", id, decision };
       const words = typeof message === "string" && decision === "deny" ? message.trim() : "";
       return words !== "" && words.length <= GUARD_MESSAGE_MAX ? { type: "guardAnswer", id, decision, message: words } : undefined;

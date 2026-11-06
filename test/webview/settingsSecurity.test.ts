@@ -34,6 +34,10 @@ const security: SecurityView = {
     { connection: "Шлюз (Anthropic API)", items: [{ value: "gw-anthropic/claude-haiku-5-5", label: "Claude Haiku 5.5" }] },
     { connection: "ChatGPT", items: [{ value: "openai-codex/gpt-6-sol", label: "GPT 6 Sol" }] },
   ],
+  whitelist: [
+    { id: "user-abc", scope: "docker run *", addedAt: "2026-11-07T10:00:00.000Z", session: "0f8e2c1a-5b7d-4e3f-9a21-c4d5e6f70812" },
+    { id: "user-def", scope: "rm -rf *", addedAt: "2026-11-06T09:00:00.000Z" },
+  ],
 };
 
 function body(): HTMLElement {
@@ -368,5 +372,21 @@ describe("«Безопасность» · Telegram", () => {
     expect(actions()).toEqual([{ kind: "human.set", telegram: true }]);
     show({ human: { ...security.human, telegram: true }, telegram: { chat: "", legacy: true, ready: true } });
     expect(panel().textContent).toContain("tg.env");
+  });
+});
+
+describe("always-allow whitelist", () => {
+  it("lists the person's entries and «Забыть» posts a delete of that entry", () => {
+    show();
+    const rows = [...body().querySelectorAll<HTMLElement>("[data-whitelist]")];
+    expect(rows.map((row) => row.querySelector("code")?.textContent)).toEqual(["docker run *", "rm -rf *"]);
+    rows[0]!.querySelector<HTMLButtonElement>('[data-action="whitelist.delete"]')!.click();
+    expect(actions()).toContainEqual({ kind: "whitelist.delete", id: "user-abc" });
+  });
+
+  it("shows a hint when the whitelist is empty", () => {
+    show({ whitelist: [] });
+    expect(body().querySelector("[data-whitelist]")).toBeNull();
+    expect(body().querySelector(".st-whitelist")?.textContent).toContain("Пока пусто");
   });
 });

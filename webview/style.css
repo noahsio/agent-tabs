@@ -1773,6 +1773,25 @@ button.qtab.on {
   color: var(--err);
 }
 
+/* A verdict the person's own «always allow» whitelist made — like a decider step, with its own ok-tinted dot. */
+.step.whitelist {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.step.whitelist::before {
+  background: transparent;
+  border: 1px solid var(--ok, var(--dot));
+}
+
+.step.whitelist code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg);
+  background: none;
+  padding: 0;
+}
+
 /* ---------- composer ---------- */
 
 /* The composer floats over the bottom of the feed, scrollbar included: a fade from the feed into the panel that
@@ -4207,6 +4226,23 @@ button.pill.mode-chip {
 
 .st-rule-foot {
   margin-top: 6px;
+}
+
+/* The «always allow» list: one row per whitelist entry, the shape in mono with a «Забыть» on the right. */
+.st-whitelist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.st-wl-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.st-wl-row code {
+  font-size: 12.5px;
 }
 
 .st-ask-custom {

@@ -42,6 +42,8 @@ export type PendingView = {
   code?: string;
   reasons: string[];
   decider?: { model?: string; decision: string; reason: string; ms: number };
+  /** Legible «always allow» shapes the person can add from the card (program + flags, operands hidden as `*`). */
+  proposal?: Array<{ scope: string; label: string }>;
   createdAt: string;
 };
 
@@ -61,10 +63,12 @@ export type GuardEvent =
       event: "resolved";
       id: string;
       decision: "allow" | "deny";
-      by: "agent-tabs" | "cli" | "telegram" | "timeout" | "decider";
+      by: "agent-tabs" | "cli" | "telegram" | "timeout" | "decider" | "whitelist";
       session: string;
       decider?: PendingView["decider"];
       item?: PendingView;
+      /** The person's own whitelist allowed this call with no card: the shapes that matched. */
+      whitelist?: { scopes: string[] };
       /** A deny's words for the agent, as the person wrote them (redacted by the service). */
       message?: string;
     };
@@ -164,7 +168,7 @@ export class GuardAdmin {
   }
 
   /** `message`: a deny's words for the agent (the hook's deny reason); free text, never logged. */
-  async answer(id: string, decision: "allow-once" | "deny", message?: string): Promise<void> {
+  async answer(id: string, decision: "allow-once" | "allow-always" | "deny", message?: string): Promise<void> {
     const reply = await this.call({ op: "answer", id, decision, by: "agent-tabs", ...(message !== undefined ? { message } : {}) });
     if (reply["ok"] !== true) throw new Error(String(reply["error"] ?? "служба защиты не приняла ответ"));
   }
