@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   emptyAnswer,
   endFailure,
+  frameAbort,
   lifecyclePolicyRejection,
   SILENCE_MS,
   tally,
@@ -185,5 +186,47 @@ describe("the ladder's four failure classes", () => {
 
   it("the_silence_threshold_is_five_minutes", () => {
     expect(SILENCE_MS).toBe(300_000);
+  });
+
+  describe("the abort a frame names", () => {
+    it("the_aborted_message_end_says_aborted_but_names_no_source", () => {
+      // OmO's own live journal: the aborted assistant message carries no abortSource at all (research doc §2)
+      expect(
+        frameAbort({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "" }], stopReason: "aborted", errorMessage: "The operation was aborted." },
+        }),
+      ).toBe("unknown");
+    });
+
+    it("the_lifecycle_row_names_who_ended_the_turn", () => {
+      const lifecycle = (endedBy: string): unknown => ({ type: "session_lifecycle", lifecycle: { state: "done", lastTurnEnd: { endedBy } } });
+      expect(frameAbort(lifecycle("user-abort"))).toBe("user");
+      expect(frameAbort(lifecycle("system-abort"))).toBe("system");
+      expect(frameAbort(lifecycle("provider-abort"))).toBe("provider");
+      expect(frameAbort(lifecycle("unknown-abort"))).toBe("unknown");
+    });
+
+    it("the_agent_end_stamps_the_source_it_was_given", () => {
+      expect(frameAbort({ type: "agent_end", aborted: true, abortSource: "user" })).toBe("user");
+      expect(frameAbort({ type: "agent_end", aborted: true, abortSource: "system" })).toBe("system");
+      expect(frameAbort({ type: "agent_end", aborted: true })).toBe("unknown"); // aborted, no source
+    });
+
+    it("a_clean_end_and_every_non_abort_frame_name_no_abort", () => {
+      for (const frame of [
+        undefined,
+        null,
+        { type: "agent_end" }, // a clean finish carries no `aborted`
+        { type: "agent_end", aborted: false },
+        { type: "agent_settled" },
+        { type: "message_end", message: { role: "assistant", content: [], stopReason: "error", rawStopReason: "refusal" } },
+        { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "готово" }], stopReason: "stop" } },
+        { type: "session_lifecycle", lifecycle: { state: "done", lastTurnEnd: { endedBy: "clean" } } },
+        { type: "session_lifecycle", lifecycle: { state: "running" } },
+      ]) {
+        expect(frameAbort(frame)).toBeUndefined();
+      }
+    });
   });
 });

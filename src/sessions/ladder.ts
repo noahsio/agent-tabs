@@ -3,7 +3,7 @@ import type { ModelRef } from "../chat/model";
 import { lifecycleRunning } from "../chat/reducer";
 import type { Ladder, Rung } from "../settings/ladder";
 import type { OutgoingImage } from "./controller";
-import { emptyAnswer, endFailure, lifecyclePolicyRejection, SILENCE_MS, tally, type FailureClass, type TurnTally } from "./ladderFailure";
+import { emptyAnswer, endFailure, frameAbort, lifecyclePolicyRejection, SILENCE_MS, tally, type AbortSource, type FailureClass, type TurnTally } from "./ladderFailure";
 import { instantDeadTurn } from "./liveness";
 
 /** A model the environment serves, as the ladder needs it: enough to match a rung and to name it. */
@@ -85,6 +85,9 @@ type Walk = {
   started: boolean;
   /** The turn was killed by OmO itself as it started: not a provider failure, and no step of ours answers it. */
   dead: boolean;
+  /** Who aborted the turn answering `id`, when a frame named it: a `"user"` abort disarms the walk, and an abort of
+   *  any source is never read as an empty answer. Undefined until an abort frame arrives, and reset each new turn. */
+  aborted: AbortSource | undefined;
   /** The last model the walk switched to. */
   rescuer: ModelRef | undefined;
 };
@@ -156,6 +159,7 @@ export class ModelLadder {
           stepped: false,
           started: false,
           dead: false,
+          aborted: undefined,
           rescuer: undefined,
         };
       }
@@ -165,6 +169,7 @@ export class ModelLadder {
     if (type === "agent_start") {
       walk.started = true;
       walk.dead = false;
+      walk.aborted = undefined;
       walk.tally = { text: false, tools: false };
     }
     // A turn OmO killed itself as it started answered nothing and failed nothing: the controller puts the message
@@ -176,6 +181,17 @@ export class ModelLadder {
     if (type === "session_lifecycle" && lifecycleRunning(frame["lifecycle"]) === true) walk.started = true;
     walk.tally = tally(walk.tally, frame);
     this.armSilence();
+    const abort = frameAbort(frame);
+    if (abort !== undefined) walk.aborted = abort;
+    if (walk.aborted === "user") {
+      // The person pressed «Стоп» (or OmO laid this abort at their feet): their own, deliberate end to the turn, never
+      // a provider failure. Whatever shape it left the turn in — an aborted empty answer — the walk is cancelled right
+      // here, so no failure path below can step the ladder, switch the model or send «продолжай». Stop means stop.
+      this.walk = undefined;
+      this.clearSilence();
+      this.show(undefined);
+      return;
+    }
     if (walk.stepped) return;
     if (type === "message_end") {
       const failure = endFailure(frame["message"]);
@@ -194,7 +210,9 @@ export class ModelLadder {
         this.walk = undefined;
         this.clearSilence();
         this.show(undefined);
-      } else if (emptyAnswer(walk.tally)) this.step(walk, "empty");
+      } else if (walk.aborted === undefined && emptyAnswer(walk.tally)) this.step(walk, "empty");
+      // An aborted turn is never an empty answer: a `"user"` abort was already disarmed above, and a `"system"`
+      // abort (compaction, a deadline, OmO's own liveness) has its own line and is no failure of any model.
       else this.settle(walk);
     }
   }
@@ -206,6 +224,16 @@ export class ModelLadder {
     this.waiting = undefined;
     this.walk = undefined;
     this.show(undefined);
+  }
+
+  /**
+   * The person pressed «Стоп» in the composer. Their own, deliberate end to the turn: the walk is cancelled exactly as
+   * «Прервать» cancels it, whatever aborted-empty shape the turn is about to take — so no failure path can step the
+   * ladder, switch the model or send a continuation. A deterministic companion to reading `abortSource: "user"` off
+   * the frames: the ladder stops watching the moment the click lands, before any frame for the abort arrives.
+   */
+  noteStop(): void {
+    this.interrupt();
   }
 
   dispose(): void {
@@ -347,6 +375,7 @@ export class ModelLadder {
       walk.stepped = false;
       walk.started = false;
       walk.dead = false;
+      walk.aborted = undefined;
       walk.tally = { text: false, tools: false };
       this.session.note("info", this.stepNote(failure, rung.action, name));
       this.armSilence();

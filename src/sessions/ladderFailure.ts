@@ -43,6 +43,41 @@ export function lifecyclePolicyRejection(lifecycle: unknown): boolean {
   return isObject(end) && end["endedBy"] === "policy-rejection";
 }
 
+/** Who ended a turn, when a frame says it was aborted. OmO lays an abort that arrived over RPC — the person's «Стоп»
+ *  among them — at the person's feet as `"user"`; its own liveness, deadline and compaction aborts as `"system"`. */
+export type AbortSource = "user" | "system" | "provider" | "unknown";
+
+/**
+ * The abort that ended a turn, read off the typed fields of the frame that carries the verdict — never off prose. Three
+ * frames can carry it, and the source is pinned down as they arrive: the aborted assistant `message_end` says the turn
+ * was aborted but names no source (`"unknown"`); an `agent_end` stamps the source as `abortSource`; the
+ * `session_lifecycle` row names the same thing under `lastTurnEnd.endedBy`. An aborted turn is never an empty answer,
+ * and a user abort is the person's own decision and no failure of any model — so the ladder reads this to refuse to
+ * step. Undefined for a clean end and for every non-abort frame.
+ */
+export function frameAbort(frame: unknown): AbortSource | undefined {
+  if (!isObject(frame)) return undefined;
+  if (frame["type"] === "message_end") {
+    const message = frame["message"];
+    if (isObject(message) && (message["role"] === undefined || message["role"] === "assistant") && message["stopReason"] === "aborted") return "unknown";
+    return undefined;
+  }
+  if (frame["type"] === "agent_end" && frame["aborted"] === true) {
+    const source = frame["abortSource"];
+    return source === "user" || source === "system" || source === "provider" ? source : "unknown";
+  }
+  if (frame["type"] === "session_lifecycle") {
+    const lifecycle = frame["lifecycle"];
+    const end = isObject(lifecycle) ? lifecycle["lastTurnEnd"] : undefined;
+    const endedBy = isObject(end) ? end["endedBy"] : undefined;
+    if (endedBy === "user-abort") return "user";
+    if (endedBy === "system-abort") return "system";
+    if (endedBy === "provider-abort") return "provider";
+    if (endedBy === "unknown-abort") return "unknown";
+  }
+  return undefined;
+}
+
 /**
  * The class an assistant message names, if any: a classifier refusal first, then a provider rejection, then a
  * transport break. The three cannot overlap — a rejection is defined as having neither of the others' markers.
