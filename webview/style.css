@@ -292,7 +292,8 @@ button.icon-btn:disabled {
 }
 
 .user-text {
-  white-space: pre-wrap;
+  white-space: pre-wrap; /* keep the message's own newlines */
+  overflow-wrap: anywhere; /* but break a long unbreakable token (a hex blob, a URL) onto the next line, never scroll sideways */
 }
 
 .user-bubble.queued {
@@ -332,8 +333,13 @@ button.icon-btn:disabled {
 
 .entry.user.head {
   position: sticky;
-  top: var(--feed-top);
+  top: 0; /* snug against the feed's content top, not floating low; the feed's own padding keeps a small breath above it */
   z-index: 1; /* over its own turn's rows as they scroll under it; the next turn's bubble still pushes it out */
+}
+
+/* A zero-height marker at each turn's natural top; the stick-watcher (feed.ts) reads it to flag `is-stuck`. */
+.stick-sentinel {
+  height: 0;
 }
 
 /* A long sent message is already folded to eight fading lines by default (`.user-bubble.collapsed` above), so a stuck
@@ -341,39 +347,44 @@ button.icon-btn:disabled {
    alike — no separate sticky-only cap, since short messages dominate and nothing is ever permanently hidden. */
 
 /* ---------- the to-bottom control ----------
-   A zero-height sticky slot pinned just above the composer; the round button centres over the feed and floats there
-   while the feed is scrolled up. feed.ts sets the slot's `bottom` to clear the composer and hides it at the end. */
+   A zero-height sticky slot tucked just above the composer box; the round button centres over the feed and sits right
+   over the input while the feed is scrolled up. feed.ts sets the slot's `bottom` to tuck it and hides it at the end. */
 .to-bottom-slot {
   position: sticky;
-  bottom: 8px;
+  /* The slot's own bottom sits at the composer's top edge (the feed reserves that room); a small negative nudge tucks
+     the button down into the composer's top fade, so it reads as sitting right over the input, not floating up the feed. */
+  bottom: -20px;
   height: 0;
   z-index: 1;
   pointer-events: none; /* the empty strip never eats a scroll; only the button below takes the pointer */
 }
 
+/* A filled pill that stands off the feed: solid surface, an accent ring and a clear shadow, so it reads at a glance. */
 .to-bottom {
   position: absolute;
   bottom: 0;
   left: 50%;
   transform: translateX(-50%);
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--line-2);
-  box-shadow: 0 6px 16px -8px var(--pop-shadow);
-  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  box-shadow: 0 4px 14px -4px var(--pop-shadow), 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+  color: var(--accent);
   pointer-events: auto;
 }
 
 .to-bottom:hover {
+  background: var(--accent);
   border-color: var(--accent);
+  color: var(--on-accent, #fff);
 }
 
 .to-bottom .icon {
   width: 18px;
   height: 18px;
+  stroke-width: 2.4;
 }
 
 .queued-label {
@@ -4197,13 +4208,15 @@ button.pill.mode-chip {
   position: relative;
 }
 
-/* A round chip centred on the bubble's top-right corner, shown while the message is hovered or focused. */
-.entry.user .user-bubble > button.msg-actions {
+/* A round chip centred on the bubble's top-right corner, shown while the message is hovered or focused. The
+   "go to its place" control shares the corner and look; which one shows depends on whether the bubble is stuck. */
+.entry.user .user-bubble > button.msg-actions,
+.entry.user .user-bubble > button.goto-place {
   position: absolute;
   top: 0;
   right: 0;
   transform: translate(50%, -50%);
-  z-index: 1;
+  z-index: 2; /* above the sticky bubble's own stacking */
   border-radius: 50%;
   background: var(--pop-bg);
   border: 1px solid var(--line);
@@ -4216,14 +4229,31 @@ button.pill.mode-chip {
   opacity: 1;
 }
 
-.entry.user .user-bubble > button.msg-actions:hover {
+.entry.user .user-bubble > button.msg-actions:hover,
+.entry.user .user-bubble > button.goto-place:hover {
   color: var(--fg);
   background: var(--pop-bg);
 }
 
-.entry.user .user-bubble > button.msg-actions .icon {
+.entry.user .user-bubble > button.msg-actions .icon,
+.entry.user .user-bubble > button.goto-place .icon {
   width: 14px;
   height: 14px;
+}
+
+/* While a sent bubble is stuck to the top it is a displaced copy, not in its place: forking from it makes no sense,
+   so hide the fork menu and offer the way back to the message instead. In its natural spot the fork behaves as ever. */
+.entry.user.head:not(.is-stuck) .user-bubble > button.goto-place {
+  display: none;
+}
+
+.entry.user.head.is-stuck .user-bubble > button.msg-actions {
+  display: none;
+}
+
+.entry.user.head.is-stuck:hover .user-bubble > button.goto-place,
+.entry.user.head.is-stuck:focus-within .user-bubble > button.goto-place {
+  opacity: 1;
 }
 
 .pop-message-actions {

@@ -112,6 +112,9 @@ function answerCard(answer: Answer): HTMLElement {
 /** A sent message taller than this many lines is collapsed (to the `.user-bubble.collapsed` height, 8 lines). */
 const LONG_MESSAGE_LINES = 12;
 const TO_BOTTOM_LABEL = "К последнему сообщению";
+const GOTO_PLACE_LABEL = "К сообщению на своём месте";
+/** Where the message lands below the top line when the person scrolls to its real place: clear of the stick line, in flow. */
+const GOTO_PLACE_MARGIN = 24;
 const OPEN_MESSAGE = "Показать полностью";
 const CLOSE_MESSAGE = "Свернуть";
 /** 13px × 1.55, for when the computed line height is not a number. */
@@ -330,6 +333,8 @@ export class Feed {
   private scrollFrame: number | undefined;
   /** One turn's wrapper, keyed by the id of the sent message that leads it (`lead` for anything before the first). */
   private readonly sections = new Map<string, HTMLElement>();
+  /** The feed's top inset in px (`--feed-top`): the line a sent bubble rests on when it is stuck. */
+  private readonly feedTopPx: number;
   /** Per block: what it was rendered from, and the extras (the time stamp) that also shape it. */
   private readonly rendered = new Map<string, { block: Block; extras: string; element: HTMLElement }>();
   /** Tool steps whose IN/OUT box the person expanded. */
@@ -371,14 +376,16 @@ export class Feed {
     this.toBottomSlot = el("div", { class: "to-bottom-slot" }, this.toBottom);
     this.toBottomSlot.hidden = true;
     root.classList.add("feed");
+    this.feedTopPx = parseFloat(getComputedStyle(root).getPropertyValue("--feed-top")) || 8;
     root.replaceChildren(this.list, ...(options.tail ?? []), this.indicator, this.toBottomSlot);
     root.addEventListener("click", (event) => this.onClick(event));
-    // Sticky bubbles ride the scroll natively; the handler only tells the to-bottom control when the feed left the end.
+    // Sticky bubbles ride the scroll natively; the handler flags which sent bubble is pinned and shows the to-bottom control.
     root.addEventListener("scroll", () => {
       if (this.scrollFrame !== undefined) return;
       this.scrollFrame = requestAnimationFrame(() => {
         this.scrollFrame = undefined;
         this.updateToBottom();
+        this.updateStuck();
       });
     });
     root.addEventListener("keydown", (event) => {
@@ -414,6 +421,7 @@ export class Feed {
     this.verb.textContent = waiting ?? indicatorVerb(activity);
     if (stick) this.root.scrollTop = this.root.scrollHeight;
     this.updateToBottom();
+    this.updateStuck();
   }
 
   /** The block the timeline ends with now: where something that happens now belongs. */
@@ -439,9 +447,9 @@ export class Feed {
   setBottomInset(px: number): void {
     const stick = this.stuck(); // before the padding changes
     this.root.style.paddingBottom = `${px}px`;
-    this.toBottomSlot.style.bottom = `${px + 8}px`; // the control floats just above the composer, clear of its box
     if (stick) this.root.scrollTop = this.root.scrollHeight;
     this.updateToBottom();
+    this.updateStuck();
   }
 
   /** The host's answer to «Отозвать» / «Изменить»: the buttons work again; one that came too late says so for a moment. */
@@ -496,7 +504,14 @@ export class Feed {
         section = el("div", { class: "turn" });
         this.sections.set(turn.key, section);
       }
-      this.place(section, turn.items);
+      if (turn.key === "lead") {
+        this.place(section, turn.items);
+        return section;
+      }
+      // A zero-height marker at the turn's natural top: `scrollToPlace` reads it to find where the message really sits.
+      let sentinel = section.querySelector<HTMLElement>(":scope > .stick-sentinel");
+      if (sentinel === null) sentinel = el("div", { class: "stick-sentinel", "aria-hidden": "true" });
+      this.place(section, [sentinel, ...turn.items]);
       return section;
     });
     this.place(this.list, sections);
@@ -518,6 +533,7 @@ export class Feed {
       }
     }
     this.updateToBottom();
+    this.updateStuck();
   }
 
   /** Reconciles `parent`'s children to `children` in order, reusing the cached elements and dropping the rest. */
@@ -534,6 +550,24 @@ export class Feed {
   /** Shown only while the feed is scrolled up, so there is a latest message to return to. */
   private updateToBottom(): void {
     this.toBottomSlot.hidden = this.stuck();
+  }
+
+  /**
+   * Flags the sent bubble that is pinned to the feed's top as `is-stuck`: its rendered top has reached the rest line,
+   * so it is a displaced copy, not in its place. In its natural spot it reads normally and the fork menu returns.
+   */
+  private updateStuck(): void {
+    const view = this.root.getBoundingClientRect();
+    if (view.height === 0) return; // no layout (a hidden tab, or jsdom): nothing is on screen to pin
+    // The sentinel marks the head's natural top; at rest it sits on the stick line. Only once it has scrolled strictly
+    // above that line is the head displaced (pinned), not merely sitting there in flow — so the first message at the
+    // very top (its natural top coincides with the line) never reads as stuck.
+    const line = view.top + this.feedTopPx - 1;
+    for (const section of this.sections.values()) {
+      const head = section.querySelector<HTMLElement>(":scope > .entry.user.head");
+      const sentinel = section.querySelector<HTMLElement>(":scope > .stick-sentinel");
+      if (head !== null && sentinel !== null) head.classList.toggle("is-stuck", sentinel.getBoundingClientRect().top < line);
+    }
   }
 
   /** Back to the latest message; a smooth ride unless the person asked for less motion. */
@@ -580,8 +614,9 @@ export class Feed {
     switch (block.kind) {
       case "user": {
         const bubble = this.renderUser(block);
-        // pinned to the bubble's top-right corner (CSS); an answer card carries its own, aimed at the question's turn
-        if (block.delivery === undefined && block.answer === undefined) bubble.append(this.messageActions(block.id));
+        // both in the bubble's top-right corner (CSS): the fork menu while the bubble is in place, the "go to its place"
+        // control instead while it is stuck to the top. An answer card carries its own fork menu, aimed at the question.
+        if (block.delivery === undefined && block.answer === undefined) bubble.append(this.messageActions(block.id), this.gotoPlace(block.id));
         return [bubble];
       }
       case "assistant":
@@ -722,6 +757,23 @@ export class Feed {
       () => this.options.onMessageActions?.(blockId, actions),
     );
     return actions;
+  }
+
+  /** The stuck bubble's corner control (CSS shows it only while `is-stuck`): it takes the view to the message's real place. */
+  private gotoPlace(blockId: string): HTMLButtonElement {
+    return button(icon("goTo"), { class: "icon-btn goto-place", "data-role": "goto-place", title: GOTO_PLACE_LABEL, "aria-label": GOTO_PLACE_LABEL }, () =>
+      this.scrollToPlace(blockId),
+    );
+  }
+
+  /** Scrolls the feed up to where the stuck message actually sits, landing it clear of the stick line so it reads in flow. */
+  private scrollToPlace(blockId: string): void {
+    const head = this.rendered.get(blockId)?.element;
+    const sentinel = head?.previousElementSibling as HTMLElement | null;
+    if (head === undefined || sentinel === null || !sentinel.classList.contains("stick-sentinel")) return;
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+    const target = this.root.scrollTop + (sentinel.getBoundingClientRect().top - this.root.getBoundingClientRect().top) - GOTO_PLACE_MARGIN;
+    this.root.scrollTo({ top: Math.max(0, target), behavior: reduce ? "auto" : "smooth" });
   }
 
   /**

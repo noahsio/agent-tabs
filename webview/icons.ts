@@ -57,6 +57,12 @@ const SHAPES = {
     ["path", "M12 4.5v15"],
     ["path", "m6 13.5 6 6 6-6"],
   ],
+  // An upward arrow onto a baseline at the top: from the stuck copy, go up to where the message really sits.
+  goTo: [
+    ["path", "M5.5 4.5h13"],
+    ["path", "M12 19.5v-9.5"],
+    ["path", "m7 14 5-5 5 5"],
+  ],
 } satisfies Record<string, Shape[]>;
 
 export type IconName = keyof typeof SHAPES;
