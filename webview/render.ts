@@ -181,7 +181,7 @@ export class ChatView {
         this.post({ type: "stop" });
       },
     });
-    composerRoot.append(this.dock.element); // the composer's slot: a modal request replaces the composer, a non-blocking question's card sits with it
+    composerRoot.insertBefore(this.dock.element, this.composer.box); // the composer's slot: a modal request replaces the composer; a non-blocking question's card sits ABOVE the input (not below it, which fell off the window bottom)
     this.composer.input.addEventListener("keydown", () => {
       this.typedAt = Date.now();
     });
