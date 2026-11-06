@@ -86,8 +86,8 @@ describe.skipIf(!hasChrome)("sent bubbles that stick natively (headless Chrome)"
     const u3 = await bubble(page, "u3");
     const gap = await inset(page);
     expect(u3).not.toBeNull();
-    expect((u3 as Box).top).toBeGreaterThanOrEqual(gap - 1); // resting on the top inset, not above it
-    expect((u3 as Box).top).toBeLessThan(28); // and not scrolled down the feed: it is stuck at the top line
+    expect((u3 as Box).top).toBeGreaterThanOrEqual(0); // resting at the top, not pushed above it
+    expect((u3 as Box).top).toBeLessThan(14); // snug against the top line, not floating with a big gap
     // The real bubble is the one at the top — no copy doubling its text anywhere.
     const copies = await page.evaluate<number>(`Array.from(document.querySelectorAll(".user-text")).filter((n) => (n.textContent ?? "").trim() === "Сообщение три").length`);
     expect(copies).toBe(1);
@@ -151,5 +151,46 @@ describe.skipIf(!hasChrome)("sent bubbles that stick natively (headless Chrome)"
     })()`);
     expect(after.scroll).toBe(before.scroll); // the agent streamed on, but the feed did not jump
     expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(1); // and the stuck bubble held its line
+  });
+
+  const display = (id: string, role: string): Promise<string> =>
+    page.evaluate<string>(`getComputedStyle(document.querySelector('[data-block="${id}"] [data-role="${role}"]')).display`);
+
+  it("a_bubble_in_its_natural_place_is_not_stuck_and_shows_the_fork", async () => {
+    await scrollSo(page, "u2", 150); // u2 well down the feed, in its own place
+    await waitFor(page, `document.querySelector('[data-block="u2"]').classList.contains("is-stuck") === false`);
+    expect(await display("u2", "message-actions")).not.toBe("none"); // the fork menu is the one offered
+    expect(await display("u2", "goto-place")).toBe("none"); // no "go to place" while it is already there
+  });
+
+  it("a_stuck_bubble_is_flagged_and_hides_the_fork_in_favour_of_go_to_place", async () => {
+    await scrollSo(page, "u2", -100); // u2 pinned to the top
+    await waitFor(page, `document.querySelector('[data-block="u2"]').classList.contains("is-stuck")`);
+    expect(await display("u2", "message-actions")).toBe("none"); // forking a displaced copy makes no sense: gone
+    expect(await display("u2", "goto-place")).not.toBe("none"); // the way back to its place is offered instead
+    const corner = await page.evaluate<{ x: number; y: number }>(
+      `(() => { const r = document.querySelector('[data-block="u2"] [data-role="goto-place"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+    );
+    await page.move(corner); // hover brings the go-to-place control up (CSS), as it does for the person
+    await settle(page);
+    await page.screenshot(`${SHOTS}/stuck-no-fork.png`); // snug at the top, no fork, the go-to-place control shown on hover
+  });
+
+  it("the_go_to_place_control_takes_the_view_to_the_message_s_real_spot", async () => {
+    await scrollSo(page, "u2", -100);
+    await waitFor(page, `document.querySelector('[data-block="u2"]').classList.contains("is-stuck")`);
+    const btn = await page.evaluate<{ x: number; y: number }>(
+      `(() => { const r = document.querySelector('[data-block="u2"] [data-role="goto-place"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+    );
+    await page.click(btn);
+    // The smooth scroll settles with the real bubble resting below the stick line, in flow (not pinned).
+    await waitFor(
+      page,
+      `(() => { const b = document.querySelector('[data-block="u2"] .user-bubble').getBoundingClientRect(); const f = document.querySelector("main.feed").getBoundingClientRect(); return b.top - f.top > 18; })()`,
+    );
+    expect(await page.evaluate<boolean>(`document.querySelector('[data-block="u2"]').classList.contains("is-stuck")`)).toBe(false); // no longer pinned
+    const u2 = await bubble(page, "u2");
+    expect((u2 as Box).top).toBeGreaterThan(14); // the real bubble now sits below the stick line, in flow
+    expect((u2 as Box).top).toBeLessThan(await feedHeight(page)); // and on screen, where the person can read it in place
   });
 });

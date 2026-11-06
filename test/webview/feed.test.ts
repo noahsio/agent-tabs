@@ -224,7 +224,7 @@ describe("Feed", () => {
     const user: Block = { kind: "user", id: "u1", text: "вот", images: [{ id: "u1:0", mimeType: "image/png", name: "shot.png" }, { id: "u1:1", mimeType: "image/png" }] };
     feed.update([user], false);
     const bubble = entry("u1").querySelector(".user-bubble") as HTMLElement;
-    expect([...bubble.children].filter((child) => !child.matches('[data-role="message-actions"]')).map((child) => child.className)).toEqual(["uimgs", "user-text"]);
+    expect([...bubble.children].filter((child) => !child.matches("button.icon-btn")).map((child) => child.className)).toEqual(["uimgs", "user-text"]);
     const names = (): (string | null | undefined)[] => [...entry("u1").querySelectorAll(".uimg")].map((tile) => tile.querySelector('[data-role="image-name"]')?.textContent);
     expect(names()).toEqual(["shot.png", "image.png"]);
     expect(entry("u1").querySelector('[data-role="image-size"]')?.textContent).toBe(""); // known once the picture loads
@@ -867,7 +867,8 @@ describe("turn sections for the sticky sent bubbles", () => {
   const reply: Block = { kind: "assistant", id: "a1", text: "ок", thinking: "", streaming: false };
   const reply2: Block = { kind: "assistant", id: "a2", text: "ещё", thinking: "", streaming: false };
   const turns = (): HTMLElement[] => [...root.querySelectorAll<HTMLElement>(".timeline > .turn")];
-  const idsIn = (turn: HTMLElement): (string | undefined)[] => [...turn.children].map((row) => (row as HTMLElement).dataset["block"]);
+  const idsIn = (turn: HTMLElement): (string | undefined)[] =>
+    [...turn.children].filter((row) => !row.matches(".stick-sentinel")).map((row) => (row as HTMLElement).dataset["block"]);
 
   it("each_sent_message_opens_a_turn_that_holds_the_output_under_it", () => {
     feed.update(
@@ -898,6 +899,10 @@ describe("turn sections for the sticky sent bubbles", () => {
     expect(entry("u2").classList.contains("head")).toBe(false); // not with the agent yet: it never heads a turn
     // The queued message, not being a head, rides inside the previous turn rather than opening one of its own.
     expect(turns()).toHaveLength(1);
+    // The sent head carries both corner controls: the fork menu for its place, the go-to-place for while it is stuck.
+    expect(entry("u1").querySelector('[data-role="message-actions"]')).not.toBeNull();
+    expect(entry("u1").querySelector('[data-role="goto-place"]')).not.toBeNull();
+    expect(entry("u2").querySelector('[data-role="goto-place"]')).toBeNull(); // a queued message has no corner controls
   });
 
   it("output_before_the_first_sent_message_rides_a_lead_turn", () => {

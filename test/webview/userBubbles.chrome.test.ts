@@ -64,3 +64,47 @@ describe.skipIf(!hasChrome)("long sent messages in a real layout (headless Chrom
     expect(open.bubble.bottom - toggle.bottom).toBeLessThan(16); // and its bottom
   }, 15_000);
 });
+
+/** A sent message that is one long unbreakable token (a hex blob): it must wrap, never scroll the bubble sideways. */
+const HEX_STUB = `
+(function () {
+  var hex = "0x" + Array.from({ length: 100 }, function (_, i) { return "0123456789abcdef"[i % 16]; }).join("");
+  var blocks = [{ kind: "user", id: "u1", text: hex }];
+  window.acquireVsCodeApi = function () {
+    return {
+      getState: function () { return undefined; },
+      setState: function () {},
+      postMessage: function (message) {
+        if (message.type !== "ready") return;
+        var state = { type: "state", reconnectable: true, tab: { modelMode: "auto", durableId: "id-1" }, state: { blocks: blocks, dialogs: [], agents: [], running: false } };
+        setTimeout(function () { window.postMessage(JSON.stringify(state), "*"); }, 5);
+      },
+    };
+  };
+})();`;
+
+describe.skipIf(!hasChrome)("a long unbreakable token wraps instead of scrolling (headless Chrome)", () => {
+  let page: Page;
+
+  beforeAll(async () => {
+    page = await openPage(await webviewPage(HEX_STUB), { width: 360, height: 700 }); // a narrow tab, so the token must wrap
+    await waitFor(page, `document.querySelector('[data-block="u1"] .user-text') !== null`);
+  }, 30_000);
+
+  afterAll(() => page?.close());
+
+  it("a_100_char_hex_string_breaks_onto_several_lines_without_a_sideways_scroll", async () => {
+    const measured = await page.evaluate<{ textOverflow: number; feedOverflow: number; lines: number }>(`(() => {
+      const text = document.querySelector('[data-block="u1"] .user-text');
+      const feed = document.querySelector("main.feed");
+      return {
+        textOverflow: text.scrollWidth - text.clientWidth, // >0 would mean the long token overflows its box sideways
+        feedOverflow: feed.scrollWidth - feed.clientWidth, // and the feed must never gain a horizontal scrollbar
+        lines: Math.round(text.scrollHeight / (parseFloat(getComputedStyle(text).lineHeight) || 20)),
+      };
+    })()`);
+    expect(measured.textOverflow).toBeLessThanOrEqual(1); // no horizontal overflow: the hex blob wrapped
+    expect(measured.feedOverflow).toBeLessThanOrEqual(1); // nothing pushed the feed sideways
+    expect(measured.lines).toBeGreaterThan(1); // the 100-char token spread over several lines
+  }, 15_000);
+});

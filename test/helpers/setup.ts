@@ -7,3 +7,19 @@ if (typeof window !== "undefined" && globalThis.ResizeObserver === undefined) {
     disconnect(): void {}
   };
 }
+
+// jsdom has no IntersectionObserver; the feed watches sentinels to know when a sent bubble is stuck. A no-op is enough
+// for the jsdom suites (the stuck-state behaviour is covered under headless Chrome, which has a real one).
+if (typeof window !== "undefined" && globalThis.IntersectionObserver === undefined) {
+  globalThis.IntersectionObserver = class {
+    readonly root = null;
+    readonly rootMargin = "";
+    readonly thresholds = [];
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): [] {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
+}
