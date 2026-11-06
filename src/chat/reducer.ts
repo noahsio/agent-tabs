@@ -730,6 +730,10 @@ export function reviseQueued(s: ChatState, id: string, text: string, revision?: 
 
 function onAgentEnd(s: ChatState, frame: Json): ChatState {
   if (frame["aborted"] !== true) return s;
+  // A clean turn end carries no `aborted`, so this line never greets an ordinary finish. An abort OmO labels `"system"`
+  // (compaction, a deadline, its own liveness machinery) is not the person's «Стоп»: `SessionController.observeLiveness`
+  // tells that story honestly — the turn was abandoned, or the context is being compacted — so the bare line is wrong here.
+  if (frame["abortSource"] === "system") return s;
   const id = `aborted:${asString(frame["clientMessageId"]) ?? s.blocks.length}`;
   return { ...s, blocks: upsertBlock(s.blocks, notice(id, "info", "Ход остановлен")) };
 }
