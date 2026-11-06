@@ -2588,6 +2588,10 @@ button.uimg.att {
 /* sessions */
 
 /* Separate rounded rows with a thin gap between them, as in Claude Code. */
+.pop-slash .pop-list {
+  max-height: min(44vh, 360px);
+  overflow-y: auto;
+}
 .pop-sessions .pop-list {
   display: flex;
   flex-direction: column;
