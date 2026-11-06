@@ -358,6 +358,18 @@ button.icon-btn:disabled {
   z-index: 1; /* over its own turn's rows as they scroll under it; the next turn's bubble still pushes it out */
 }
 
+/* While stuck, the head is a band floating over the scroll: give it (the time row and the bubble's row) a solid
+   feed-background fill the full width of the feed, so no earlier row bleeds through beside the bubble or behind the
+   right-aligned time. The rounded bubble keeps its own `--surface` fill on top. Only when stuck — in flow the normal
+   transparent spacing stays. Raised above the top fade (`.feed::before`, z-index 3) so the time reads fully, crisp,
+   while the fade only softens whatever scrolls in the thin gap above the band. */
+.entry.user.head.is-stuck {
+  z-index: 4;
+  background: var(--bg);
+  margin-inline: calc(-1 * var(--feed-side));
+  padding-inline: var(--feed-side);
+}
+
 /* A zero-height marker at each turn's natural top; the stick-watcher (feed.ts) reads it to flag `is-stuck`. */
 .stick-sentinel {
   height: 0;
