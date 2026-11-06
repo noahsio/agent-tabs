@@ -862,196 +862,59 @@ describe("an answered question", () => {
   });
 });
 
-describe("the pinned copy of the last message", () => {
-  const lines = (count: number): string => Array.from({ length: count }, (_, index) => `строка ${index + 1}`).join("\n");
-  const slot = (): HTMLElement => root.querySelector(".pin-slot") as HTMLElement;
-  const pin = (): HTMLElement => root.querySelector('[data-role="pin"]') as HTMLElement;
-  const text = (): string | undefined => pin().querySelector(".user-text")?.textContent ?? undefined;
-  const toggle = (): HTMLButtonElement => pin().querySelector('[data-role="pin-toggle"]') as HTMLButtonElement;
-  const reply: Block = { kind: "assistant", id: "a1", text: "ок", thinking: "", streaming: false };
 
-  /** jsdom has no layout: the feed's viewport is 0–200, and every entry named in `above` sits over its top edge. */
-  function view(above: string[]): void {
-    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
-      configurable: true,
-      value(this: HTMLElement): DOMRect {
-        if (this === root) return { top: 0, bottom: 200, height: 200 } as DOMRect;
-        const top = above.includes(this.dataset["block"] ?? "") ? -60 : 80;
-        return { top, bottom: top + 40, height: 40 } as DOMRect;
-      },
-    });
-  }
-
-  beforeEach(() => {
-    // The pinned copy carries the message's own `.user-text`: 20 px a line, as the long-message suite measures it.
-    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
-      configurable: true,
-      get(this: HTMLElement): number {
-        return this.classList.contains("user-text") ? (this.textContent ?? "").split("\n").length * 20 : 0;
-      },
-    });
-    view([]);
-  });
-
-  afterEach(() => {
-    delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
-    delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
-  });
-
-  it("the_copy_shows_only_while_the_message_itself_is_out_of_view", () => {
-    const blocks: Block[] = [{ kind: "user", id: "u1", text: "первый" }, reply, { kind: "user", id: "u2", text: "второй" }];
-    feed.update(blocks, false);
-    expect(slot().hidden).toBe(true); // the message is on screen: nothing to scroll back to
-
-    view(["u2"]);
-    feed.update(blocks, false);
-    expect(slot().hidden).toBe(false);
-    expect(text()).toBe("второй"); // the last one, not the first
-
-    view([]);
-    feed.update(blocks, false);
-    expect(slot().hidden).toBe(true);
-  });
-
-  it("the_copy_leads_the_feed_and_is_empty_without_a_message_of_their_own", () => {
-    feed.update([reply], false);
-    expect(slot().hidden).toBe(true);
-    expect(root.firstElementChild).toBe(slot()); // over the top of the timeline, not under it
-  });
-
-  it("a_long_copy_keeps_three_lines_until_the_person_opens_it_and_a_short_one_has_no_control", () => {
-    view(["u1"]);
-    feed.update([{ kind: "user", id: "u1", text: lines(3) }], false);
-    expect(pin().classList.contains("collapsed")).toBe(false);
-    expect(toggle().hidden).toBe(true);
-
-    view(["u2"]);
-    feed.update([{ kind: "user", id: "u2", text: lines(20) }], false);
-    expect(pin().classList.contains("collapsed")).toBe(true);
-    expect(toggle().hidden).toBe(false);
-    expect(toggle().textContent).toBe("Показать полностью");
-    expect(toggle().getAttribute("aria-expanded")).toBe("false");
-
-    const scrolled = root.scrollTop;
-    toggle().click();
-    expect(pin().classList.contains("collapsed")).toBe(false);
-    expect(toggle().textContent).toBe("Свернуть");
-    expect(toggle().getAttribute("aria-expanded")).toBe("true");
-    expect(root.scrollTop).toBe(scrolled); // opening it reads in place: the feed does not move
-
-    toggle().click();
-    expect(pin().classList.contains("collapsed")).toBe(true);
-  });
-
-  it("the_next_message_is_pinned_closed_again", () => {
-    view(["u1"]);
-    feed.update([{ kind: "user", id: "u1", text: lines(20) }], false);
-    toggle().click();
-    expect(pin().classList.contains("collapsed")).toBe(false);
-
-    view(["u2"]);
-    feed.update([{ kind: "user", id: "u1", text: lines(20) }, reply, { kind: "user", id: "u2", text: lines(20) }], false);
-    expect(pin().classList.contains("collapsed")).toBe(true);
-  });
-
-  it("a_message_the_agent_does_not_have_yet_is_not_the_one_pinned", () => {
-    const sent: Block = { kind: "user", id: "u1", text: "уже у агента" };
-    const queued: Block = { kind: "user", id: "u2", text: "после хода", delivery: { state: "queued", queuedId: "q_1" } };
-    view(["u1", "u2"]);
-    feed.update([sent, reply, queued], true);
-    expect(text()).toBe("уже у агента");
-  });
-});
-
-describe("the sticky header follows the section in view", () => {
-  const slot = (): HTMLElement => root.querySelector(".pin-slot") as HTMLElement;
-  const pin = (): HTMLElement => root.querySelector('[data-role="pin"]') as HTMLElement;
-  const text = (): string | undefined => pin().querySelector(".user-text")?.textContent ?? undefined;
+describe("turn sections for the sticky sent bubbles", () => {
   const reply: Block = { kind: "assistant", id: "a1", text: "ок", thinking: "", streaming: false };
   const reply2: Block = { kind: "assistant", id: "a2", text: "ещё", thinking: "", streaming: false };
+  const turns = (): HTMLElement[] => [...root.querySelectorAll<HTMLElement>(".timeline > .turn")];
+  const idsIn = (turn: HTMLElement): (string | undefined)[] => [...turn.children].map((row) => (row as HTMLElement).dataset["block"]);
 
-  /** jsdom has no layout: the feed is 0–200, the copy's slot/bubble have fixed boxes, and `rects` places each entry. */
-  function place(rects: Record<string, [number, number]>): void {
-    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
-      configurable: true,
-      value(this: HTMLElement): DOMRect {
-        if (this === root) return { top: 0, bottom: 200, height: 200 } as DOMRect;
-        if (this.classList.contains("pin-slot")) return { top: 0, bottom: 0, height: 0 } as DOMRect;
-        if (this.classList.contains("pin")) return { top: 6, bottom: 46, height: 40 } as DOMRect;
-        const box = rects[this.dataset["block"] ?? ""] ?? [80, 120];
-        return { top: box[0], bottom: box[1], height: box[1] - box[0] } as DOMRect;
-      },
-    });
-  }
-
-  beforeEach(() => {
-    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get: () => 0 });
+  it("each_sent_message_opens_a_turn_that_holds_the_output_under_it", () => {
+    feed.update(
+      [
+        { kind: "user", id: "u1", text: "первый" },
+        reply,
+        { kind: "user", id: "u2", text: "второй" },
+        reply2,
+      ],
+      false,
+    );
+    const sections = turns();
+    expect(sections).toHaveLength(2);
+    expect(idsIn(sections[0] as HTMLElement)).toEqual(["u1", "a1"]); // the sent bubble and the reply that followed it
+    expect(idsIn(sections[1] as HTMLElement)).toEqual(["u2", "a2"]);
   });
 
-  afterEach(() => {
-    delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
-    delete (HTMLElement.prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect;
+  it("only_a_sent_message_is_a_sticky_head", () => {
+    feed.update(
+      [
+        { kind: "user", id: "u1", text: "первый" },
+        reply,
+        { kind: "user", id: "u2", text: "в очереди", delivery: { state: "queued", queuedId: "q1" } },
+      ],
+      true,
+    );
+    expect(entry("u1").classList.contains("head")).toBe(true);
+    expect(entry("u2").classList.contains("head")).toBe(false); // not with the agent yet: it never heads a turn
+    // The queued message, not being a head, rides inside the previous turn rather than opening one of its own.
+    expect(turns()).toHaveLength(1);
   });
 
-  const three: Block[] = [
-    { kind: "user", id: "u1", text: "первый" },
-    reply,
-    { kind: "user", id: "u2", text: "второй" },
-    reply2,
-    { kind: "user", id: "u3", text: "третий" },
-  ];
-
-  it("only_a_message_scrolled_wholly_past_heads_the_view_not_one_still_visible", () => {
-    const blocks: Block[] = [{ kind: "user", id: "u1", text: "первый" }, reply, { kind: "user", id: "u2", text: "второй" }];
-    place({ u1: [-60, -20], u2: [50, 90] }); // u1 fully above the edge, u2 still in view
-    feed.update(blocks, false);
-    expect(slot().hidden).toBe(false);
-    expect(text()).toBe("первый");
-
-    place({ u1: [10, 70], u2: [120, 160] }); // u1 now in view: its bottom is below the edge
-    feed.update(blocks, false);
-    expect(slot().hidden).toBe(true); // nothing is wholly past, so nothing heads the view — no premature stick
+  it("output_before_the_first_sent_message_rides_a_lead_turn", () => {
+    feed.update([reply, { kind: "user", id: "u1", text: "первый" }, reply2], false);
+    const sections = turns();
+    expect(sections).toHaveLength(2);
+    expect(idsIn(sections[0] as HTMLElement)).toEqual(["a1"]); // before any sent message: a head-less lead section
+    expect(idsIn(sections[1] as HTMLElement)).toEqual(["u1", "a2"]);
   });
 
-  it("a_message_straddling_the_top_edge_is_in_transition_not_the_header", () => {
-    place({ u1: [-120, -80], u2: [-30, 40], u3: [120, 180] }); // u1 wholly past, u2 crossing the edge, u3 below
-    feed.update(three, false);
-    expect(slot().hidden).toBe(false);
-    expect(text()).toBe("первый"); // the last message wholly past, not the straddling one
-    expect(text()).not.toBe("второй"); // u2 is still visible, so it is never copied into the header
-  });
-
-  it("the_header_swaps_to_an_earlier_message_as_the_scroll_climbs", () => {
-    place({ u1: [-200, -160], u2: [-120, -80], u3: [120, 180] }); // u1 and u2 both wholly past
-    feed.update(three, false);
-    expect(text()).toBe("второй"); // the most recent one wholly past
-
-    place({ u1: [-120, -80], u2: [-30, 40], u3: [120, 180] }); // scrolled up: u2 back into transition
-    feed.update(three, false);
-    expect(text()).toBe("первый"); // swapped to the earlier one
-  });
-
-  it("the_next_bubble_crossing_the_edge_pushes_the_copy_with_a_transform", () => {
-    place({ u1: [-120, -80], u2: [-30, 40], u3: [120, 180] }); // u2 crossing: it pushes the copy of u1 up
-    feed.update(three, false);
-    expect(pin().style.transform).toMatch(/translateY\(-\d/);
-  });
-
-  it("a_resting_header_with_no_bubble_crossing_carries_no_transform", () => {
-    place({ u1: [-120, -80], u2: [120, 160], u3: [200, 240] }); // u2 far below the edge: nothing is pushing
-    feed.update(three, false);
-    expect(pin().style.transform).toBe("");
-  });
-
-  it("reduced_motion_snaps_instead_of_pushing", () => {
-    const prior = window.matchMedia;
-    (window as unknown as { matchMedia: unknown }).matchMedia = () => ({ matches: true });
-    try {
-      place({ u1: [-120, -80], u2: [-30, 40], u3: [120, 180] }); // u2 crossing, as in the push case
-      feed.update(three, false);
-      expect(pin().style.transform).toBe(""); // no transform: an instant swap, not a slide
-    } finally {
-      (window as unknown as { matchMedia: unknown }).matchMedia = prior;
-    }
+  it("reuses_the_cached_entry_and_turn_across_a_streaming_re_render", () => {
+    const streaming: Block = { kind: "assistant", id: "a1", text: "раз", thinking: "", streaming: true };
+    feed.update([{ kind: "user", id: "u1", text: "первый" }, streaming], false);
+    const head = entry("u1");
+    const section = head.parentElement;
+    feed.update([{ kind: "user", id: "u1", text: "первый" }, { ...streaming, text: "раз два" }], false); // the agent streamed on
+    expect(entry("u1")).toBe(head); // the same sticky bubble element, never rebuilt — nothing jumps
+    expect(entry("u1").parentElement).toBe(section); // and still in the same turn wrapper
   });
 });

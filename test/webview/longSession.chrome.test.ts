@@ -45,10 +45,10 @@ describe.skipIf(!hasChrome)("a long session's first state (headless Chrome)", ()
   });
 
   it("shows_every_block_of_the_first_state", async () => {
-    await waitFor(page, `document.querySelectorAll('main .timeline > [data-block]').length >= ${BLOCKS}`);
+    await waitFor(page, `document.querySelectorAll('main .timeline [data-block]').length >= ${BLOCKS}`);
     const painted = await page.evaluate<number>("Math.round(performance.now() - window.__postedAt)");
     console.log(`first paint of ${BLOCKS} blocks: ${painted} ms`);
-    expect(await page.evaluate<number>("document.querySelectorAll('main .timeline > [data-block]').length")).toBe(BLOCKS);
+    expect(await page.evaluate<number>("document.querySelectorAll('main .timeline [data-block]').length")).toBe(BLOCKS);
     expect(await page.evaluate<boolean>("document.querySelector('main .empty').hidden")).toBe(true); // no new-chat hint over a conversation
   });
 });

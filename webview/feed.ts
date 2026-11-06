@@ -111,15 +111,7 @@ function answerCard(answer: Answer): HTMLElement {
 
 /** A sent message taller than this many lines is collapsed (to the `.user-bubble.collapsed` height, 8 lines). */
 const LONG_MESSAGE_LINES = 12;
-/**
- * Lines the pinned copy keeps (CSS clamps it to the same count). Tighter than a collapsed message in the timeline:
- * the copy floats over the feed, so it has to say what was asked without taking the view.
- */
-const PIN_LINES = 3;
-/** The copy's resting room below the feed's top edge (CSS `.pin { top }`): the push is measured against this line. */
-const PIN_TOP_PX = 6;
-const PIN_LABEL = "Закреплённое сообщение";
-const PIN_JUMP = "Перейти к сообщению";
+const TO_BOTTOM_LABEL = "К последнему сообщению";
 const OPEN_MESSAGE = "Показать полностью";
 const CLOSE_MESSAGE = "Свернуть";
 /** 13px × 1.55, for when the computed line height is not a number. */
@@ -217,6 +209,14 @@ function isAnswered(block: Block): boolean {
 /** A message not in the conversation yet (sending, queued, not sent): it stays under everything the agent did meanwhile. */
 function isWaiting(block: Block): boolean {
   return block.kind === "user" && block.delivery !== undefined;
+}
+
+/**
+ * A message the person sent and the agent already has: the one that heads its turn. Its bubble is `position: sticky`
+ * and the turn it leads bounds it, so the next sent message pushes it up and out (see `renderBlocks`'s sections).
+ */
+function isSent(block: Block): boolean {
+  return block.kind === "user" && block.delivery === undefined && block.answer === undefined && block.text !== "";
 }
 
 function indicatorVerb(activity: FeedActivity | undefined): string {
@@ -324,17 +324,12 @@ export class Feed {
   private readonly list: HTMLElement;
   private readonly indicator: HTMLElement;
   private readonly verb: HTMLElement;
-  /** The sticky header of sent messages over the top of the feed: the slot that holds it, its text and its control. */
-  private readonly pinSlot: HTMLElement;
-  private readonly pin: HTMLElement;
-  private readonly pinText: HTMLElement;
-  private readonly pinToggle: HTMLButtonElement;
-  /** The corner control that scrolls the feed to the real message the copy mirrors. */
-  private readonly pinJump: HTMLButtonElement;
-  /** The message the copy shows now, and whether the person opened it (a swap to another message pins it closed). */
-  private pinned: string | undefined;
-  private pinOpen = false;
+  /** The round control that floats over the composer while the feed is scrolled up: a tap returns to the latest message. */
+  private readonly toBottom: HTMLButtonElement;
+  private readonly toBottomSlot: HTMLElement;
   private scrollFrame: number | undefined;
+  /** One turn's wrapper, keyed by the id of the sent message that leads it (`lead` for anything before the first). */
+  private readonly sections = new Map<string, HTMLElement>();
   /** Per block: what it was rendered from, and the extras (the time stamp) that also shape it. */
   private readonly rendered = new Map<string, { block: Block; extras: string; element: HTMLElement }>();
   /** Tool steps whose IN/OUT box the person expanded. */
@@ -370,24 +365,20 @@ export class Feed {
     const star = el("span", { class: "star", "aria-hidden": "true" }, icon("spark"));
     this.indicator = el("div", { class: "indicator", "data-role": "indicator", role: "status" }, star, this.verb);
     this.indicator.hidden = true;
-    this.pinText = el("div", { class: "user-text" });
-    this.pinToggle = button("", { class: "link message-toggle", "data-role": "pin-toggle" }, () => {
-      this.pinOpen = !this.pinOpen;
-      this.showPin(); // in place: the view never moves away from what the agent is doing
-    });
-    this.pinJump = button(icon("jumpTo"), { class: "icon-btn pin-jump", "data-role": "pin-jump", title: PIN_JUMP, "aria-label": PIN_JUMP }, () => this.jumpToPinned());
-    this.pin = el("div", { class: "user-bubble pin", "data-role": "pin", role: "group", "aria-label": PIN_LABEL }, this.pinText, this.pinJump, this.pinToggle);
-    this.pinSlot = el("div", { class: "pin-slot" }, this.pin);
-    this.pinSlot.hidden = true;
+    this.toBottom = button(icon("scrollDown"), { class: "icon-btn to-bottom", "data-role": "to-bottom", title: TO_BOTTOM_LABEL, "aria-label": TO_BOTTOM_LABEL }, () =>
+      this.scrollToBottom(),
+    );
+    this.toBottomSlot = el("div", { class: "to-bottom-slot" }, this.toBottom);
+    this.toBottomSlot.hidden = true;
     root.classList.add("feed");
-    root.replaceChildren(this.pinSlot, this.list, ...(options.tail ?? []), this.indicator);
+    root.replaceChildren(this.list, ...(options.tail ?? []), this.indicator, this.toBottomSlot);
     root.addEventListener("click", (event) => this.onClick(event));
-    // The copy comes and goes as the message it stands for leaves the view; one measure per frame, however many events.
+    // Sticky bubbles ride the scroll natively; the handler only tells the to-bottom control when the feed left the end.
     root.addEventListener("scroll", () => {
       if (this.scrollFrame !== undefined) return;
       this.scrollFrame = requestAnimationFrame(() => {
         this.scrollFrame = undefined;
-        this.updatePin();
+        this.updateToBottom();
       });
     });
     root.addEventListener("keydown", (event) => {
@@ -422,6 +413,7 @@ export class Feed {
     this.indicator.classList.toggle("waiting", waiting !== undefined);
     this.verb.textContent = waiting ?? indicatorVerb(activity);
     if (stick) this.root.scrollTop = this.root.scrollHeight;
+    this.updateToBottom();
   }
 
   /** The block the timeline ends with now: where something that happens now belongs. */
@@ -447,7 +439,9 @@ export class Feed {
   setBottomInset(px: number): void {
     const stick = this.stuck(); // before the padding changes
     this.root.style.paddingBottom = `${px}px`;
+    this.toBottomSlot.style.bottom = `${px + 8}px`; // the control floats just above the composer, clear of its box
     if (stick) this.root.scrollTop = this.root.scrollHeight;
+    this.updateToBottom();
   }
 
   /** The host's answer to «Отозвать» / «Изменить»: the buttons work again; one that came too late says so for a moment. */
@@ -481,18 +475,33 @@ export class Feed {
     const rows = [...this.guardRows.values()];
     const ids = new Set(blocks.map((block) => block.id));
     const plans = todoStates(blocks);
-    const after = (anchor: string | undefined): HTMLElement[] => rows.filter((row) => row.after === anchor).map((row) => row.row);
+    const after = (anchor: string | undefined): { element: HTMLElement; head: boolean }[] =>
+      rows.filter((row) => row.after === anchor).map((row) => ({ element: row.row, head: false }));
     // rows from before the first block lead; rows whose block is gone close the list
-    const elements = [
+    const flat = [
       ...after(undefined),
-      ...blocks.flatMap((block) => [this.blockElement(block, shown.get(block.id), plans.get(block.id)), ...after(block.id)]),
-      ...rows.filter((row) => row.after !== undefined && !ids.has(row.after)).map((row) => row.row),
+      ...blocks.flatMap((block) => [{ element: this.blockElement(block, shown.get(block.id), plans.get(block.id)), head: isSent(block) }, ...after(block.id)]),
+      ...rows.filter((row) => row.after !== undefined && !ids.has(row.after)).map((row) => ({ element: row.row, head: false })),
     ];
-    elements.forEach((element, index) => {
-      const current = this.list.children[index] ?? null;
-      if (current !== element) this.list.insertBefore(element, current);
+    // Each sent message opens a turn — its own containing block. Its bubble is `position: sticky` inside that turn, so
+    // the next turn's bubble pushes it up and out natively: no copy, nothing fading in, the real bubbles carry the top.
+    const turns: { key: string; items: HTMLElement[] }[] = [];
+    for (const { element, head } of flat) {
+      if (head || turns.length === 0) turns.push({ key: head ? (element.dataset["block"] as string) : "lead", items: [] });
+      (turns[turns.length - 1] as { items: HTMLElement[] }).items.push(element);
+    }
+    const sections = turns.map((turn) => {
+      let section = this.sections.get(turn.key);
+      if (section === undefined) {
+        section = el("div", { class: "turn" });
+        this.sections.set(turn.key, section);
+      }
+      this.place(section, turn.items);
+      return section;
     });
-    while (this.list.children.length > elements.length) this.list.lastElementChild?.remove();
+    this.place(this.list, sections);
+    const live = new Set(turns.map((turn) => turn.key));
+    for (const key of [...this.sections.keys()]) if (!live.has(key)) this.sections.delete(key);
     this.fitMessages(false); // in the DOM now: they can be measured
     for (const [id, { block }] of this.rendered) {
       if (ids.has(id)) continue;
@@ -508,96 +517,29 @@ export class Feed {
         this.tiles.delete(image.id);
       }
     }
-    this.updatePin();
+    this.updateToBottom();
   }
 
-  // ---------- the sticky header of sent messages ----------
-
-  /** The person's own sent messages the agent already has, in timeline order: the sticky-header candidates. */
-  private sentBlocks(): UserBlock[] {
-    return this.blocks.filter(
-      (block): block is UserBlock => block.kind === "user" && block.delivery === undefined && block.answer === undefined && block.text !== "",
-    );
+  /** Reconciles `parent`'s children to `children` in order, reusing the cached elements and dropping the rest. */
+  private place(parent: HTMLElement, children: HTMLElement[]): void {
+    children.forEach((child, index) => {
+      const current = parent.children[index] ?? null;
+      if (current !== child) parent.insertBefore(child, current);
+    });
+    while (parent.children.length > children.length) parent.lastElementChild?.remove();
   }
 
-  /**
-   * The sticky header, a grouped-list section header of sent messages: it mirrors the most recent sent message whose
-   * own bubble has scrolled *entirely* above the feed's top edge — never one still in view — collapsed to `PIN_LINES`.
-   * The next sent bubble, rising through the edge, is itself what the person sees crossing; as it arrives it pushes the
-   * resting copy up and out (`pushPin`) and, once fully past, becomes the one the header mirrors. Above the first sent
-   * message, nothing heads the view, so the copy is hidden.
-   */
-  private updatePin(): void {
-    const sent = this.sentBlocks();
-    const view = this.root.getBoundingClientRect();
-    if (sent.length === 0 || view.height === 0) {
-      // nothing sent yet, or a hidden tab with no layout: nothing to head
-      this.pinned = undefined;
-      this.pinSlot.hidden = true;
-      return;
-    }
-    // One read pass over the candidates: the last whose bubble sits wholly above the edge heads the view.
-    const rects = sent.map((block) => this.rendered.get(block.id)?.element?.getBoundingClientRect());
-    let current: UserBlock | undefined;
-    let nextRect: DOMRect | undefined;
-    for (let index = 0; index < sent.length; index++) {
-      const rect = rects[index];
-      if (rect !== undefined && rect.bottom <= view.top) {
-        current = sent[index];
-        nextRect = rects[index + 1];
-      }
-    }
-    if (current === undefined) {
-      this.pinned = undefined;
-      this.pinSlot.hidden = true;
-      return;
-    }
-    if (current.id !== this.pinned || current.text !== this.pinText.textContent) {
-      this.pinned = current.id;
-      this.pinOpen = false; // a message they have not read back yet is pinned closed
-      this.pinText.textContent = current.text;
-    }
-    this.pinSlot.hidden = false;
-    this.showPin(); // fold to the resting height before the push measures it
-    this.pushPin(view, nextRect);
+  // ---------- the to-bottom control ----------
+
+  /** Shown only while the feed is scrolled up, so there is a latest message to return to. */
+  private updateToBottom(): void {
+    this.toBottomSlot.hidden = this.stuck();
   }
 
-  /**
-   * The push transition: the next sent bubble, rising through the feed's top edge, shoves the resting copy up by how
-   * far it has crossed, until the copy clears the edge just as that bubble is itself fully past (and becomes the one
-   * the header mirrors). Transform-based and driven by the scroll; under `prefers-reduced-motion` the copy snaps.
-   */
-  private pushPin(view: DOMRect, next: DOMRect | undefined): void {
+  /** Back to the latest message; a smooth ride unless the person asked for less motion. */
+  private scrollToBottom(): void {
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
-    const restOffset = this.pinSlot.getBoundingClientRect().top - view.top + PIN_TOP_PX; // the copy's resting top, from the edge
-    const limit = restOffset + this.pin.getBoundingClientRect().height; // the push that lifts the copy's bottom to the edge
-    const crossed = next === undefined ? 0 : view.top - next.top; // how far the next bubble has gone above the edge
-    const push = reduce ? 0 : Math.max(0, Math.min(limit, crossed));
-    this.pin.style.transform = push > 0 ? `translateY(${-push}px)` : "";
-  }
-
-  /**
-   * Scrolls the feed to the real message the header mirrors now. Centred so it lands clear of the top edge where the
-   * copy docks — the view moving it into sight drops it below that edge, so an earlier message (or none) heads the
-   * view instead, with no fight for the top line. A target that is not in the DOM is a no-op.
-   */
-  private jumpToPinned(): void {
-    if (this.pinned === undefined) return;
-    const element = this.rendered.get(this.pinned)?.element;
-    if (element === undefined) return;
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    element.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
-  }
-
-  /** The copy's own fold: `PIN_LINES` while closed, and the control only when the text does not fit in them. */
-  private showPin(): void {
-    const line = parseFloat(getComputedStyle(this.pinText).lineHeight) || FALLBACK_LINE_PX;
-    const long = this.pinText.scrollHeight > PIN_LINES * line; // every read before the writes below
-    this.pin.classList.toggle("long", long);
-    this.pin.classList.toggle("collapsed", long && !this.pinOpen);
-    this.pinToggle.hidden = !long;
-    this.pinToggle.textContent = this.pinOpen ? CLOSE_MESSAGE : OPEN_MESSAGE;
-    this.pinToggle.setAttribute("aria-expanded", String(this.pinOpen));
+    this.root.scrollTo({ top: this.root.scrollHeight, behavior: reduce ? "auto" : "smooth" });
   }
 
   /**
@@ -619,7 +561,8 @@ export class Feed {
     }
     // an answered question is the person's own turn, wherever the answer was recorded: the user entry's row and menu
     const kind = block.kind === "user" || isAnswered(block) ? "user" : isPending(block) ? "pending" : "steps";
-    const element = el("div", { "data-block": block.id, class: `entry ${kind}` });
+    // A sent message heads its turn and sticks to the feed's top (CSS `.entry.user.head`); the rest scroll normally.
+    const element = el("div", { "data-block": block.id, class: `entry ${kind}${isSent(block) ? " head" : ""}` });
     if (stamp !== undefined) element.append(el("div", { class: "ts" }, stamp));
     element.append(...this.renderBlock(block, shownPlan));
     if (previous !== undefined) {
