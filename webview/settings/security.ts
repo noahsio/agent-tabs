@@ -261,6 +261,8 @@ export class SecuritySection implements SectionView {
   private readonly hint: HTMLElement;
   private readonly decider: HTMLElement;
   private readonly groups: HTMLElement;
+  /** The person's «always allow» list: each entry with what it allows and a «Забыть» button. */
+  private readonly whitelist: HTMLElement;
   private readonly fields: Record<TextField, RuleField>;
   private readonly telegram: TelegramSetup;
   private last: SecurityView | undefined;
@@ -289,6 +291,7 @@ export class SecuritySection implements SectionView {
     this.decider = el("div", { class: "st-card" });
     this.telegram = new TelegramSetup((action) => this.context.act(action));
     this.groups = el("div", { class: "st-groups", role: "table", "aria-label": "Спросить перед выполнением" });
+    this.whitelist = el("div", { class: "st-whitelist", role: "list", "aria-label": "Всегда разрешать" });
     const { hardDeny, askCustom, ipWhitelist } = this.fields;
     const rulesHint = el("span", { class: "st-h3-note" }, "· одна строка — одно правило, можно вставить сразу много");
     this.element = el(
@@ -313,6 +316,8 @@ export class SecuritySection implements SectionView {
           button("Импорт из Claude (permissions.deny)", { class: "secondary st-sm", "data-action": "importClaude" }, () => this.importClaude()),
         ),
       ),
+      el("h3", { class: "st-h3" }, "Всегда разрешать · ваши правила «разрешать такое впредь» с карточек"),
+      el("div", { class: "st-card" }, this.whitelist),
       el("h3", { class: "st-h3" }, "Спросить перед выполнением"),
       this.groups,
       el(
@@ -400,7 +405,31 @@ export class SecuritySection implements SectionView {
         ),
       ),
     );
+    this.renderWhitelist(view);
     for (const [name, field] of Object.entries(this.fields) as Array<[TextField, RuleField]>) field.show(view.text[name]);
+  }
+
+  /** The «always allow» list: each entry spells out what it allows, when it was added, and a «Забыть» button. */
+  private renderWhitelist(view: SecurityView): void {
+    const entries = view.whitelist ?? [];
+    if (entries.length === 0) {
+      this.whitelist.replaceChildren(
+        el("p", { class: "st-s st-hint" }, "Пока пусто. На карточке «Разрешить команду?» выберите «Разрешать такое впредь» — правило появится здесь."),
+      );
+      return;
+    }
+    this.whitelist.replaceChildren(
+      ...entries.map((entry) => {
+        const when = entry.addedAt !== undefined ? `добавлено ${new Date(entry.addedAt).toLocaleString("ru-RU")}` : "";
+        const from = entry.session !== undefined ? ` · из сессии ${entry.session.split("-")[0]}` : "";
+        return el(
+          "div",
+          { class: "st-wl-row", role: "listitem", "data-whitelist": entry.id },
+          el("div", { class: "st-grow" }, el("code", { class: "st-mono" }, entry.scope), el("div", { class: "st-s st-hint" }, `${when}${from}`)),
+          button("Забыть", { class: "secondary st-sm", "data-action": "whitelist.delete" }, () => this.context.act({ kind: "whitelist.delete", id: entry.id })),
+        );
+      }),
+    );
   }
 
   private renderProtection(view: SecurityView): void {

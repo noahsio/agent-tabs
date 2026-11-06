@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { guardFilesDir, rulesToWrite, servicePaths } from "../../kit/guard/lifecycle.mjs";
-import { DECIDER_MODES, GROUP_IDS, validateRules, WAIT_SECONDS } from "../../kit/guard/rules.mjs";
+import { DECIDER_MODES, GROUP_IDS, isUserAllow, validateRules, WAIT_SECONDS } from "../../kit/guard/rules.mjs";
 import { formatIpLines, importClaudeDeny, parseLines } from "../../kit/guard/rulesText.mjs";
 import { httpTransport, latestPrivateChat, loadTelegramConfig, resolveTelegramConfig, telegramKeyFile } from "../../kit/guard/telegram.mjs";
 import { profilePath } from "../../kit/sandbox/profile.mjs";
@@ -45,7 +45,12 @@ export type SecurityView = {
    */
   telegram: { tokenHint?: string; chat: string; legacy: boolean; ready: boolean };
   models: RolesView["models"];
+  /** The person's own «always allow» entries (the whitelist), newest first: what each allows and when it was added. */
+  whitelist: Array<{ id: string; scope: string; addedAt?: string; session?: string }>;
 };
+
+/** One whitelist entry as the settings show it, read from a v2 `allow` user entry. */
+type WhitelistView = SecurityView["whitelist"][number];
 
 export type SecurityAction =
   | { kind: "protection.set"; on: boolean; confirmed: boolean }
@@ -54,6 +59,7 @@ export type SecurityAction =
   | { kind: "decider.set"; mode?: DeciderMode; model?: string }
   | { kind: "human.set"; waitSeconds?: WaitSeconds; card?: boolean; telegram?: boolean }
   | { kind: "importClaude" }
+  | { kind: "whitelist.delete"; id: string }
   | { kind: "telegram.token"; token: string }
   | { kind: "telegram.chat"; chat: string }
   | { kind: "telegram.find" }
@@ -166,6 +172,8 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
       }
       case "importClaude":
         return { kind: "importClaude" };
+      case "whitelist.delete":
+        return typeof raw["id"] === "string" ? { kind: "whitelist.delete", id: raw["id"] } : undefined;
       case "telegram.token":
         return typeof raw["token"] === "string" ? { kind: "telegram.token", token: raw["token"] } : undefined;
       case "telegram.chat":
@@ -200,7 +208,21 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
       human: rules.human,
       telegram: this.telegramView(rules.human),
       models: await this.deps.models(),
+      whitelist: this.whitelistView(rules),
     };
+  }
+
+  /** The person's own «always allow» entries, newest first (by addedAt when present). */
+  private whitelistView(rules: RulesV2): WhitelistView[] {
+    return (rules.allow as unknown[])
+      .filter((entry): entry is Record<string, unknown> => isUserAllow(entry))
+      .map((entry) => ({
+        id: String(entry["id"]),
+        scope: typeof entry["scope"] === "string" ? (entry["scope"] as string) : String(entry["label"] ?? entry["id"]),
+        ...(typeof entry["addedAt"] === "string" ? { addedAt: entry["addedAt"] as string } : {}),
+        ...(typeof entry["session"] === "string" ? { session: entry["session"] as string } : {}),
+      }))
+      .sort((left, right) => (right.addedAt ?? "").localeCompare(left.addedAt ?? ""));
   }
 
   /** The consent's list; a failure (no node, the login shell silent) is logged and enabling reports it itself. */
@@ -334,6 +356,9 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
       }
       case "group.set":
         return { ...rules, groups: { ...rules.groups, [action.group]: action.on } };
+      case "whitelist.delete":
+        // Revoking takes effect as soon as the rules are written: the next matching command asks again.
+        return { ...rules, allow: (rules.allow as unknown[]).filter((entry) => !(isUserAllow(entry) && (entry as { id?: unknown }).id === action.id)) };
       case "decider.set": {
         const { model: _old, ...decider } = rules.decider;
         const model = action.model ?? rules.decider.model;

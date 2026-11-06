@@ -159,6 +159,7 @@ describe("decision service: hook socket", () => {
         command: "rm -rf $U",
         reasons: [expect.stringContaining("rm-rf-variable")],
         decider: { model: DECIDER_MODEL, decision: "ask", reason: "решатель: ask", ms: expect.any(Number) },
+        proposal: [{ scope: "rm -rf *", label: "всегда разрешать: rm -rf *" }],
         createdAt: new Date(clock.t).toISOString(),
       },
     ]);

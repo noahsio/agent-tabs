@@ -355,7 +355,7 @@ export class Dock {
 
   // ---------- answers ----------
 
-  private answerGuard(item: GuardItem, decision: "allow-once" | "deny", message?: string): void {
+  private answerGuard(item: GuardItem, decision: "allow-once" | "allow-always" | "deny", message?: string): void {
     if (item.sending) return;
     item.sending = true;
     item.answeredHere = true;
@@ -389,9 +389,12 @@ export class Dock {
     if (item.sending) return;
     item.focus = index;
     if (item.kind === "guard") {
+      // With a whitelist proposal the rows are [once, always, deny, field]; without it [once, deny, field].
+      const hasAlways = (item.request.proposal?.length ?? 0) > 0;
       if (index === 0) return this.answerGuard(item, "allow-once");
-      if (index === 1) return this.answerGuard(item, "deny");
-      if (index === 2) return this.openField(item);
+      if (hasAlways && index === 1) return this.answerGuard(item, "allow-always");
+      if (index === (hasAlways ? 2 : 1)) return this.answerGuard(item, "deny");
+      if (index === (hasAlways ? 3 : 2)) return this.openField(item);
       return;
     }
     const { dialog } = item;
@@ -666,7 +669,10 @@ export class Dock {
     }
     panel.append(body);
     const field = { label: "Запретить и сказать агенту, что сделать иначе", placeholder: "Что агенту сделать вместо этого", maxLength: GUARD_MESSAGE_MAX };
-    panel.append(this.rows(item, [{ label: "Разрешить один раз" }, { label: "Запретить" }, { label: field.label, more: true, field }], false));
+    const proposal = request.proposal ?? [];
+    // «Разрешать такое впредь» spells out the exact shape(s) it will allow, so the person sees the scope before confirming.
+    const always = proposal.length > 0 ? [{ label: "Разрешать такое впредь", desc: proposal.map((entry) => entry.scope).join(", ") }] : [];
+    panel.append(this.rows(item, [{ label: "Разрешить один раз" }, ...always, { label: "Запретить" }, { label: field.label, more: true, field }], false));
     if (item.error !== undefined) panel.append(el("p", { class: "ask-error", role: "alert" }, item.error));
     panel.append(
       item.editing
@@ -794,9 +800,25 @@ function resultLine(name: string, command: string | undefined, verdict: string, 
   return el("div", { class: `step ask-result ${state}` }, res);
 }
 
-/** The feed's quiet line for a decider's own verdict: «Решатель разрешил · git status · 1,4 с»; the reason on hover. */
+/**
+ * The feed's quiet line for a verdict reached with no card: a decider's («Решатель разрешил · git status · 1,4 с») or
+ * the person's own whitelist («Ваш вайтлист разрешил · … · docker run *»), which reads apart from a one-time allow.
+ */
 export function deciderStep(step: GuardStep): HTMLElement {
-  const { decider } = step;
+  const { decider, whitelist } = step;
+  if (whitelist !== undefined || decider === undefined) {
+    const scopes = whitelist?.scopes.join(", ") ?? "";
+    const line = el(
+      "div",
+      { class: "step whitelist", "data-guard": step.id, title: `всегда разрешать: ${scopes}` },
+      el("span", { class: "verb" }, "Ваш вайтлист разрешил"),
+      " · ",
+      el("code", {}, oneLine(step.command)),
+      ...(scopes !== "" ? [` · ${scopes}`] : []),
+    );
+    if (step.cwd !== undefined) line.append(` · ${whoseRequest(step.cwd, step.owner)}`);
+    return line;
+  }
   const verdict = STEP_VERDICT[decider.decision] ?? `Решатель: ${decider.decision}`;
   const state = decider.decision === "deny" ? "decider no" : decider.decision === "ask" ? "decider ask" : "decider";
   const title = `${decider.model !== undefined ? `${decider.model}: ` : ""}${decider.reason}`;

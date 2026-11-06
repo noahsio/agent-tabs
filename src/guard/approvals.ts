@@ -85,7 +85,7 @@ export class GuardApprovals {
    * «Разрешить один раз» / «Запретить» from `panel`. Only an open request whose card this tab was shown, and that is not
    * already being answered, reaches the service; any other click gets the reason back.
    */
-  async answer(panel: ApprovalPanel, id: string, decision: "allow-once" | "deny", message?: string): Promise<void> {
+  async answer(panel: ApprovalPanel, id: string, decision: "allow-once" | "allow-always" | "deny", message?: string): Promise<void> {
     const admin = this.admin;
     const refusal =
       admin === undefined
@@ -290,6 +290,8 @@ export class GuardApprovals {
       for (const panel of shown) panel.postGuard(resolved);
     } else if (event.by === "decider" && event.decider !== undefined && event.item !== undefined) {
       this.postStep(event.item, event.decider); // a final verdict without a human: no card came before it
+    } else if (event.by === "whitelist" && event.whitelist !== undefined && event.item !== undefined) {
+      this.postStep(event.item, undefined, event.whitelist); // the person's own whitelist allowed it: a feed step, no card
     }
   }
 
@@ -365,10 +367,21 @@ export class GuardApprovals {
     }
   }
 
-  /** Goes where the request's card would: its session's tab, else every tab, saying whose session it was. */
-  private postStep(request: PendingView, decider: NonNullable<PendingView["decider"]>): void {
+  /**
+   * A feed step with no card before it: a decider's verdict, or the person's own whitelist allowing a call. Goes where
+   * the request's card would — its session's tab, else every tab, saying whose session it was.
+   */
+  private postStep(request: PendingView, decider?: NonNullable<PendingView["decider"]>, whitelist?: { scopes: string[] }): void {
     const { panels, elsewhere, owner } = this.targets(request.session);
-    const step = { type: "guardStep" as const, id: request.id, tool: request.tool, command: request.command, decider, at: request.createdAt };
+    const step = {
+      type: "guardStep" as const,
+      id: request.id,
+      tool: request.tool,
+      command: request.command,
+      at: request.createdAt,
+      ...(decider !== undefined ? { decider } : {}),
+      ...(whitelist !== undefined ? { whitelist } : {}),
+    };
     const away = { ...step, cwd: request.cwd, ...(owner !== undefined ? { owner } : {}) };
     for (const panel of panels) panel.postGuard(elsewhere ? away : step);
   }

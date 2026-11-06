@@ -444,6 +444,40 @@ function normalizeRm(words, head) {
 
 const normalizeWords = (words, head) => (basename(words[head]) === "git" ? normalizeGit(words, head) : normalizeRm(words, head));
 
+const GLOB_META_RE = /[*?[\]\\]/g;
+const PLACEHOLDER_RE = /[\u0001\u0003\u0004]/; // SUBST, PROC_SUBST, UNKNOWN — a value the guard could not read
+/** A kept word (program or flag) as a glob literal; a word carrying a placeholder cannot be pinned, so it becomes `*`. */
+const shapeWord = (word) => (PLACEHOLDER_RE.test(word) ? "*" : word.replace(GLOB_META_RE, "\\$&"));
+
+/**
+ * The «always allow» shape of a normalized command, as a glob: the program, its leading option flags (an inline
+ * `--key=value` keeps the key and hides the value as `--key=*`), then, when there is one, a bare-word subcommand, and a
+ * single `*` for every remaining operand. So `tar -czf backup.tgz ./src` -> `tar -czf *`, `docker run -v x img` ->
+ * `docker run *`. The person sees and confirms this glob on the card; the matcher keys on it against the same
+ * normalized command, so the model cannot rotate a value to make a dangerous command match a benign shape.
+ * Returns null for a command whose program is itself interpolated (nothing legible to pin).
+ */
+function commandShape(words, head) {
+  if (head >= words.length) return null;
+  const program = words[head];
+  if (PLACEHOLDER_RE.test(program) || program.startsWith("$")) return null;
+  const parts = [...words.slice(0, head).map(shapeWord), shapeWord(program)];
+  let index = head + 1;
+  while (index < words.length && words[index].startsWith("-") && words[index] !== "--") {
+    const word = words[index];
+    const eq = word.indexOf("=");
+    parts.push(eq > 0 ? `${shapeWord(word.slice(0, eq + 1))}*` : shapeWord(word));
+    index += 1;
+  }
+  if (index < words.length && words[index] === "--") index += 1;
+  if (index < words.length && /^[A-Za-z][\w-]*$/.test(words[index])) {
+    parts.push(shapeWord(words[index]));
+    index += 1;
+  }
+  if (index < words.length) parts.push("*");
+  return parts.join(" ");
+}
+
 const REDIRECT_OPERATOR_RE = /^\d*(?:>>?|<<?<?|&>>?)&?\d*$/;
 
 /** A quoted multi-word argument is prose, unless it is (part of) a redirect target: `> "a b/.ssh/key"`. */
@@ -836,6 +870,8 @@ function analyzeSegment(rawSegment, depth, ctx) {
       texts: unique([normalized.join(" "), normalized.slice(head).join(" "), ...targetTexts]),
       matchTexts: unique([matchWords.join(" "), matchWords.slice(head).join(" "), ...targetTexts]),
       raw: words.map(shellQuote).join(" "),
+      // The legible «always allow» glob the card can offer for this leaf (null when the program is interpolated).
+      shape: commandShape(normalized, head),
       helpOnly: words.includes("--help"),
       // An interpolated value as the command, as git's subcommand or as the command `find -exec` runs.
       dynamic:
@@ -1791,18 +1827,29 @@ export function classify(input, rules) {
 
   const denied = [];
   const escalated = [];
+  // The person's own «always allow» entries that cleanly matched a leaf: the decision record is attributed to them, so
+  // a whitelist allow reads apart from a one-time or a decider allow. `proposalShapes` are the legible globs the card
+  // can offer; they are only offered when accepting them would clear the whole ask (no remote/unparsed escalation left).
+  const whitelistHits = [];
+  const proposalShapes = [];
+  let remoteEscalated = false;
+  let unparsedEscalated = false;
   const anyMatch = (regexes, texts) => texts.find((text) => regexes.some((regex) => regex.test(text)));
   // On another host (ssh) every remote check applies; inside a container only the catastrophic denies.
   const remoteCheck = (texts, where) => {
     const deniedText = anyMatch(matchers.remote.denyIf, texts);
     if (deniedText) denied.push(`remote-deny: ${show(deniedText)}`);
     const escalatedText = deniedText || where === "container" ? undefined : anyMatch(matchers.remote.escalateIf, texts);
-    if (escalatedText) escalated.push(`remote-escalate: ${show(escalatedText)}`);
+    if (escalatedText) {
+      escalated.push(`remote-escalate: ${show(escalatedText)}`);
+      remoteEscalated = true; // a remote destructive form is not whitelistable: the shape over ssh stays an ask
+    }
     return Boolean(deniedText || escalatedText);
   };
   // A whole remote script: cd + rm across lines, etc.
   for (const script of scripts) remoteCheck([script.text], script.remote);
   for (const leaf of leaves) {
+    const escalatedBefore = escalated.length;
     const globText = leaf.texts.map((text) => [text, matchers.hardDeny.find((entry) => entry.regex.test(text))]).find(([, glob]) => glob);
     // Ruling P26: on another host or in a container a hard-deny line asks; REMOTE_CHECKS still deny the catastrophic forms.
     if (globText && !leaf.remote) {
@@ -1812,29 +1859,41 @@ export function classify(input, rules) {
     if (leaf.helpOnly) continue;
     if (globText) escalated.push(`hard-deny-elsewhere: ${show(globText[0])} matches ${globText[1].glob} (${leaf.remote})`);
     if (leaf.remote && (remoteCheck(leaf.texts, leaf.remote) || globText)) continue;
+    // Deny runs above; only now is the allow/whitelist list consulted. A user «always allow» entry can never turn a
+    // deny into an allow — a hard-deny or remote-deny leaf has already `continue`d past this point.
     const allowed = matchers.allow.find((entry) => entry.regex.test(leaf.text));
     if (allowed) {
       if (allowed.denyIf.some((regex) => regex.test(leaf.text))) denied.push(`deny-if: ${show(leaf.text)} (${allowed.id})`);
       else if (allowed.escalateIf.some((regex) => regex.test(leaf.text))) escalated.push(`escalate-if: ${show(leaf.text)} (${allowed.id})`);
-      else escalated.push(...escalationReasons(leaf.text, matchers, true));
+      else {
+        escalated.push(...escalationReasons(leaf.text, matchers, true));
+        if (allowed.user && escalated.length === escalatedBefore) whitelistHits.push({ id: allowed.id, scope: allowed.scope, label: allowed.label });
+      }
       continue;
     }
     if (leaf.dockerMount) escalated.push(leaf.dockerMount);
     for (const text of leaf.matchTexts) escalated.push(...escalationReasons(text, matchers));
+    if (leaf.shape && escalated.length > escalatedBefore) proposalShapes.push(leaf.shape);
   }
   if (unparsedCode) {
     const literals = allLiterals(unparsedCode);
     // Arguments may be assembled out of order (["git", ...args]): also pair "git" with every other literal.
     const gitPairs = literals.includes("git") ? literals.map((literal) => `git ${literal}`) : [];
     const haystack = [literals.join(" "), ...gitPairs, unparsedCode].join("\n");
+    const unparsedBefore = escalated.length;
     escalated.push(...escalationReasons(haystack, matchers).map((reason) => `unparsed eval: ${reason}`));
     if (FALLBACK_DANGER_RE.test(haystack)) escalated.push("unparsed eval: rm -rf in process-spawning code");
+    // Code the guard could not read into commands has no legible shape to pin, so it is not whitelistable.
+    if (escalated.length > unparsedBefore) unparsedEscalated = true;
   }
 
   const unique = (items) => [...new Set(items)];
   if (denied.length > 0) return { tier: "deny", reasons: unique(denied), normalized, key: key(keySource) };
-  if (escalated.length > 0) return { tier: "escalate", reasons: unique(escalated), normalized, key: key(keySource) };
-  return { tier: "allow", reasons: [], normalized, key: key(keySource) };
+  if (escalated.length > 0) {
+    const proposal = !remoteEscalated && !unparsedEscalated ? unique(proposalShapes).map((scope) => ({ scope, label: `всегда разрешать: ${scope}` })) : [];
+    return { tier: "escalate", reasons: unique(escalated), normalized, key: key(keySource), ...(proposal.length > 0 ? { proposal } : {}) };
+  }
+  return { tier: "allow", reasons: [], normalized, key: key(keySource), ...(whitelistHits.length > 0 ? { whitelisted: whitelistHits } : {}) };
 }
 
 // ---------- file-writing tools ----------

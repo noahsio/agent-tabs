@@ -137,6 +137,21 @@ declare module "*/kit/guard/rules.mjs" {
   export const WAIT_SECONDS: number[];
   /** Every problem of a v2 rules object; [] when valid. */
   export function validateRules(rules: unknown): { field: string; line?: number; message: string }[];
+  /** True for a user-added «always allow» (whitelist) entry, not a built-in one. */
+  export function isUserAllow(entry: unknown): boolean;
+  /** A v2 `allow` whitelist entry for `scope` (a glob over the normalized command). */
+  export function makeWhitelistEntry(options: { scope: string; session?: string; now?: () => number; id?: string }): {
+    id: string;
+    label: string;
+    pattern: string;
+    denyIf: string[];
+    user: true;
+    scope: string;
+    addedAt: string;
+    session?: string;
+  };
+  export const WHITELIST_ID_PREFIX: string;
+  export function globPattern(glob: string): string;
 }
 
 declare module "*/kit/guard/rulesText.mjs" {
