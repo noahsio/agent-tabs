@@ -19,9 +19,9 @@ const PROVIDER = "gw-anthropic";
 /** `reasoning: true` in the catalogue. */
 const THINKER = { provider: PROVIDER, id: "claude-sonnet-5-5" };
 /** No capability fields at all — the entry the gateway sync wrote from an OpenAI-style `/models` list. */
-const BARE = { provider: PROVIDER, id: "claude-opus-5" };
+const BARE = { provider: PROVIDER, id: "probe-bare" };
 /** `reasoning: false`: a model the catalogue says cannot think. */
-const FLAT = { provider: PROVIDER, id: "claude-haiku-5-5" };
+const FLAT = { provider: PROVIDER, id: "probe-flat" };
 /** The same bare entry as the fixed sync writes it: nobody said anything, so it is marked thinking. */
 const FIXED = { provider: PROVIDER, id: "probe-fixed" };
 
@@ -38,10 +38,16 @@ describe.skipIf(!LIVE)("what omo answers about a model's thinking levels (live o
     await chmod(AGENT_DIR, 0o700);
     await mkdir(PROJECT_DIR, { recursive: true });
     await mkdir(join(FAKE_HOME, ".omo"), { recursive: true });
-    // The person's catalogue, plus the fixed sync's own output for the bare entry, so one host answers about both.
+    // The person's catalogue, plus synthetic probes: a bare entry, a `reasoning: false` one, and the fixed sync's own
+    // output (marked thinking). Synthetic ids keep the proof independent of which real models the catalogue now ships.
     const catalogue = JSON.parse(await readFile(MODELS_SOURCE, "utf8")) as { providers: Record<string, { models: unknown[] }> };
     const provider = catalogue.providers[PROVIDER] as { models: unknown[] };
-    provider.models = [...provider.models, { id: FIXED.id, name: "Probe Fixed", reasoning: true }];
+    provider.models = [
+      ...provider.models,
+      { id: BARE.id, name: "Probe Bare" },
+      { id: FLAT.id, name: "Probe Flat", reasoning: false },
+      { id: FIXED.id, name: "Probe Fixed", reasoning: true },
+    ];
     await writeFile(join(AGENT_DIR, "models.json"), JSON.stringify(catalogue, null, 2));
     await writeFile(join(FAKE_HOME, ".omo", "omo.jsonc"), JSON.stringify({ telemetry: { enabled: false } }, null, 2));
     const built = buildOmoEnv(
