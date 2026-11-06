@@ -52,4 +52,41 @@ describe.skipIf(!hasChrome)("a sent bubble sits close under what came before (he
     expect(gap.bubble).toBeLessThanOrEqual(28); // and the bubble follows right under the thin time, no big gap
     await page.screenshot(`${SHOTS}/stuck-snug.png`);
   });
+
+  it("a_stuck_head_has_an_opaque_full_width_backing_so_nothing_bleeds_through", async () => {
+    await page.evaluate(`(() => { const f=document.querySelector("main.feed"); const r=document.querySelector('[data-block="u1"]').getBoundingClientRect(); f.scrollTop=(r.top-f.getBoundingClientRect().top)+170; })()`);
+    await settle(page);
+    const band = await page.evaluate<{ stuck: boolean; bg: string; alpha: number; left: number; right: number; feedLeft: number; feedRight: number; aboveFade: boolean }>(`(() => {
+      const e = document.querySelector('[data-block="u1"]');
+      const cs = getComputedStyle(e);
+      const m = cs.backgroundColor.match(/[\\d.]+/g) || [];
+      const r = e.getBoundingClientRect();
+      const f = document.querySelector("main.feed").getBoundingClientRect();
+      return {
+        stuck: e.classList.contains("is-stuck"),
+        bg: cs.backgroundColor,
+        alpha: m.length === 4 ? Number(m[3]) : 1, // rgb (no alpha) counts as fully opaque
+        left: r.left, right: r.right, feedLeft: f.left, feedRight: f.right,
+        aboveFade: Number(cs.zIndex) > 3, // over the top fade, so the time stays crisp
+      };
+    })()`);
+    expect(band.stuck).toBe(true);
+    expect(band.alpha).toBe(1); // a solid fill: earlier rows cannot show through it
+    expect(band.bg).not.toMatch(/rgba\\(0, 0, 0, 0\\)|transparent/); // and it is an actual colour, not none
+    expect(band.left).toBeLessThanOrEqual(band.feedLeft + 1); // the band spans the full feed width, into the gutters
+    expect(band.right).toBeGreaterThanOrEqual(band.feedRight - 1);
+    expect(band.aboveFade).toBe(true); // the head sits over the fade, so the timestamp is fully visible
+  });
+
+  it("an_in_flow_sent_bubble_keeps_the_transparent_spacing", async () => {
+    await page.evaluate(`document.querySelector("main.feed").scrollTop = 0`); // u1 back in its place, not stuck
+    await settle(page);
+    const inflow = await page.evaluate<{ stuck: boolean; alpha: number }>(`(() => {
+      const e = document.querySelector('[data-block="u1"]');
+      const m = getComputedStyle(e).backgroundColor.match(/[\\d.]+/g) || [];
+      return { stuck: e.classList.contains("is-stuck"), alpha: m.length === 4 ? Number(m[3]) : 1 };
+    })()`);
+    expect(inflow.stuck).toBe(false);
+    expect(inflow.alpha).toBe(0); // in flow the entry is transparent — the opaque backing is the stuck state only
+  });
 });
