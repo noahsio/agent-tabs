@@ -587,6 +587,24 @@ describe("SessionController", () => {
     await settle(() => ofType("release_attachment").length === 1);
     expect(ofType("release_attachment")[0]).toMatchObject({ sessionId: "rpc-1" });
   });
+
+  it("keeps_the_catalogues_reasoning_flag_so_the_picker_can_trust_it_over_a_stale_level_answer", async () => {
+    daemon.on("get_available_models", () => ({
+      data: {
+        models: [
+          { provider: "gw", id: "thinks", name: "Thinks", reasoning: true },
+          { provider: "gw", id: "flat", name: "Flat", reasoning: false },
+          { provider: "gw", id: "quiet", name: "Quiet" },
+        ],
+      },
+    }));
+    controller = await SessionController.create(manager, "/tmp");
+    expect(await controller.models()).toEqual([
+      { provider: "gw", id: "thinks", name: "Thinks", reasoning: true },
+      { provider: "gw", id: "flat", name: "Flat", reasoning: false },
+      { provider: "gw", id: "quiet", name: "Quiet" },
+    ]);
+  });
   it("an_answer_to_a_dialog_omo_already_closed_drops_it_and_says_so", async () => {
     controller = await SessionController.create(manager, "/tmp");
     for (const [id, code] of [

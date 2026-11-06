@@ -70,6 +70,7 @@ export class ModelPopover implements PopoverContent {
         }),
     );
 
+    const effort = view.levels.length > 0 ? this.effort() : undefined;
     this.element.replaceChildren(
       el("h4", {}, "Выбор модели"),
       auto,
@@ -77,10 +78,15 @@ export class ModelPopover implements PopoverContent {
       el(
         "div",
         { class: "model-foot", "data-role": "model-foot" },
-        ...(view.levels.length > 0 ? [this.effort()] : []),
+        ...(effort !== undefined ? [effort] : []),
         el("div", { class: "mrow note" }, el("span", { class: "s" }, "Субагенты всегда идут по ролям из omo.jsonc")),
       ),
     );
+  }
+
+  /** The catalogue's word on the session's current model: it owns «does it think», not a host's level answer. */
+  private reasons(): boolean {
+    return this.view.models.find((info) => sameModel(this.view.model, info))?.reasoning === true;
   }
 
   /** ↑/↓ walk Auto and the models; the focused row is scrolled into view inside the list. */
@@ -108,9 +114,12 @@ export class ModelPopover implements PopoverContent {
   }
 
   /** «Мощность (level)» and a slider: one step per level, filled up to the chosen one, the knob on it. */
-  private effort(): HTMLElement {
+  private effort(): HTMLElement | undefined {
     const { levels, level } = this.view;
-    if (levels.length < 2) return this.onlyLevel(levels[0] as string);
+    // A reasoning model that the host offers only one level for is a host that cached a bare catalogue entry, not a
+    // model that cannot think: the ladder returns once the host is restarted, so show no row rather than claim it is
+    // off. A model the catalogue does not call reasoning keeps the plain row («не размышляет», or «только X»).
+    if (levels.length < 2) return this.reasons() ? undefined : this.onlyLevel(levels[0] as string);
     const index = level === undefined ? -1 : levels.indexOf(level);
     const slider = el("div", {
       class: "slider",

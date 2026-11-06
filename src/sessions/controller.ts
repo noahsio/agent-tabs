@@ -929,7 +929,7 @@ export class SessionController extends EventEmitter {
     this.log?.(text);
   }
 
-  async models(): Promise<{ provider: string; id: string; name?: string; acceptsImages?: boolean }[]> {
+  async models(): Promise<{ provider: string; id: string; name?: string; reasoning?: boolean; acceptsImages?: boolean }[]> {
     let data: Frame;
     try {
       data = await this.request<Frame>("get_available_models");
@@ -937,7 +937,7 @@ export class SessionController extends EventEmitter {
       throw new Error(redact(errorText(error), this.dm.secrets));
     }
     const list: unknown[] = Array.isArray(data?.["models"]) ? data["models"] : [];
-    const result: { provider: string; id: string; name?: string; acceptsImages?: boolean }[] = [];
+    const result: { provider: string; id: string; name?: string; reasoning?: boolean; acceptsImages?: boolean }[] = [];
     for (const item of list) {
       if (!isObject(item) || typeof item["provider"] !== "string" || typeof item["id"] !== "string") continue;
       const accepts = acceptsImageInput(item["input"]);
@@ -945,6 +945,9 @@ export class SessionController extends EventEmitter {
         provider: item["provider"],
         id: item["id"],
         ...(typeof item["name"] === "string" ? { name: item["name"] } : {}),
+        // The catalogue's own word on whether the model thinks: the picker trusts it over a one-level answer from a
+        // host that cached a bare entry (`get_available_thinking_levels` only reflects the running host's catalogue).
+        ...(typeof item["reasoning"] === "boolean" ? { reasoning: item["reasoning"] } : {}),
         ...(accepts !== undefined ? { acceptsImages: accepts } : {}),
       });
     }

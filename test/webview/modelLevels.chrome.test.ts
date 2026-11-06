@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { hasChrome, openPage, type Page, waitFor, webviewPage } from "../helpers/chrome";
 
 const SHOTS = "/tmp/agent-tabs-shots/levels";
+const OPUS5_SHOTS = "/tmp/agent-tabs-shots/opus5";
 
 /**
  * A session on a gateway model the catalogue said nothing about, with the ladder OmO answers once the entry is marked
@@ -12,8 +13,8 @@ const SHOTS = "/tmp/agent-tabs-shots/levels";
 const STUB = `
 (function () {
   var models = [
-    { provider: "gw-anthropic", id: "claude-opus-5", name: "Claude Opus 5" },
-    { provider: "gw-anthropic", id: "claude-haiku-5-5", name: "Claude Haiku 5.5" },
+    { provider: "gw-anthropic", id: "claude-opus-5", name: "Claude Opus 5", reasoning: true },
+    { provider: "gw-anthropic", id: "claude-haiku-5-5", name: "Claude Haiku 5.5", reasoning: false },
   ];
   window.__posted = [];
   function state(id, levels, level) {
@@ -62,6 +63,7 @@ describe.skipIf(!hasChrome)("the power ladder in a real browser (headless Chrome
 
   beforeAll(async () => {
     mkdirSync(SHOTS, { recursive: true });
+    mkdirSync(OPUS5_SHOTS, { recursive: true });
     page = await openPage(await webviewPage(STUB), { width: 900, height: 700 });
     await waitFor(page, `document.querySelector('[data-role="model-pill"]') !== null`);
     await page.evaluate(`document.querySelector('[data-role="model-pill"]').click()`);
@@ -81,6 +83,7 @@ describe.skipIf(!hasChrome)("the power ladder in a real browser (headless Chrome
     expect(track.knobAt).toBeLessThan(0.6);
     expect(track.label).toBe("Мощность (medium)");
     await page.screenshot(join(SHOTS, "opus-5-ladder.png"));
+    await page.screenshot(join(OPUS5_SHOTS, "opus-5-slider.png")); // the slider, not the «не размышляет» line
 
     // real hit testing: the browser picks the notch, not the test
     const at = await page.evaluate<{ x: number; y: number }>(
@@ -104,5 +107,28 @@ describe.skipIf(!hasChrome)("the power ladder in a real browser (headless Chrome
     expect(row.text).toBe("эта модель не размышляет");
     expect(row.height).toBeGreaterThan(0); // and the words are actually painted
     await page.screenshot(join(SHOTS, "haiku-no-thinking.png"));
+  }, 30_000);
+
+  /**
+   * The Opus 5 symptom: a host that cached a bare catalogue entry answers one level for a model the catalogue calls
+   * reasoning. The picker must not call such a model «не размышляет» — it trusts the catalogue and shows no row at all
+   * (the slider returns once the host is restarted and reports the real ladder).
+   */
+  it("a_reasoning_model_the_host_reports_one_level_for_is_never_called_non_thinking", async () => {
+    await page.evaluate(`window.__show("claude-opus-5", ["off"], "off")`);
+    await waitFor(page, `document.querySelector('[data-popover="model"] [data-role="model-foot"]') !== null`);
+    await waitFor(page, `document.querySelector('[data-popover="model"] [role="slider"]') === null`);
+    const foot = await page.evaluate<{ only: boolean; slider: boolean; text: string }>(`(() => {
+      const pop = document.querySelector('[data-popover="model"]');
+      return {
+        only: pop.querySelector('[data-role="effort-only"]') !== null,
+        slider: pop.querySelector('[role="slider"]') !== null,
+        text: pop.querySelector('[data-role="model-foot"]').textContent,
+      };
+    })()`);
+    expect(foot.only).toBe(false); // no «не размышляет» / «только X» row for a reasoning model
+    expect(foot.slider).toBe(false); // and no dead one-notch track
+    expect(foot.text).not.toContain("не размышляет"); // the catalogue says it thinks, so the picker never denies it
+    await page.screenshot(join(OPUS5_SHOTS, "opus-5-stale-host-no-false-label.png"));
   }, 30_000);
 });
