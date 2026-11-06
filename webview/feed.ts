@@ -196,6 +196,11 @@ export function formatDuration(ms: number): string {
   return rest === 0 ? `${Math.floor(minutes / 60)} ч` : `${Math.floor(minutes / 60)} ч ${rest} мин`;
 }
 
+/** The live label of a thinking step in progress: ticks the elapsed seconds, consistent with the finished «Размышлял Xс». */
+export function thinkingLabel(startedAt: number, now: number = Date.now()): string {
+  return `Размышляю ${formatDuration(Math.max(0, now - startedAt))}…`;
+}
+
 /** Plain lower-case tool names («bash») show like Claude Code («Bash»); anything else stays as sent. */
 export function toolLabel(name: string): string {
   return /^[a-z]+$/.test(name) ? name.charAt(0).toUpperCase() + name.slice(1) : name;
@@ -333,6 +338,8 @@ export class Feed {
   private readonly toBottom: HTMLButtonElement;
   private readonly toBottomSlot: HTMLElement;
   private scrollFrame: number | undefined;
+  /** Ticks the elapsed seconds on the one in-progress thinking step; cleared the moment that step is gone (see syncThinkingTimer). */
+  private thinkingTimer: ReturnType<typeof setInterval> | undefined;
   /** One turn's wrapper, keyed by the id of the sent message that leads it (`lead` for anything before the first). */
   private readonly sections = new Map<string, HTMLElement>();
   /** The feed's top inset in px (`--feed-top`): the line a sent bubble rests on when it is stuck. */
@@ -418,7 +425,9 @@ export class Feed {
     this.blocks = blocks;
     this.renderBlocks();
     const waiting = activity?.waiting;
-    this.indicator.hidden = !running && waiting === undefined;
+    // The in-progress thinking step already says «Размышляю…»; the bottom «Думаю…» would only duplicate it, so drop it then.
+    const thinkingStepShown = waiting === undefined && activity?.activity === "thinking" && this.thinkingInProgress();
+    this.indicator.hidden = (!running && waiting === undefined) || thinkingStepShown;
     this.indicator.classList.toggle("waiting", waiting !== undefined);
     this.verb.textContent = waiting ?? indicatorVerb(activity);
     if (stick) this.root.scrollTop = this.root.scrollHeight;
@@ -536,6 +545,40 @@ export class Feed {
     }
     this.updateToBottom();
     this.updateStuck();
+    this.syncThinkingTimer();
+  }
+
+  /** True while the current turn's thinking step is open and carrying reasoning text — the one «Размышляю…» line on screen. */
+  private thinkingInProgress(): boolean {
+    return this.blocks.some((block) => block.kind === "assistant" && block.thinkingStartedAt !== undefined && block.thinking !== "");
+  }
+
+  /** Runs one interval iff an in-progress thinking step is on screen, starting it once and tearing it down when that step is gone. */
+  private syncThinkingTimer(): void {
+    const live = this.list.querySelector('[data-role="thinking-live"]') !== null;
+    if (live && this.thinkingTimer === undefined) this.thinkingTimer = setInterval(() => this.tickThinking(), 1_000);
+    if (!live) this.stopThinkingTimer();
+  }
+
+  /** Re-reads the live summary (re-renders swap the element) and writes its ticked label; stops the interval once it is gone. */
+  private tickThinking(): void {
+    const summary = this.list.querySelector<HTMLElement>('[data-role="thinking-live"]');
+    if (summary === null) {
+      this.stopThinkingTimer();
+      return;
+    }
+    summary.textContent = thinkingLabel(Number(summary.dataset["started"]));
+  }
+
+  private stopThinkingTimer(): void {
+    if (this.thinkingTimer === undefined) return;
+    clearInterval(this.thinkingTimer);
+    this.thinkingTimer = undefined;
+  }
+
+  /** Releases what outlives a render: the seconds interval. Called when the view is torn down. */
+  dispose(): void {
+    this.stopThinkingTimer();
   }
 
   /** Reconciles `parent`'s children to `children` in order, reusing the cached elements and dropping the rest. */
@@ -870,11 +913,12 @@ export class Feed {
   private renderAssistant(block: AssistantBlock): HTMLElement[] {
     const steps: HTMLElement[] = [];
     if (block.thinking !== "") {
-      const label =
-        block.thinkingStartedAt !== undefined ? "Размышляю…" : block.thinkingMs !== undefined ? `Размышлял ${formatDuration(block.thinkingMs)}` : "Размышления";
-      steps.push(
-        el("div", { class: "step muted" }, el("details", { class: "thinking" }, el("summary", {}, label), el("div", { class: "thinking-text" }, block.thinking))),
-      );
+      // In progress: a marked summary whose seconds the single thinking interval ticks (see syncThinkingTimer); otherwise static.
+      const summary =
+        block.thinkingStartedAt !== undefined
+          ? el("summary", { "data-role": "thinking-live", "data-started": String(block.thinkingStartedAt) }, thinkingLabel(block.thinkingStartedAt))
+          : el("summary", {}, block.thinkingMs !== undefined ? `Размышлял ${formatDuration(block.thinkingMs)}` : "Размышления");
+      steps.push(el("div", { class: "step muted" }, el("details", { class: "thinking" }, summary, el("div", { class: "thinking-text" }, block.thinking))));
     }
     if (block.text !== "") {
       const body = el("div", { class: "markdown" });

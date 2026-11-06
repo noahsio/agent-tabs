@@ -149,6 +149,64 @@ describe("Feed", () => {
     expect(indicator().hidden).toBe(true);
   });
 
+  describe("thinking in progress", () => {
+    const indicator = (): HTMLElement => root.querySelector('[data-role="indicator"]') as HTMLElement;
+    const liveLabel = (): string => (root.querySelector('[data-role="thinking-live"]') as HTMLElement).textContent ?? "";
+    const seconds = (label: string): number => Number(label.match(/(\d+)/)?.[1] ?? "0");
+    const thinkingBlock = (startedAt: number): Block => ({ kind: "assistant", id: "a1", text: "", thinking: "мысль", streaming: true, thinkingStartedAt: startedAt });
+    const tool = (id: string, state: "running" | "ok"): Block => ({ kind: "tool", id, name: "bash", summary: "ls", args: {}, output: "", truncated: false, state });
+
+    afterEach(() => vi.useRealTimers());
+
+    it("shows_only_the_step_not_the_bottom_indicator_while_thinking", () => {
+      feed.update([thinkingBlock(Date.now())], true, { activity: "thinking" });
+      expect(indicator().hidden).toBe(true); // the bottom «Думаю…» is suppressed
+      expect((root.querySelector("details.thinking summary") as HTMLElement).textContent).toContain("Размышляю");
+    });
+
+    it("ticks_the_seconds_while_thinking", () => {
+      vi.useFakeTimers();
+      feed.update([thinkingBlock(Date.now())], true, { activity: "thinking" });
+      const before = seconds(liveLabel());
+      vi.advanceTimersByTime(5_000);
+      expect(seconds(liveLabel())).toBeGreaterThan(before);
+    });
+
+    it("becomes_the_finished_label_and_the_bottom_indicator_returns_for_a_tool", () => {
+      feed.update([thinkingBlock(Date.now())], true, { activity: "thinking" });
+      feed.update(
+        [{ kind: "assistant", id: "a1", text: "", thinking: "мысль", streaming: true, thinkingMs: 5_200 }, tool("t1", "running")],
+        true,
+        { activity: "tool", tool: "Bash" },
+      );
+      expect((root.querySelector("details.thinking summary") as HTMLElement).textContent).toBe("Размышлял 5 с");
+      expect(indicator().hidden).toBe(false);
+      expect(indicator().textContent).toBe("Выполняю Bash…");
+    });
+
+    it("clears_the_interval_when_thinking_ends_and_never_ticks_after", () => {
+      vi.useFakeTimers();
+      const clearSpy = vi.spyOn(globalThis, "clearInterval");
+      feed.update([thinkingBlock(Date.now())], true, { activity: "thinking" });
+      feed.update([{ kind: "assistant", id: "a1", text: "", thinking: "мысль", streaming: true, thinkingMs: 5_200 }, tool("t1", "running")], true, { activity: "tool", tool: "Bash" });
+      expect(clearSpy).toHaveBeenCalled();
+      const finished = (root.querySelector("details.thinking summary") as HTMLElement).textContent;
+      vi.advanceTimersByTime(5_000);
+      expect((root.querySelector("details.thinking summary") as HTMLElement).textContent).toBe(finished); // no stray tick
+    });
+
+    it("clears_the_interval_on_dispose", () => {
+      vi.useFakeTimers();
+      const clearSpy = vi.spyOn(globalThis, "clearInterval");
+      feed.update([thinkingBlock(Date.now())], true, { activity: "thinking" });
+      const label = liveLabel();
+      feed.dispose();
+      expect(clearSpy).toHaveBeenCalled();
+      vi.advanceTimersByTime(5_000);
+      expect(liveLabel()).toBe(label); // the label is frozen: no interval survives dispose
+    });
+  });
+
   it("keeps_scroll_when_user_scrolled_up", () => {
     const first: Block = { kind: "assistant", id: "a1", text: "one", thinking: "", streaming: true };
     layout(300);
