@@ -253,6 +253,20 @@ button.icon-btn:disabled {
   padding: var(--feed-top) var(--feed-side) 20px;
 }
 
+/* A soft top fade mirroring the composer's bottom one: content (and a sticky bubble's top edge) dissolves under the
+   header instead of a hard cut. A sticky zero-space strip so it never pushes the timeline down, and clicks pass through. */
+.feed::before {
+  content: "";
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: block;
+  height: 22px;
+  margin-bottom: -22px;
+  background: linear-gradient(to bottom, var(--bg), color-mix(in srgb, var(--bg) 55%, transparent) 55%, transparent);
+  pointer-events: none;
+}
+
 .empty {
   color: var(--muted);
   margin: 24px 0;
@@ -275,8 +289,15 @@ button.icon-btn:disabled {
   padding: 8px 0 6px;
 }
 
+/* A sent message's time rides inside its sticky bubble, so a tall row here reads as a big gap above the bubble — and a
+   bigger one when stuck. Keep it to a thin, even line so the bubble sits close under what came before and snug at the top. */
+.entry.user > .ts {
+  padding: 2px 0 2px;
+  line-height: 14px;
+}
+
 .timeline > .turn:first-child > .entry:first-child > .ts {
-  padding-top: 18px;
+  padding-top: 8px;
 }
 
 .entry.user {
@@ -3230,16 +3251,18 @@ button.am-node:focus-visible {
   border-radius: 11px 0 0 11px;
 }
 
-/* The fill runs the whole knob cell, so the blue reaches under the knob, not just to its centre (Claude's slider). */
+/* The fill runs the whole knob cell, so the blue reaches under the knob, not just to its centre (Claude's slider). Its
+   trailing end is rounded to the knob's own radius (8px, the 16px ball) so the fill's cap reads as the same curvature. */
 .pop .slider .notch.cur {
   background: var(--vscode-button-background, #0078d4);
+  border-radius: 0 8px 8px 0;
 }
 
 .pop .slider .notch:first-child.cur {
   background: var(--vscode-button-background, #0078d4);
   margin-left: -2px;
   padding-left: 2px;
-  border-radius: 11px 0 0 11px;
+  border-radius: 11px 8px 8px 11px;
 }
 
 .pop .slider .notch.cur::before {
