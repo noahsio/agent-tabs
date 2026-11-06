@@ -321,8 +321,7 @@ export class Composer {
     this.contextRing.hidden = true;
     this.send = button(icon("send"), { "data-role": "send", class: "send", title: SEND_LABEL, "aria-label": SEND_LABEL }, () => this.submit(false));
     this.stop = button(el("i"), { "data-role": "stop", class: "stop", title: "Остановить агента", "aria-label": "Стоп" }, () => {
-      this.stoppedAt = Date.now(); // a turn still running STOP_WAIT_MS from here is wedged
-      this.armWedge();
+      this.noteStop();
       this.post({ type: "stop" });
     });
     this.stop.hidden = true;
@@ -432,6 +431,16 @@ export class Composer {
     this.wedgeTimer = undefined;
     if (this.wedgeDoneTimer !== undefined) clearTimeout(this.wedgeDoneTimer);
     this.wedgeDoneTimer = undefined;
+  }
+
+  /**
+   * «Стоп» was pressed — here or in the dock, while a dialog hid this composer. A turn still running STOP_WAIT_MS from
+   * now is wedged, and the bounded restart fires. Arming it from the dock too is what makes Stop free the tab from a
+   * question the person is parked on, not only from a turn whose composer was on screen.
+   */
+  noteStop(): void {
+    this.stoppedAt = Date.now();
+    this.armWedge();
   }
 
   // ---------- the wedge watch ----------

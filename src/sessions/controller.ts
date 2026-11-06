@@ -11,8 +11,11 @@ import { readSessionHeader } from "../rewind/fork";
 import type { SentMode } from "../rewind/store";
 import { RpcError, type RpcClient } from "../rpc/client";
 import type { Ladder } from "../settings/ladder";
+import { claimAutoUnwedge } from "./autoUnwedge";
+import { claimReopen, releaseReopen } from "./reopenRation";
 import { sharedImages, type ImageStore } from "./images";
 import { ModelLadder, type LadderView } from "./ladder";
+import { instantDeadTurn, openWorkText, systemAbortStall, type OpenWork } from "./liveness";
 import type { ModelLevel } from "./rememberedLevels";
 
 /** A mode keyword that prefixes every prose message while it is on (the actions menu's toggles). */
@@ -82,8 +85,43 @@ const GOAL_RESUME_COMMAND = "/goal resume";
 const GOAL_RESUMED_TEXT = "Цель сессии была остановлена — возобновил её, агент продолжает работу";
 const GOAL_RESUME_FAILED_TEXT = "Цель сессии остановлена, и возобновить её не удалось — агент сам не продолжит, напишите, что делать дальше";
 
+/** One fixed id for the park line, so a session parked more than once shows it once instead of stacking a copy per reopen. */
+const PARK_NOTICE_ID = "parked";
+const PARK_TEXT = "Сессия выгружена — открываю заново";
+/**
+ * What the tab says when OmO keeps parking the session faster than it can stay open: the automatic reopen gave up (see
+ * `src/sessions/reopenRation.ts`) rather than storm, and «Переподключить» is the person's way to try again.
+ */
+const REOPEN_STORM_TEXT = "Сессия раз за разом выгружается и не остаётся открытой — перестал открывать её заново. Нажмите «Переподключить», чтобы попробовать снова.";
+
+/**
+ * What the feed says about a turn OmO killed itself (`src/sessions/liveness.ts`): the message never reached the model,
+ * and OmO never re-sends an admitted message («an admitted turn is never replayed, even if later aborted»), so without
+ * these lines the person is left with a tab that says «Работаю…» and an answer that is never coming.
+ *
+ * The way out is the one OmO leaves a client: the only client-reachable reset of the state this turn died in is a
+ * session shutdown (`unload_session` → `session_shutdown`), and the message has to go back in under a **new**
+ * `clientMessageId` — a repeat under the old one comes back from OmO's admission record without running anything.
+ */
+const LIVENESS_ABORT_TEXT = "OmO оборвал ход сам, сразу после старта — ответа на это сообщение не будет";
+const LIVENESS_RESENT_TEXT = "Перезапустил сессию и отправил сообщение заново";
+const LIVENESS_MANUAL_TEXT = "Отправьте сообщение заново — а если повторится, перезапустите сессию кнопкой «Снять зависание»";
+/** Why the automatic restart happened, for the «Agent Tabs» channel. */
+const LIVENESS_UNWEDGE_WHY = "OmO оборвал ход сам сразу после старта";
+
 function isObject(value: unknown): value is Frame {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * OmO rejects a `prompt` sent while a compaction is in flight — and only a `prompt`; a follow_up enqueues cleanly and
+ * drains when the compaction ends. It throws a plain `Error` with no typed code (the RPC layer falls back to code
+ * "error"), so its English text is the only thing to match on. Matched loosely on purpose, and used only as the race
+ * fallback behind the `compacting` state check, which is what normally routes a message to the queue.
+ */
+const COMPACTION_REJECT = /compaction is in progress/i;
+function isCompactionReject(error: RpcError): boolean {
+  return COMPACTION_REJECT.test(error.message);
 }
 
 /** The one rule for a session's name: whitespace collapsed, trimmed, capped. Empty means "no name". */
@@ -156,6 +194,17 @@ export class SessionController extends EventEmitter {
   private turnStarting = false;
   /** A `/goal resume` of this tab's own is in flight: one at a time, and its goal card is OmO's echo, not news. */
   private goalResuming = false;
+  /**
+   * The message a turn of ours is answering, and whether its one automatic recovery from a liveness abort is spent.
+   * `key` is the person's own message id — a recovery's resend inherits it, so its own death cannot buy a second try.
+   */
+  private answering: { key: string; id: string; text: string; images: OutgoingImage[]; recovered: boolean } | undefined;
+  /** Set while a recovery's resend goes out: it inherits the spent attempt instead of starting a new one. */
+  private resending = false;
+  /** The turn's last assistant message was one OmO abandoned as it was being made; the id it was answering, if named. */
+  private deadTurn: { id: string | undefined } | undefined;
+  /** A compaction of ours is in flight: the abort it sends is `"system"` too, and it is not a hang. */
+  private ownCompact = false;
   /** The model ladder, once the tab has given this session one. */
   private modelLadder: ModelLadder | undefined;
   /** What was sent and is not in the conversation yet, by clientMessageId: a dequeued message goes back to the composer as typed. */
@@ -299,6 +348,12 @@ export class SessionController extends EventEmitter {
    * then re-opens by session path on the current client and catches up. Never resends messages.
    */
   async reattach(): Promise<void> {
+    if (this.durableId !== undefined) releaseReopen(this.durableId); // the person's own reopen is not a storm: let the ration start fresh
+    await this.reopen();
+  }
+
+  /** The body of a reopen on the current connection; the automatic park path uses it directly so it does not reset the ration. */
+  private async reopen(): Promise<void> {
     if (this.released) return;
     let client: RpcClient;
     try {
@@ -322,6 +377,9 @@ export class SessionController extends EventEmitter {
     // an image-only first message has no words to name the session by; the first text does it
     const unnamed =
       !this.nameSent && normalizeSessionName(text) !== "" && this.current.title === undefined && !this.current.blocks.some((block) => block.kind === "user" && block.text.trim() !== "");
+    // What the next turn is answering, for a liveness abort to put back; a recovery's own resend inherits the attempt.
+    const inherited = this.resending ? this.answering : undefined;
+    this.answering = { key: inherited?.key ?? clientMessageId, id: clientMessageId, text, images, recovered: inherited !== undefined };
     this.showOutgoing(clientMessageId, text, images);
     const fields = { message: text, clientMessageId, ...imageParts };
     /**
@@ -331,24 +389,38 @@ export class SessionController extends EventEmitter {
      * The kind is chosen when the message leaves: one that waited for a prompt that started its turn steers that turn.
      */
     const dispatch = this.outgoing.then(async () => {
-      const type = mode === "followUp" ? "follow_up" : this.current.running || this.turnStarting ? "steer" : "prompt";
+      // A message typed while a compaction runs goes to the queue, not in as a prompt: OmO rejects a prompt during a
+      // compaction, and the queue drains by itself when the compaction ends — exactly the wait the person expects.
+      const type =
+        mode === "followUp" || this.current.compacting
+          ? "follow_up"
+          : this.current.running || this.turnStarting
+            ? "steer"
+            : "prompt";
       const barrier = type === "prompt" ? await this.barrierPoint() : undefined;
       const toolBarrier = barrier ? { toolBarrier: { id: barrier.pointId, deadlineMs: BARRIER_DEADLINE_MS } } : {};
       const armedAt = Date.now();
       const sent = this.request<Frame>(type, { ...fields, ...toolBarrier });
       const answer =
         type !== "prompt"
-          ? sent.then((data) => ({ data, steered: false }))
+          ? sent.then((data) => ({ data, steered: false, queued: false }))
           : sent.then(
-              (data) => ({ data, steered: false }),
+              (data) => ({ data, steered: false, queued: false }),
               async (error: unknown) => {
-                if (!(error instanceof RpcError) || error.code !== "streaming") throw error;
-                return { data: await this.request<Frame>("steer", fields), steered: true };
+                if (error instanceof RpcError && error.code === "streaming") {
+                  return { data: await this.request<Frame>("steer", fields), steered: true, queued: false };
+                }
+                // A prompt that lost the race to a compaction OmO had just begun (its `compacting` flag had not
+                // reached us when `type` was chosen): re-route to the queue rather than surface OmO's refusal.
+                if (error instanceof RpcError && isCompactionReject(error)) {
+                  return { data: await this.request<Frame>("follow_up", fields), steered: false, queued: true };
+                }
+                throw error;
               },
             );
-      const settled = answer.then(({ data, steered }) => {
-        if (type === "prompt" && !steered && data?.["disposition"] === "started") this.turnStarting = true;
-        return { data, steered };
+      const settled = answer.then(({ data, steered, queued }) => {
+        if (type === "prompt" && !steered && !queued && data?.["disposition"] === "started") this.turnStarting = true;
+        return { data, steered, queued };
       });
       return { type, barrier, armedAt, answer: settled };
     });
@@ -357,11 +429,15 @@ export class SessionController extends EventEmitter {
     try {
       const { type, barrier, armedAt, answer } = await dispatch;
       sentMode = type === "steer" ? "steer" : type === "follow_up" ? "followUp" : undefined;
-      const { data, steered } = await answer;
+      const { data, steered, queued } = await answer;
       if (steered) sentMode = "steer";
+      else if (queued) sentMode = "followUp"; // a prompt re-routed to the queue mid-compaction is a queued message now
       else if (barrier !== undefined && data?.["toolBarrier"] === "armed") this.captureThenRelease(barrier, clientMessageId, armedAt);
       else if (data?.["toolBarrier"] === "ignored") sentMode = "steer";
-      if (data?.["disposition"] === "handled") this.takeBack(clientMessageId); // a command consumed it: no message will come
+      if (data?.["disposition"] === "handled") {
+        this.takeBack(clientMessageId); // a command consumed it: no message will come
+        if (this.answering?.id === clientMessageId) this.answering = undefined; // and no turn is answering it
+      }
     } catch (error) {
       this.takeBack(clientMessageId);
       this.fail(error);
@@ -471,12 +547,31 @@ export class SessionController extends EventEmitter {
     if (this.handle === "" || this.released) return;
     this.handle = "";
     this.turnStarting = false; // the handle is gone and the turn with it: the next message prompts, it does not steer
+    const blocks = this.current.blocks.filter((block) => block.id !== PARK_NOTICE_ID); // one park line, re-anchored, never a copy per reopen
     this.commit({
       ...this.current,
       running: false,
-      blocks: [...this.current.blocks, { kind: "notice", id: `parked:${randomUUID()}`, level: "info", text: "Сессия выгружена — открываю заново" }],
+      blocks: [...blocks, { kind: "notice", id: PARK_NOTICE_ID, level: "info", text: PARK_TEXT }],
     });
-    this.reopening = this.reopening.then(() => this.reattach()).catch(() => undefined);
+    this.reopening = this.reopening.then(() => this.reopen()).catch(() => undefined);
+  }
+
+  /**
+   * A park OmO sent by itself. Reopen it as `parked` does — unless OmO keeps parking faster than the session can stay
+   * open: past the reopen ration (`src/sessions/reopenRation.ts`) the storm is stopped rather than fed, the tab is left
+   * honestly not-running with one line and the «Переподключить» button, and the next park is ignored while it holds
+   * (the handle is already gone). The person's «Переподключить» clears the ration, so a reopen is always theirs to make.
+   */
+  private autoParked(): void {
+    if (this.handle === "" || this.released) return;
+    const durableId = this.durableId;
+    if (durableId !== undefined && !claimReopen(durableId)) {
+      this.handle = "";
+      this.turnStarting = false;
+      this.commit({ ...this.current, running: false, error: REOPEN_STORM_TEXT });
+      return;
+    }
+    this.parked();
   }
 
   /**
@@ -504,17 +599,103 @@ export class SessionController extends EventEmitter {
     }
   }
 
+  /**
+   * The two records of a turn OmO killed by itself, watched as they come: the aborted assistant message that never
+   * reached the model, and OmO's own stall row that names the abort `"system"`. Only the pair fires — see
+   * `src/sessions/liveness.ts` for why neither half is enough on its own.
+   */
+  private observeLiveness(frame: Frame): void {
+    const type = frame["type"];
+    if (type === "agent_start" || type === "turn_start") this.deadTurn = undefined; // a new turn: the old one's shape is spent
+    if (type === "compaction_end") this.ownCompact = false;
+    if (type === "message_end" && instantDeadTurn(frame["message"])) {
+      const message = isObject(frame["message"]) ? frame["message"] : {};
+      const id = typeof frame["clientMessageId"] === "string" ? frame["clientMessageId"] : typeof message["clientMessageId"] === "string" ? message["clientMessageId"] : undefined;
+      this.deadTurn = { id };
+    }
+    if (type !== "entry_appended") return;
+    const work = systemAbortStall(frame["entry"]);
+    const dead = this.deadTurn;
+    if (work === undefined || dead === undefined) return;
+    this.deadTurn = undefined;
+    if (this.ownCompact) {
+      this.ownCompact = false; // the person asked for this compaction, and it aborts the turn with the same provenance
+      return;
+    }
+    this.livenessAbort(work, dead.id);
+  }
+
+  /**
+   * OmO killed the turn itself a millisecond after it started. The turn ends here whatever the host says next (the tab
+   * must never be left claiming it is working), the feed hears it plainly once, and the message gets one automatic way
+   * back: the session is unloaded and reopened — the only reset of this state a client can reach — and the message is
+   * sent again under a new id. Bounded by `answering.recovered` (once per message) and by the auto-unwedge ration
+   * (`src/sessions/autoUnwedge.ts`, one automatic restart per session per cooldown, shared with «Снять зависание»).
+   */
+  private livenessAbort(work: OpenWork, deadId: string | undefined): void {
+    this.turnStarting = false;
+    this.commit({ ...this.current, running: false, activity: undefined, activityTool: undefined });
+    const answering = this.answering;
+    const key = answering?.key ?? deadId ?? "turn";
+    const left = openWorkText(work);
+    this.noteOnce(`liveness:${key}`, "warn", left === undefined ? LIVENESS_ABORT_TEXT : `${LIVENESS_ABORT_TEXT} (${left})`);
+    const durableId = this.durableId;
+    if (
+      answering === undefined ||
+      answering.recovered ||
+      this.released ||
+      durableId === undefined ||
+      (deadId !== undefined && deadId !== answering.id) || // the dead turn was answering some other message
+      !claimAutoUnwedge(durableId) // last: the claim itself starts the cooldown
+    ) {
+      this.noteOnce(`liveness-fix:${key}`, "warn", LIVENESS_MANUAL_TEXT);
+      return;
+    }
+    answering.recovered = true;
+    void this.recoverLivenessAbort(answering);
+  }
+
+  /** The way back, in order: unload and reopen the session, then put the message in again under a new id. */
+  private async recoverLivenessAbort(answering: { key: string; text: string; images: OutgoingImage[] }): Promise<void> {
+    const { key, text, images } = answering;
+    const unwedged = await this.unwedgeSession(LIVENESS_UNWEDGE_WHY);
+    if (this.released) return;
+    if (unwedged.outcome !== "unloaded") {
+      // Without the reopen the state that killed the turn is still there: a resend would die the same way.
+      this.noteOnce(`liveness-fix:${key}`, "warn", `${unwedged.reason} — ${LIVENESS_MANUAL_TEXT}`);
+      return;
+    }
+    const id = randomUUID();
+    this.modelLadder?.armed(id, text, images); // the ladder keeps watching the person's message through the resend
+    this.resending = true;
+    let sent: boolean;
+    try {
+      sent = await this.send(text, "auto", images, id);
+    } finally {
+      this.resending = false;
+    }
+    if (this.released) return;
+    this.noteOnce(`liveness-fix:${key}`, sent ? "info" : "warn", sent ? LIVENESS_RESENT_TEXT : LIVENESS_MANUAL_TEXT);
+  }
+
   /** One line in the feed under a fixed id: a session resumed again says the same thing in the same place. */
   private noteOnce(id: string, level: "info" | "warn", text: string): void {
     const blocks = this.current.blocks.filter((block) => block.id !== id);
     this.commit({ ...this.current, blocks: [...blocks, { kind: "notice", id, level, text }] });
   }
 
-  /** «Сжать сейчас»: the compact_start/compact_end frames drive the busy state; a refusal lands in the error. */
+  /**
+   * «Сжать сейчас»: the compact_start/compact_end frames drive the busy state; a refusal lands in the error.
+   *
+   * OmO's compaction begins by aborting the running turn with provenance `"system"` — the same provenance a liveness
+   * abort carries — so this flag keeps the person's own request from being read as OmO killing the turn behind them.
+   */
   async compact(): Promise<void> {
+    this.ownCompact = true;
     try {
       await this.request("compact");
     } catch (error) {
+      this.ownCompact = false;
       this.fail(error);
     }
   }
@@ -1061,7 +1242,7 @@ export class SessionController extends EventEmitter {
       return;
     }
     if (frame["type"] === "session_parked") {
-      this.parked();
+      this.autoParked();
       return;
     }
     if (stoppedGoalNotice(frame) !== undefined) {
@@ -1078,6 +1259,7 @@ export class SessionController extends EventEmitter {
     if (type === "agent_settled" || type === "queue_update" || (type === "message_start" && frame["message"]?.["role"] === "user")) this.pruneOutbox();
     if (frame["type"] === "model_changed") this.emit("model");
     if (frame["type"] === "agent_settled" || frame["type"] === "compaction_end") void this.refreshContext();
+    this.observeLiveness(frame);
     this.modelLadder?.observe(frame); // after the commit, so the ladder reads the turn's state as this frame left it
   }
 

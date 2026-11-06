@@ -4,6 +4,7 @@ import { lifecycleRunning } from "../chat/reducer";
 import type { Ladder, Rung } from "../settings/ladder";
 import type { OutgoingImage } from "./controller";
 import { emptyAnswer, endFailure, lifecyclePolicyRejection, SILENCE_MS, tally, type FailureClass, type TurnTally } from "./ladderFailure";
+import { instantDeadTurn } from "./liveness";
 
 /** A model the environment serves, as the ladder needs it: enough to match a rung and to name it. */
 export type LadderModel = { provider: string; id: string; name?: string };
@@ -82,6 +83,8 @@ type Walk = {
   stepped: boolean;
   /** The turn answering `id` has produced a frame of its own. */
   started: boolean;
+  /** The turn was killed by OmO itself as it started: not a provider failure, and no step of ours answers it. */
+  dead: boolean;
   /** The last model the walk switched to. */
   rescuer: ModelRef | undefined;
 };
@@ -101,8 +104,9 @@ function isObject(value: unknown): value is Record<string, unknown> {
  *
  * Two rules keep one failure from walking the whole ladder. A step is keyed to the clientMessageId being answered, so
  * the sticky `policy-rejection` lifecycle row (15–20 of them per refusal) steps once; and a rung fires at most once
- * per message. Nothing is ever repeated when the turn already called a tool: then the rung behaves as «остановиться
- * и спросить», naming the reason.
+ * per message. The person's own message is never *replayed* once the turn has called a tool — that would run it a
+ * second time — so a pure model rung behaves as «остановиться и спросить» there, naming the reason. A rung carrying a
+ * *continuation* phrase re-runs nothing, so it fires whatever the turn already did.
  */
 export class ModelLadder {
   /** The person's message as it was sent, until a `message_start` shows it reached the conversation. */
@@ -151,6 +155,7 @@ export class ModelLadder {
           tally: { text: false, tools: pending.wasRunning },
           stepped: false,
           started: false,
+          dead: false,
           rescuer: undefined,
         };
       }
@@ -159,8 +164,12 @@ export class ModelLadder {
     if (walk === undefined) return;
     if (type === "agent_start") {
       walk.started = true;
+      walk.dead = false;
       walk.tally = { text: false, tools: false };
     }
+    // A turn OmO killed itself as it started answered nothing and failed nothing: the controller puts the message
+    // back (and arms the ladder on its resend), so the only thing to do here is stop watching this one.
+    if (type === "message_end" && instantDeadTurn(frame["message"])) walk.dead = true;
     if (type === "message_update" || type === "message_end" || type === "tool_execution_start" || type === "tool_execution_update" || type === "tool_execution_end") {
       walk.started = true;
     }
@@ -181,7 +190,11 @@ export class ModelLadder {
     }
     if (type === "agent_settled" || (type === "session_lifecycle" && lifecycleRunning(frame["lifecycle"]) === false)) {
       if (!walk.started) return;
-      if (emptyAnswer(walk.tally)) this.step(walk, "empty");
+      if (walk.dead) {
+        this.walk = undefined;
+        this.clearSilence();
+        this.show(undefined);
+      } else if (emptyAnswer(walk.tally)) this.step(walk, "empty");
       else this.settle(walk);
     }
   }
@@ -254,17 +267,10 @@ export class ModelLadder {
       .catch(() => undefined); // the line is cosmetic: a model list that will not load leaves it off
   }
 
-  /** One failure, once per message. */
+  /** One failure, once per message. The replay/continuation decision is per rung and lives in `walkOn`. */
   private step(walk: Walk, failure: FailureClass): void {
     walk.stepped = true;
     this.clearSilence();
-    if (walk.tally.tools) {
-      // The turn called a tool, wrote a file or ran a command: repeating the message would do it a second time.
-      this.walk = undefined;
-      this.show(undefined);
-      this.session.note("warn", `${REASON[failure]}, но ход уже выполнил действия — не повторяю, решите сами`);
-      return;
-    }
     void this.walkOn(walk, failure).catch(() => {
       if (this.walk === walk) this.walk = undefined;
       this.show(undefined);
@@ -285,6 +291,18 @@ export class ModelLadder {
         this.session.note("info", `Ступенька ${at + 1} пропущена: ${label(rung.action)} нет в этой среде`);
         continue;
       }
+      // What this rung carries: a model to switch to, and the phrase to send. With no phrase, a model rung repeats the
+      // person's own message — a replay. With a phrase, it sends that instead — a continuation, which re-runs nothing.
+      const continuation = rung.action.kind === "ask" ? undefined : rung.action.text;
+      if (continuation === undefined && rung.action.kind === "model" && walk.tally.tools) {
+        // The turn called a tool, wrote a file or ran a command: replaying the message would do it a second time. This
+        // rung has no phrase to carry on with, so it behaves as «остановиться и спросить», naming the reason.
+        walk.fired.add(rung.id);
+        this.walk = undefined;
+        this.show(undefined);
+        this.session.note("warn", `${REASON[failure]}, но ход уже выполнил действия — не повторяю, решите сами`);
+        return;
+      }
       walk.fired.add(rung.id);
       walk.at = at;
       if (rung.action.kind === "ask") {
@@ -303,11 +321,12 @@ export class ModelLadder {
         walk.rescuer = { provider: rung.action.provider, id: rung.action.id };
         walk.tried += 1;
       }
-      // The last look before the repeat leaves: «Прервать» must not be answered by a message going out anyway.
+      // The last look before the message leaves: «Прервать» must not be answered by one going out anyway. A
+      // continuation is a genuinely new message under its own id, not a resend tied to the original.
       if (this.walk !== walk) return;
       const id = this.newId();
-      const text = rung.action.kind === "text" ? rung.action.text : walk.text;
-      const images = rung.action.kind === "text" ? [] : walk.images;
+      const text = continuation ?? walk.text;
+      const images = continuation === undefined ? walk.images : [];
       if (!(await this.session.send(id, text, images))) {
         if (this.walk === walk) this.walk = undefined;
         this.show(undefined);
@@ -318,17 +337,22 @@ export class ModelLadder {
       walk.id = id;
       walk.stepped = false;
       walk.started = false;
+      walk.dead = false;
       walk.tally = { text: false, tools: false };
-      this.session.note(
-        "info",
-        rung.action.kind === "model" ? `${REASON[failure]} — перешёл на ${name} и повторил` : `${REASON[failure]} — отправил «${name}»`,
-      );
+      this.session.note("info", this.stepNote(failure, rung.action, name));
       this.armSilence();
       return;
     }
     this.walk = undefined;
     this.show(undefined);
     this.session.note("warn", `Дальше некуда: перепробовал ${models(walk.tried)}`);
+  }
+
+  /** The feed line for a step that went out: the model it moved to, the phrase it sent, or both. */
+  private stepNote(failure: FailureClass, action: Extract<Rung["action"], { kind: "model" | "text" }>, name: string): string {
+    if (action.kind === "text") return `${REASON[failure]} — отправил «${action.text}»`;
+    if (action.text === undefined) return `${REASON[failure]} — перешёл на ${name} и повторил`;
+    return `${REASON[failure]} — перешёл на ${name} и отправил «${action.text}»`;
   }
 
   /**

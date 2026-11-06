@@ -10,7 +10,7 @@
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets } from "./classify.mjs";
+import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets, isReadTool } from "./classify.mjs";
 import { commandText, guardStateReason, protectedTarget } from "./protect.mjs";
 import { loadDefaultRules, loadRules } from "./rules.mjs";
 import { readLines, servicePaths, writeLine } from "./sockets.mjs";
@@ -78,7 +78,7 @@ function allowedLocally(call, rules, where) {
     return fileWriteTargets({ tool_name: tool, tool_input: call.input }).every((target) => !protectedTarget(target, where));
   }
   const verdict = classify({ tool_name: call.tool, tool_input: call.input, cwd: call.cwd, agent_dir: where.agentDir, home: where.home }, rules);
-  return verdict.tier === "allow" && !guardStateReason(commandText(tool, call.input), where);
+  return verdict.tier === "allow" && !guardStateReason(commandText(tool, call.input), where, isReadTool(tool));
 }
 
 /** Rules for the local check: no file -> defaults; unreadable or invalid -> null (the service decides). */
@@ -104,7 +104,7 @@ function withoutTheService(call, rules, where, reason) {
   }
   const verdict = classify({ tool_name: call.tool, tool_input: call.input, cwd: call.cwd, agent_dir: where.agentDir, home: where.home }, usable);
   if (verdict.tier === "deny") return deny(`жёсткий запрет: ${verdict.reasons.join("; ")}; ${reason}`);
-  const guardState = guardStateReason(commandText(tool, call.input), where);
+  const guardState = guardStateReason(commandText(tool, call.input), where, isReadTool(tool));
   if (guardState) return deny(`${guardState} — решает только человек, а ${reason}`);
   return {};
 }

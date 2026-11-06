@@ -638,6 +638,27 @@ describe("service node and login PATH (P33, N4)", () => {
     expect(writablePrefix("/usr/bin/git", guard, mine)).toBeUndefined();
   });
 
+  it("a_path_dir_under_local_closes_at_its_own_path_never_the_whole_xdg_base", () => {
+    // ~/.local is an XDG base dir: bin is on PATH, but state/share/lib hold data ordinary tools write
+    // (CLI tools keep their state in ~/.local/state/<tool>). Closing the topmost writable dir would be
+    // ~/.local whole — the P33 over-reach already fixed for ~/.cache. A PATH dir under it closes alone.
+    const home = path.join(root, "home");
+    const mine = (file: string): boolean => file.startsWith(root);
+    const guard = guardOf(home, path.join(home, ".omo/agent"), path.join(home, ".omo-second/agent"));
+    expect(writablePrefix(path.join(home, ".local/bin"), guard, mine)).toBe(path.join(home, ".local/bin"));
+    expect(writablePrefix(path.join(home, ".local/share/pipx/bin"), guard, mine)).toBe(path.join(home, ".local/share/pipx/bin"));
+  });
+
+  it("login_path_dirs_under_local_close_specifically_not_the_whole_local_tree", () => {
+    const home = path.join(root, "home");
+    const binDir = path.join(home, ".local/bin");
+    const pipxBin = path.join(home, ".local/share/pipx/bin");
+    for (const dir of [binDir, pipxBin, path.join(home, ".local/state")]) fs.mkdirSync(dir, { recursive: true });
+    const denies = loginPathDenies([binDir, pipxBin], guardOf(home), (file) => file.startsWith(home));
+    expect(denies).toEqual([binDir, pipxBin].sort());
+    expect(denies).not.toContain(path.join(home, ".local"));
+  });
+
   it("every_login_path_entry_and_every_link_inside_closes_its_writable_prefix", () => {
     const home = path.join(root, "home");
     const brew = path.join(root, "opt/homebrew");

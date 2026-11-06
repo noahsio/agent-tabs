@@ -9,6 +9,7 @@ import { applyDelta } from "../../src/panel/delta";
 import type { HostMessage, StateMessage } from "../../src/panel/protocol";
 import { PanelRegistry } from "../../src/panel/registry";
 import { resetAutoUnwedge } from "../../src/sessions/autoUnwedge";
+import { REOPEN_CAP, resetReopenRation } from "../../src/sessions/reopenRation";
 import { FakeDaemon, type Frame } from "../helpers/fakeDaemon";
 
 vi.mock("vscode", () => ({
@@ -119,6 +120,7 @@ async function wedgedTab(): Promise<ReturnType<typeof fakePanel>> {
 
 beforeEach(async () => {
   resetAutoUnwedge(); // the cooldown lives in the extension process, which the test suite shares
+  resetReopenRation(); // likewise the reopen ration: a park in one test must not count against the next
   daemon = await FakeDaemon.start();
   await mkdir(join(daemon.agentDir, "rpc"), { recursive: true });
   await symlink(daemon.socketPath, hostSocketPath(daemon.agentDir));
@@ -220,6 +222,30 @@ describe("unwedgeSession", () => {
     expect(requests("unload_session").length).toBe(2);
   });
 
+  it("a_persons_stop_releases_the_ration_so_the_next_bounded_restart_is_not_declined", async () => {
+    const { other, receive } = await wedgedTab();
+    daemon.on("abort", () => ({}));
+    daemon.on("unload_session", (request) => ({
+      data: { outcome: "unloaded", sessionPath: SESSION_FILE },
+      frames: [{ sessionId: request["sessionId"], type: "session_parked", sessionPath: SESSION_FILE, reason: "unloaded" }],
+    }));
+    daemon.on("open_session", () => ({ data: openData("rpc-2", false) }));
+
+    // An automatic restart has already spent the cooldown (e.g. an earlier wedge).
+    receive({ type: "unwedge", auto: true });
+    await settle(() => other.some((message) => message["type"] === "unwedged"));
+    expect(requests("unload_session").length).toBe(1);
+
+    // The person presses «Стоп»; abort does not end the turn, so the composer falls back to the bounded restart. Because
+    // Stop released the ration, that restart runs instead of being declined — Stop frees the tab every time.
+    receive({ type: "stop" });
+    await settle(() => requests("abort").length > 0);
+    receive({ type: "unwedge", auto: true });
+    await settle(() => other.filter((message) => message["type"] === "unwedged").length === 2);
+    expect(other.at(-1)).toEqual({ type: "unwedged", auto: true, outcome: "unloaded" });
+    expect(requests("unload_session").length).toBe(2);
+  });
+
   it("a_refused_automatic_restart_is_said_in_the_feed_and_changes_nothing", async () => {
     const { posted, other, receive } = await wedgedTab();
     daemon.on("unload_session", () => ({ data: { outcome: "refused", reason: "children_live", detail: "2 задачи", action: "children" } }));
@@ -307,6 +333,55 @@ describe("unwedgeSession", () => {
     await settle(() => requests("open_session").length > opens);
     await settle(() => posted.at(-1)?.state.activity === "tool");
     expect(posted.at(-1)?.state.running).toBe(true);
+  });
+
+  it("a_session_omo_keeps_parking_is_reopened_at_most_a_few_times_then_stopped", async () => {
+    const { posted, receive } = await wedgedTab();
+    // Every reopen hands back a fresh handle and, with it, another park: OmO drops the session as fast as it opens.
+    let handle = 1;
+    daemon.on("open_session", () => {
+      const id = `rpc-${++handle}`;
+      return { data: openData(id, false), frames: [{ sessionId: id, type: "session_parked", sessionPath: SESSION_FILE, reason: "idle" }] };
+    });
+    const opensBefore = requests("open_session").length;
+
+    daemon.push({ sessionId: "rpc-1", type: "session_parked", sessionPath: SESSION_FILE, reason: "idle" });
+    await settle(() => posted.at(-1)?.state.error !== undefined);
+    // Let any further reopen that was going to happen happen, so the count we read is the final one.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const reopens = requests("open_session").length - opensBefore;
+    expect(reopens).toBe(REOPEN_CAP); // the ration caps it at a small N; not an infinite storm
+    expect(posted.at(-1)?.state.running).toBe(false); // honestly stopped
+    expect(posted.at(-1)?.state.error).toContain("перестал открывать её заново"); // one honest line
+    expect(posted.at(-1)?.reconnectable).toBe(true); // and a button to press
+
+    // The person presses «Переподключить»: the session now stays open, and the manual reopen is not rationed away.
+    daemon.on("open_session", () => ({ data: openData("rpc-ok", false) }));
+    const opensAtGiveUp = requests("open_session").length;
+    receive({ type: "reconnect" });
+    await settle(() => posted.at(-1)?.state.error === undefined && requests("open_session").length > opensAtGiveUp);
+    expect(posted.at(-1)?.state.running).toBe(false);
+  });
+
+  it("nothing_reopens_twice_at_once_during_a_park_storm", async () => {
+    const { posted } = await wedgedTab();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let handle = 1;
+    daemon.on("open_session", async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+      const id = `rpc-${++handle}`;
+      return { data: openData(id, false), frames: [{ sessionId: id, type: "session_parked", sessionPath: SESSION_FILE, reason: "idle" }] };
+    });
+
+    daemon.push({ sessionId: "rpc-1", type: "session_parked", sessionPath: SESSION_FILE, reason: "idle" });
+    await settle(() => posted.at(-1)?.state.error !== undefined);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(maxInFlight).toBe(1); // reopens are one at a time, never two concurrently
   });
 
   it("a_tab_without_a_session_still_gets_an_answer", async () => {

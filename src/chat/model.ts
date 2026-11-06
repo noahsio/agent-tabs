@@ -96,6 +96,13 @@ export type Dialog = {
   id: string;
   method: "select" | "confirm" | "input" | "editor" | "question";
   title: string;
+  /**
+   * A `question` with `waitForAnswer: false`: the tool returned at once, the turn ended, and OmO holds the session on a
+   * standing invitation whose answer is simply the next user message. Such a question must not lock the composer or raise
+   * the running spinner — the person can answer it from its card or by sending a normal message. Absent (or true) means
+   * the request blocks the turn, as every dialog but a non-blocking question does.
+   */
+  blocking?: boolean;
   options?: string[];
   questions?: unknown[];
   /** confirm: the line under the title. */

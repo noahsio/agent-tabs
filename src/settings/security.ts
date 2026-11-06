@@ -90,6 +90,12 @@ export interface SecurityDeps {
 const TEXT_FIELDS: readonly TextField[] = ["hardDeny", "askCustom", "ipWhitelist"];
 const MODEL = /^[^/\s]+\/\S+$/;
 const NEEDS_CONSENT = "Сначала подтвердите, что будет установлено";
+// OmO's automatic memory reflection creates a git worktree under the repo's .git, which the sandbox denies for a
+// verified reason (a planted .git config/hooks runs when git runs outside the sandbox). It cannot complete under
+// protection, so the host runs it with SENPI_MEMORY_REFLECTION off (daemon.ts hostCommand) rather than let it fail and
+// spam the feed — this note tells the person why automatic memory is off while protection is on.
+const REFLECTION_UNDER_PROTECTION =
+  "Под защитой автоматическая память OmO (рефлексия) отключена: ей нужно записать служебные файлы git-worktree, которые песочница запрещает. Когда защита выключена, память снова работает — это ожидаемо, а не сбой.";
 const IN_PROGRESS = "Защита уже включается или выключается — дождитесь конца";
 const SERVICE_SILENT = "Служба защиты не отвечает — изменение не сохранено. Нажмите «Починить» или выключите защиту";
 const SERVICE_STARTING = "Служба защиты запускается или не ответила — изменение не сохранено. Попробуйте ещё раз через несколько секунд";
@@ -271,6 +277,7 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
     try {
       await this.edits; // a rule edit already under way ends with the writer it started with
       await (on ? this.deps.protection.enable() : this.deps.protection.disable());
+      if (on) this.deps.log(REFLECTION_UNDER_PROTECTION);
     } catch (error) {
       this.deps.log(`Защита не ${on ? "включена" : "выключена"}: ${errorText(error)}`);
       throw new FieldErrors(`Защита не ${on ? "включена" : "выключена"}: ${errorText(error)}`, []);

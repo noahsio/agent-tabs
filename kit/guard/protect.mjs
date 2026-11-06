@@ -107,25 +107,42 @@ const LAUNCHCTL_RE = /(?<![\w-])launchctl\s+(?:bootout|bootstrap|unload|load|dis
  * This is the second layer, and deliberately a text heuristic: the Seatbelt profile is what actually refuses the
  * writes (kit/sandbox/profile.mjs), and file-writing tools are hard-denied by protectedTarget above. Narrowing the
  * heuristic does not widen what the sandbox allows.
+ *
+ * Read vs write (`isRead`). Reading the guard's own code, config or state — none of it secret — disables or forges
+ * nothing; only a write can, and writes are already hard-denied by the Seatbelt profile and protectedTarget. So a
+ * typed read tool (READ_TOOLS: ls/read/grep/find/glob…, classify.mjs `isReadTool`) naming these files does NOT ask.
+ * The one read that still asks is the keys dir: private keys are genuinely read-sensitive. `isRead` is false for
+ * bash/eval — a shell command's read-vs-write intent is not cheaply decidable, so we never parse it and keep it
+ * asking — and false for the running-inside-dir check and the agent-guard/guardctl/launchctl checks, which run or
+ * alter the guard rather than read it.
  */
-export function guardStateReason(text, { cwd, agentDir, home }) {
-  const guardDirs = agentDirs(agentDir, home).flatMap((dir) => [path.join(dir, "guard"), path.join(dir, "keys")]);
+export function guardStateReason(text, { cwd, agentDir, home }, isRead = false) {
+  const keysDirs = agentDirs(agentDir, home).map((dir) => path.join(dir, "keys"));
+  const guardCodeDirs = agentDirs(agentDir, home).map((dir) => path.join(dir, "guard"));
   const kit = path.join(home, ".omo", "kit");
-  // Running *inside* the state, keys or kit dir, where a relative path reaches them without naming them.
-  if (cwd && [...guardDirs, kit].some((dir) => isInside(realpathOrSelf(cwd), realpathOrSelf(dir)) || isInside(cwd, dir))) {
+  // Running *inside* the state, keys or kit dir, where a relative path reaches them without naming them. The cwd is
+  // itself the guard's surface, so this asks for a read as much as a write.
+  if (cwd && [...guardCodeDirs, ...keysDirs, kit].some((dir) => isInside(realpathOrSelf(cwd), realpathOrSelf(dir)) || isInside(cwd, dir))) {
     return "команда запускается в папке решателя, ключей или кита";
   }
   if (!text) return null;
+  // Run or alter the guard, not read it: these ask whatever the tool.
   if (/agent-guard/i.test(text)) return "команда упоминает agent-guard";
   if (/guardctl/i.test(text)) return "команда вызывает guardctl";
   if (LAUNCHCTL_RE.test(text)) return "команда управляет автозапуском (launchctl)";
   // Paths, not words: prose about the guard (a spec the code writes to a project file) names none of these.
   const joined = joinedLiterals(text);
-  if (GUARD_STATE_FILE_RE.test(joined)) return "команда обращается к файлам состояния решателя (guard/rules.json, cache, answers, сокеты…)";
-  if (/hooks(-state)?\.json/i.test(text)) return "команда упоминает hooks.json / hooks-state.json";
   const folded = fold(joined);
   const names = (dirs) => dirs.some((dir) => spellings(dir, home).some((form) => folded.includes(form)));
-  if (names(guardDirs)) return "команда обращается к папке решателя или ключей";
+  // The keys dir asks even on a read — private keys are read-sensitive. (secrets-access covers key files by name on
+  // its own; this catches a bare listing of the dir, e.g. `ls <agentDir>/keys`.)
+  if (names(keysDirs)) return "команда обращается к папке ключей";
+  // Everything below is the guard's code, config or state. Reading it tampers with nothing, so a typed read tool is
+  // exempt; a write or a shell command (isRead false) still asks.
+  if (isRead) return null;
+  if (GUARD_STATE_FILE_RE.test(joined)) return "команда обращается к файлам состояния решателя (guard/rules.json, cache, answers, сокеты…)";
+  if (/hooks(-state)?\.json/i.test(text)) return "команда упоминает hooks.json / hooks-state.json";
+  if (names(guardCodeDirs)) return "команда обращается к папке решателя";
   if (names(agentDirs(agentDir, home).flatMap((dir) => AGENT_DECISION_FILES.map((file) => path.join(dir, file))))) {
     return "команда обращается к настройкам агента или его хукам";
   }

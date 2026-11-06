@@ -168,13 +168,14 @@ afterEach(() => {
 });
 
 describe("the ladder's walk", () => {
-  it("a_refusal_jumps_to_the_rung_that_answers_it_and_repeats_the_message", async () => {
+  it("a_refusal_jumps_to_the_rung_that_answers_it_and_sends_its_continuation", async () => {
     begin();
     ladder.observe(refusalEnd());
     await flush();
     expect(session.switched).toEqual([GPT]);
-    expect(session.sent.map((item) => item.text)).toEqual(["привет"]);
-    expect(session.lastNote).toBe("Модель отказалась — перешёл на GPT 6.1 Sol и повторил");
+    // the default's fourth rung is GPT 6.1 Sol + «продолжай»: it switches the model and continues, not replays
+    expect(session.sent.map((item) => item.text)).toEqual(["продолжай"]);
+    expect(session.lastNote).toBe("Модель отказалась — перешёл на GPT 6.1 Sol и отправил «продолжай»");
     expect(session.views.at(-1)).toEqual({ state: "walking", rung: 4, total: 5, label: "GPT 6.1 Sol" });
   });
 
@@ -182,8 +183,37 @@ describe("the ladder's walk", () => {
     begin();
     await emptyTurn();
     expect(session.switched).toEqual([OPUS_5]);
-    expect(session.lastNote).toBe("Модель ответила пусто — перешёл на Opus 5 и повторил");
+    expect(session.sent.map((item) => item.text)).toEqual(["продолжай"]);
+    expect(session.lastNote).toBe("Модель ответила пусто — перешёл на Opus 5 и отправил «продолжай»");
     expect(session.views.at(-1)).toEqual({ state: "walking", rung: 2, total: 5, label: "Opus 5" });
+  });
+
+  /**
+   * A turn OmO killed by itself answered nothing, so `emptyAnswer` is true of it — but it is no failure of any model,
+   * and the controller is the one that puts the message back (and arms this ladder on its resend). Stepping here would
+   * switch the model and send a second copy of the message behind the recovery's own.
+   */
+  it("a_turn_omo_killed_by_itself_moves_nothing", async () => {
+    begin();
+    session.isRunning = false;
+    ladder.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "" }],
+        stopReason: "aborted",
+        errorMessage: "The operation was aborted.",
+        timing: { requestedAt: 1793896968351, endedAt: 1793896968367 },
+      },
+    });
+    ladder.observe({ type: "agent_settled" });
+    await flush();
+
+    expect(session.switched).toEqual([]);
+    expect(session.sent).toEqual([]);
+    expect(session.calls).toEqual([]);
+    expect(session.noteTexts).toEqual([]);
+    expect(session.views.at(-1)).toBeUndefined();
   });
 
   it("a_provider_rejection_descends_the_ladder_one_rung_at_a_time", async () => {
@@ -192,8 +222,8 @@ describe("the ladder's walk", () => {
     await flush();
     // unlike a classifier refusal, a rejection is no evidence about the next model: it does not skip the Anthropic steps
     expect(session.switched).toEqual([OPUS_5]);
-    expect(session.sent.map((item) => item.text)).toEqual(["привет"]);
-    expect(session.lastNote).toBe("Провайдер отклонил запрос — перешёл на Opus 5 и повторил");
+    expect(session.sent.map((item) => item.text)).toEqual(["продолжай"]);
+    expect(session.lastNote).toBe("Провайдер отклонил запрос — перешёл на Opus 5 и отправил «продолжай»");
     expect(session.views.at(-1)).toEqual({ state: "walking", rung: 2, total: 5, label: "Opus 5" });
   });
 
@@ -206,13 +236,20 @@ describe("the ladder's walk", () => {
     expect(session.views).toEqual([]);
   });
 
-  it("a_rejection_that_followed_a_tool_call_is_never_repeated", async () => {
+  it("a_pure_model_replay_rung_still_stops_after_the_turn_ran_a_tool", async () => {
+    // a bare model switch repeats the person's own message, which a turn that ran a tool must not do again
+    session.config = {
+      rungs: [DEFAULT_LADDER.rungs[0] as never, { id: "replay", action: { kind: "model", provider: GPT.provider, id: GPT.id }, on: ["rejected"] }],
+    };
     begin("m1", "почини сборку");
     ladder.observe(toolCall("bash"));
     ladder.observe(rejectionEnd());
     await flush();
     expect(session.sent).toEqual([]);
+    expect(session.switched).toEqual([]);
+    expect(session.calls.filter((call) => call !== "models")).toEqual([]); // nothing was aborted, switched or sent
     expect(session.lastNote).toBe("Провайдер отклонил запрос, но ход уже выполнил действия — не повторяю, решите сами");
+    expect(session.notes.at(-1)?.level).toBe("warn");
   });
 
   it("a_provider_transport_break_takes_the_very_next_rung", async () => {
@@ -220,7 +257,7 @@ describe("the ladder's walk", () => {
     ladder.observe(transportEnd());
     await flush();
     expect(session.switched).toEqual([OPUS_5]);
-    expect(session.lastNote).toBe("Связь с моделью оборвалась — перешёл на Opus 5 и повторил");
+    expect(session.lastNote).toBe("Связь с моделью оборвалась — перешёл на Opus 5 и отправил «продолжай»");
   });
 
   it("the_repeat_goes_out_under_a_new_id_so_omo_cannot_answer_it_from_its_record", async () => {
@@ -228,7 +265,8 @@ describe("the ladder's walk", () => {
     ladder.observe(refusalEnd());
     await flush();
     expect(session.sent).toHaveLength(1);
-    expect(session.sent[0]?.text).toBe("разбери кошельки");
+    // the fourth rung is a continuation, so what goes out is its phrase — under a fresh id, not the person's own
+    expect(session.sent[0]?.text).toBe("продолжай");
     expect(session.sent[0]?.id).not.toBe("m1");
   });
 
@@ -318,25 +356,60 @@ describe("the ladder's walk", () => {
     expect(session.calls.filter((call) => call !== "models")).toEqual(["abort", "unwedge", "setModel", "send"]);
   });
 
-  it("a_turn_that_called_a_tool_is_not_resent", async () => {
+  it("a_text_rung_fires_after_the_turn_ran_a_tool_and_never_replays_the_original", async () => {
+    // the live case: a model refused after a read-only Eval. A pure replay would be blocked, but the default's GPT
+    // rung carries «продолжай» — a continuation re-runs nothing, so it fires, switches the model and carries on.
     begin("m1", "почини сборку");
-    ladder.observe(toolCall("bash"));
+    ladder.observe(toolCall("read"));
     ladder.observe(refusalEnd());
     await flush();
-    expect(session.sent).toEqual([]);
-    expect(session.switched).toEqual([]);
-    expect(session.calls).toEqual([]);
-    expect(session.lastNote).toBe("Модель отказалась, но ход уже выполнил действия — не повторяю, решите сами");
-    expect(session.notes.at(-1)?.level).toBe("warn");
+    expect(session.switched).toEqual([GPT]);
+    expect(session.sent.map((item) => item.text)).toEqual(["продолжай"]);
+    expect(session.sent.some((item) => item.text === "почини сборку")).toBe(false); // the original is never replayed
+    expect(session.lastNote).toBe("Модель отказалась — перешёл на GPT 6.1 Sol и отправил «продолжай»");
   });
 
-  it("a_turn_that_ran_a_tool_execution_is_not_resent_either", async () => {
+  it("a_text_rung_fires_after_a_tool_execution_too", async () => {
     begin();
     ladder.observe({ type: "tool_execution_start", toolCallId: "t1", toolName: "write" });
     ladder.observe(transportEnd());
     await flush();
-    expect(session.sent).toEqual([]);
-    expect(session.lastNote).toBe("Связь с моделью оборвалась, но ход уже выполнил действия — не повторяю, решите сами");
+    expect(session.switched).toEqual([OPUS_5]);
+    expect(session.sent.map((item) => item.text)).toEqual(["продолжай"]);
+    expect(session.lastNote).toBe("Связь с моделью оборвалась — перешёл на Opus 5 и отправил «продолжай»");
+  });
+
+  it("a_combined_rung_switches_model_and_sends_text_in_one_step", async () => {
+    session.config = {
+      rungs: [
+        DEFAULT_LADDER.rungs[0] as never,
+        { id: "combo", action: { kind: "model", provider: GPT.provider, id: GPT.id, text: "продолжай" }, on: ["empty"] },
+        { id: "ask", action: { kind: "ask" }, on: ["empty"] },
+      ],
+    };
+    begin();
+    await emptyTurn();
+    expect(session.switched).toEqual([GPT]);
+    expect(session.sent).toHaveLength(1);
+    expect(session.sent[0]?.text).toBe("продолжай");
+    expect(session.sent[0]?.images).toEqual([]);
+    expect(session.lastNote).toBe("Модель ответила пусто — перешёл на GPT 6.1 Sol и отправил «продолжай»");
+    expect(session.views.at(-1)).toEqual({ state: "walking", rung: 2, total: 3, label: "GPT 6.1 Sol" });
+  });
+
+  it("a_sticky_failure_does_not_fire_a_text_rung_twice", async () => {
+    // after a tool call the GPT continuation fires once; the sticky policy-rejection rows that follow must not re-fire it
+    begin("m1", "почини сборку");
+    ladder.observe(toolCall("read"));
+    ladder.observe(refusalEnd());
+    session.isRunning = false;
+    for (let at = 0; at < 20; at++) ladder.observe(policyRejection());
+    await flush();
+    for (let at = 0; at < 20; at++) ladder.observe(policyRejection());
+    await flush();
+    expect(session.switched).toEqual([GPT]);
+    expect(session.sent).toHaveLength(1);
+    expect(session.sent[0]?.text).toBe("продолжай");
   });
 
   it("a_turn_that_only_ran_a_tool_is_no_failure_at_all", async () => {
@@ -349,13 +422,29 @@ describe("the ladder's walk", () => {
     expect(session.calls).toEqual([]);
   });
 
-  it("a_message_steered_into_a_running_turn_is_never_repeated", async () => {
+  it("a_message_steered_into_a_running_turn_is_never_replayed_but_a_continuation_still_fires", async () => {
     session.isRunning = true; // the person wrote while the agent was working: the message joined that turn
     ladder.armed("m1", "и ещё", []);
     ladder.observe(userStart("m1"));
     ladder.observe(refusalEnd());
     await flush();
+    // the joined-in message is never replayed, but the default's GPT rung carries «продолжай», which re-runs nothing
+    expect(session.sent.some((item) => item.text === "и ещё")).toBe(false);
+    expect(session.switched).toEqual([GPT]);
+    expect(session.sent.map((item) => item.text)).toEqual(["продолжай"]);
+  });
+
+  it("a_pure_model_rung_never_repeats_a_message_steered_into_a_running_turn", async () => {
+    session.config = {
+      rungs: [DEFAULT_LADDER.rungs[0] as never, { id: "replay", action: { kind: "model", provider: GPT.provider, id: GPT.id }, on: ["refusal"] }],
+    };
+    session.isRunning = true;
+    ladder.armed("m1", "и ещё", []);
+    ladder.observe(userStart("m1"));
+    ladder.observe(refusalEnd());
+    await flush();
     expect(session.sent).toEqual([]);
+    expect(session.switched).toEqual([]);
     expect(session.lastNote).toContain("ход уже выполнил действия");
   });
 
@@ -365,7 +454,7 @@ describe("the ladder's walk", () => {
     ladder.observe(userStart("m1"));
     await emptyTurn(); // its own turn: agent_start wipes what the previous turn did
     expect(session.switched).toEqual([OPUS_5]);
-    expect(session.sent.map((item) => item.text)).toEqual(["и ещё"]);
+    expect(session.sent.map((item) => item.text)).toEqual(["продолжай"]);
   });
 
   it("five_minutes_without_a_frame_is_a_silence_and_any_frame_resets_the_clock", async () => {
@@ -375,7 +464,7 @@ describe("the ladder's walk", () => {
     await vi.advanceTimersByTimeAsync(SILENCE_MS - 1_000);
     expect(session.switched).toEqual([]);
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(session.lastNote).toBe("От модели не было ответа 5 минут — перешёл на Opus 5 и повторил");
+    expect(session.lastNote).toBe("От модели не было ответа 5 минут — перешёл на Opus 5 и отправил «продолжай»");
   });
 
   it("an_idle_session_is_never_called_silent", async () => {

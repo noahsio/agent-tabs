@@ -35,7 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets } from "./classify.mjs";
+import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets, isReadTool } from "./classify.mjs";
 import { askDecider, catReferencePath, DEFAULT_OMO_PATH, readCache, resolveDeciderTransport, writeCache, writeJsonAtomic } from "./decider.mjs";
 import { commandText, guardStateReason, protectedTarget } from "./protect.mjs";
 import { loadDefaultRules, parseRules, validateRules } from "./rules.mjs";
@@ -602,7 +602,7 @@ export async function startService({
     // The hook's own verdict is never trusted: classify again with the service's rules (the name as given: camelCase words).
     const verdict = classify({ tool_name: call.tool, tool_input: call.input, cwd: call.cwd, agent_dir: agentDir, home }, rules);
     const text = commandText(tool, call.input);
-    const guardState = guardStateReason(text, where);
+    const guardState = guardStateReason(text, where, isReadTool(tool));
     if (verdict.tier === "allow" && !guardState) return allow("[guard] разрешено");
 
     const redact = redactor();

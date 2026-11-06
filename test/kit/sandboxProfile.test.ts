@@ -199,6 +199,14 @@ describe("sandbox profile", () => {
     expect(denied(`mkdir -p ${repo}/.git/worktrees/w && echo ${evil} > ${repo}/.git/worktrees/w/commondir`)).toBe(true);
     expect(denied(`echo ${evil} > ${repo}/.git/worktrees/w/gitdir`)).toBe(true);
     expect(denied(`echo x > ${repo}/.git/worktrees/w/config`)).toBe(true);
+    // OmO memory reflection creates worktrees at ~/.omo/memory/agents/<id>/repo/.git/worktrees/<run>/; the same global
+    // rule denies their gitdir/commondir. It cannot be separated from the escape above (the memory repo is shared with
+    // the unsandboxed host's reflection, and Seatbelt cannot check commondir content), so the profile stays unchanged
+    // and reflection does not run under protection (Half B).
+    const memWt = `${home}/.omo/memory/agents/x/repo/.git/worktrees/run-1`;
+    fs.mkdirSync(memWt, { recursive: true });
+    expect(denied(`echo x > ${memWt}/gitdir`)).toBe(true);
+    expect(denied(`echo ${evil} > ${memWt}/commondir`)).toBe(true);
     execFileSyncQuiet("git", ["status", "--short"], repo); // as VS Code would, outside the sandbox
     expect(fs.existsSync(path.join(tmp, "pwned"))).toBe(false);
     expect(fs.readFileSync(path.join(repo, ".git/config"), "utf8")).not.toContain("fsmonitor");
@@ -249,6 +257,27 @@ describe("sandbox profile", () => {
     // P33: a user-writable dir on the login PATH
     expect(denied(`echo x > ${brewBin}/git`)).toBe(true);
     expect(denied(`mv ${path.dirname(brewBin)} ${tmp}/brew2`)).toBe(true);
+  });
+
+  it.runIf(darwin)("xdg_data_dirs_under_local_are_writable_but_path_dirs_under_it_are_not", () => {
+    const localBin = path.join(home, ".local/bin");
+    const pipxBin = path.join(home, ".local/share/pipx/bin"); // a deeper PATH dir the login PATH closed specifically
+    const p = buildProfile({ ...spec, writableDirs: [localBin, pipxBin] });
+    const file = path.join(tmp, "local.sb");
+    fs.writeFileSync(file, p);
+    const under = (command: string): number | null => spawnSync("/usr/bin/sandbox-exec", ["-f", file, "/bin/sh", "-c", command], { encoding: "utf8" }).status;
+    for (const dir of [".local/state", ".local/share", ".local/lib", ".local/bin", ".local/share/pipx/bin"]) fs.mkdirSync(path.join(home, dir), { recursive: true });
+    // XDG data dirs the person's tools write to stay open (a CLI tool keeps its state in ~/.local/state/<tool>)
+    expect(under(`echo x > ${home}/.local/state/sometool.pid`)).toBe(0);
+    expect(under(`echo x > ${home}/.local/share/foo`)).toBe(0);
+    expect(under(`mkdir -p ${home}/.local/state/sometool/abc && echo x > ${home}/.local/state/sometool/abc/pid`)).toBe(0);
+    // the PATH dirs themselves stay closed: planting a binary there is the escape
+    expect(under(`echo x > ${localBin}/git`)).not.toBe(0);
+    expect(under(`echo x > ${pipxBin}/evil`)).not.toBe(0);
+    // ~/.local is not closed as a whole tree, but its node still cannot be renamed away (parent of ~/.local/bin)
+    expect(p).not.toContain(`(subpath "${home}/.local")`);
+    expect(p).toContain(`(subpath "${home}/.local/bin")`);
+    expect(under(`mv ${home}/.local ${home}/.local.old`)).not.toBe(0);
   });
 
   it.runIf(darwin)("an_ancestor_of_a_protected_dir_cannot_be_renamed_away", () => {

@@ -223,6 +223,22 @@ describe("chat reducer", () => {
     expect(applyFrame(state, widget)).toBe(state);
   });
 
+  it("an_identical_notify_repeated_shows_once_not_stacked", () => {
+    // OmO re-sending the same reflection-paused notice (fresh id each time) must not pile up a copy per repeat.
+    const notify = (id: string, message: string) => ({ type: "extension_ui_request", id, method: "notify", message, notifyType: "warning" as const });
+    let state = applyFrame(initialState(), notify("n1", "reflection paused"));
+    state = applyFrame(state, notify("n2", "reflection paused"));
+    state = applyFrame(state, notify("n3", "reflection paused"));
+    const notices = state.blocks.filter((b) => b.kind === "notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ level: "warn", text: "reflection paused" });
+
+    // A different line between two identical ones is not a repeat: it shows, and the next identical one shows again.
+    state = applyFrame(state, notify("n4", "something else"));
+    state = applyFrame(state, notify("n5", "reflection paused"));
+    expect(state.blocks.filter((b) => b.kind === "notice")).toHaveLength(3);
+  });
+
   it("model_profile_sets_auto_model", () => {
     const frames = loadFrames("model_profile");
     const state = replay(frames);
@@ -800,6 +816,41 @@ describe("a goal OmO stopped is not a turn waiting for an answer", () => {
   it("the_stopped_run_still_wins", () => {
     const stopped = life({ ...waits("question"), lastStop: { runId: "r1", cause: "aborted" } });
     expect(applyFrame({ ...initialState(), running: true }, stopped)).toMatchObject({ running: false, activity: "idle" });
+  });
+
+  // Measured live (omo 5.1.59, scratch host): both question shapes report waiting_human with a `question` human wait,
+  // but a non-blocking one (waitForAnswer:false) also carries an `ask-user` wait in waitingOn.background — the turn has
+  // ended, it is a standing invitation. A blocking one (waitForAnswer:true) carries no background wait: the turn runs.
+  const askUserBackground = { source: "ask-user", activeCount: 1, items: [{ id: "toolu_1", label: "Color" }] };
+  it("a_non_blocking_question_is_an_ended_turn_the_tab_is_idle", () => {
+    const lifecycle = {
+      state: "waiting_human",
+      runId: "r1",
+      waitingOn: { children: 0, background: [askUserBackground], human: [{ kind: "question", requestId: "toolu_1", revision: 1 }] },
+    };
+    expect(applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(lifecycle))).toMatchObject({ running: false, activity: "idle" });
+  });
+
+  it("a_blocking_question_still_runs", () => {
+    const lifecycle = {
+      state: "waiting_human",
+      runId: "r1",
+      waitingOn: { children: 0, background: [], human: [{ kind: "question", requestId: "toolu_1", revision: 1 }] },
+    };
+    expect(applyFrame(initialState(), life(lifecycle))).toMatchObject({ running: true, activity: "waiting_human" });
+  });
+
+  it("a_question_frame_is_tagged_blocking_by_its_waitForAnswer", () => {
+    const frame = (waitForAnswer: unknown) => ({
+      type: "extension_ui_request",
+      method: "question",
+      id: "q1",
+      ...(waitForAnswer === undefined ? {} : { waitForAnswer }),
+      questions: [{ id: "a", question: "Pick?" }],
+    });
+    expect(applyFrame(initialState(), frame(false)).dialogs[0]).toMatchObject({ method: "question", blocking: false });
+    expect(applyFrame(initialState(), frame(true)).dialogs[0]?.blocking).toBeUndefined();
+    expect(applyFrame(initialState(), frame(undefined)).dialogs[0]?.blocking).toBeUndefined();
   });
 
   it("omo_s_english_resume_notice_never_reaches_the_feed", () => {

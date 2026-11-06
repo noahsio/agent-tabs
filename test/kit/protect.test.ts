@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 // @ts-expect-error plain ESM without types
-import { commandText, ENV_AGENT_DIRS, guardStateReason } from "../../kit/guard/protect.mjs";
+import { commandText, ENV_AGENT_DIRS, guardStateReason, protectedTarget } from "../../kit/guard/protect.mjs";
+// @ts-expect-error plain ESM without types
+import { isReadTool } from "../../kit/guard/classify.mjs";
 import { ENV_NAMES, resolveEnv } from "../../kit/lib/envs.mjs";
 
 const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-state-")));
@@ -12,7 +14,8 @@ const project = path.join(home, "work", "proj");
 const where = { cwd: project, agentDir, home };
 afterAll(() => fs.rmSync(home, { recursive: true, force: true }));
 
-const reasonOf = (tool: string, input: Record<string, unknown>, at = where): string | null => guardStateReason(commandText(tool, input), at);
+const reasonOf = (tool: string, input: Record<string, unknown>, at = where): string | null =>
+  guardStateReason(commandText(tool, input), at, isReadTool(tool.toLowerCase()));
 const bash = (command: string) => reasonOf("bash", { command });
 const evalJs = (code: string) => reasonOf("eval", { language: "js", code });
 
@@ -155,5 +158,70 @@ describe("guard state is the decision surface, not the whole tree (P40)", () => 
     expect(guardStateReason("ls", { ...where, cwd: path.join(home, ".omo", "kit", "abc") })).toEqual(expect.any(String));
     expect(guardStateReason("ls", { ...where, cwd: path.join(agentDir, "sessions") })).toBeNull();
     expect(guardStateReason("ls", { ...where, cwd: agentDir })).toBeNull();
+  });
+});
+
+describe("a read of the guard's own code/config/state is not guard-state (reads cannot disable or forge)", () => {
+  // A typed read tool names a path and runs nothing; reading these files tampers with nothing, and writes to them are
+  // hard-denied by the Seatbelt profile and protectedTarget. So listing/reading/grepping them no longer asks.
+  it.each([
+    ["ls", { path: path.join(home, ".omo", "kit") }],
+    ["ls", { path: path.join(home, ".omo", "kit", "abc", "guard") }],
+    ["read", { path: path.join(home, ".omo", "kit", "abc", "guard", "classify.mjs") }],
+    ["grep", { pattern: "deny", path: path.join(home, ".omo", "kit") }],
+    ["read", { path: path.join(home, ".omo", "omo.jsonc") }],
+    ["read", { path: path.join(agentDir, "guard", "rules.json") }],
+    ["read", { path: path.join(agentDir, "guard", "cache.json") }],
+    ["read", { path: path.join(agentDir, "guard", "answers.json") }],
+    ["read", { path: path.join(agentDir, "guard", "sandbox.sb") }],
+    ["read", { path: path.join(agentDir, "hooks.json") }],
+    ["read", { path: path.join(agentDir, "hooks-state.json") }],
+    ["read", { path: path.join(agentDir, "settings.json") }],
+    ["read", { path: path.join(agentDir, "models.json") }],
+    ["ls", { path: path.join(home, "Library", "LaunchAgents") }],
+    ["grep", { pattern: "x", path: path.join(agentDir, "guard") }],
+  ])("read tool of a non-key guard file is allowed: %s %o", (tool, input) => {
+    expect(reasonOf(tool, input as Record<string, unknown>)).toBeNull();
+  });
+
+  it.each([
+    // The keys dir stays read-sensitive: a bare listing or read of it still asks.
+    ["ls", { path: path.join(agentDir, "keys") }],
+    ["read", { path: path.join(agentDir, "keys", "gw.key") }],
+    ["grep", { pattern: "BEGIN", path: path.join(agentDir, "keys") }],
+  ])("a read of the keys dir still asks: %s %o", (tool, input) => {
+    expect(reasonOf(tool, input as Record<string, unknown>)).toEqual(expect.any(String));
+  });
+
+  it("running inside a guard dir asks even for a read tool", () => {
+    // The cwd itself is the guard's surface — a relative path reaches the files without naming them.
+    expect(guardStateReason("", { ...where, cwd: path.join(agentDir, "guard") }, true)).toEqual(expect.any(String));
+    expect(guardStateReason("", { ...where, cwd: path.join(home, ".omo", "kit", "abc") }, true)).toEqual(expect.any(String));
+  });
+
+  it.each([
+    // Writes/execs against the same files still ask, read tool or not: a write tool names a reason, and a bash/eval
+    // command is never treated as a read (its intent is not cheaply decidable).
+    `cat ${path.join(agentDir, "guard", "rules.json")}`,
+    `echo '{}' > ${path.join(agentDir, "guard", "rules.json")}`,
+    `cat ${path.join(home, ".omo", "omo.jsonc")}`,
+    `sed -i '' s/deny/allow/ ${path.join(home, ".omo", "kit", "abc", "guard", "classify.mjs")}`,
+    `cat ${path.join(agentDir, "hooks.json")}`,
+    "guardctl pending",
+    "launchctl bootout gui/501/com.agent-tabs.guard",
+    "agent-guard answer abc allow-once",
+  ])("a bash command naming the guard still asks: %s", (command) => {
+    expect(bash(command), command).toEqual(expect.any(String));
+  });
+
+  it.each([
+    // The read exemption never touches the write layer: a write tool's target under the kit, the guard dir or the
+    // decision files is still hard-denied by protectedTarget (the Seatbelt profile refuses the syscall as well).
+    path.join(home, ".omo", "kit", "abc", "guard", "classify.mjs"),
+    path.join(home, ".omo", "omo.jsonc"),
+    path.join(agentDir, "guard", "rules.json"),
+    path.join(agentDir, "hooks.json"),
+  ])("a write target under the guard surface is still hard-denied: %s", (target) => {
+    expect(protectedTarget(target, where), target).toEqual(expect.any(String));
   });
 });

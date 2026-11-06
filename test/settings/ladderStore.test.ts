@@ -22,8 +22,9 @@ afterEach(() => {
 const custom: Ladder = {
   rungs: [
     { id: "r1", action: { kind: "model", provider: "gw-x", id: "m1" }, on: [] },
-    { id: "r2", action: { kind: "text", text: "продолжи" }, on: ["silence"] },
-    { id: "r3", action: { kind: "ask" }, on: ["refusal", "empty", "silence", "transport"] },
+    { id: "r2", action: { kind: "model", provider: "gw-y", id: "m2", text: "продолжай" }, on: ["refusal"] },
+    { id: "r3", action: { kind: "text", text: "продолжи" }, on: ["silence"] },
+    { id: "r4", action: { kind: "ask" }, on: ["refusal", "empty", "silence", "transport"] },
   ],
 };
 
@@ -68,9 +69,11 @@ describe("the ladder's default and its per-environment store", () => {
 
   it("a_ladder_round_trips_and_comes_back_stamped_with_the_shape_it_was_written_at", () => {
     writeLadder(paths, custom);
+    // a combined rung (model + «продолжай») round-trips whole, text and all
     expect(readLadder(paths)).toEqual({ version: LADDER_VERSION, ...custom });
     // stamped, so it is never migrated again: a rung that answers «отказ» without «отклонение» stays that way
-    expect(readLadder(paths).rungs[2]?.on).toEqual(custom.rungs[2]?.on);
+    expect(readLadder(paths).rungs[1]?.on).toEqual(["refusal"]);
+    expect(readLadder(paths).rungs[1]?.action).toEqual({ kind: "model", provider: "gw-y", id: "m2", text: "продолжай" });
   });
 
   it("a_second_identical_write_leaves_the_file_alone_and_the_first_change_backs_it_up", () => {
@@ -112,6 +115,46 @@ describe("the ladder's default and its per-environment store", () => {
     const parsed = parseLadder({ rungs: [{ id: "a", action: { kind: "model", provider: "p", id: "m", secret: "k" }, on: [], note: "x" }], extra: 1 });
     expect(parsed).toEqual({ rungs: [{ id: "a", action: { kind: "model", provider: "p", id: "m" }, on: [] }] });
   });
+
+  it("a_model_rung_keeps_a_phrase_and_refuses_a_blank_one", () => {
+    const combined = parseLadder({ rungs: [{ id: "a", action: { kind: "model", provider: "p", id: "m", text: "продолжай" }, on: [] }] });
+    expect(combined?.rungs[0]?.action).toEqual({ kind: "model", provider: "p", id: "m", text: "продолжай" });
+    // a present-but-blank phrase is no phrase at all: the whole rung is refused, as a blank text rung is
+    expect(parseLadder({ rungs: [{ id: "a", action: { kind: "model", provider: "p", id: "m", text: "  " }, on: [] }] })).toBeUndefined();
+  });
+
+  it("the_default_ladder_continues_on_every_fallback_rung", () => {
+    // the three fallback models each carry «продолжай»: a switch-and-continue, not a bare replay
+    expect(DEFAULT_LADDER.rungs.slice(1, 4).map((rung) => (rung.action.kind === "model" ? rung.action.text : undefined))).toEqual([
+      "продолжай",
+      "продолжай",
+      "продолжай",
+    ]);
+  });
+});
+
+describe("the ladder's shape migration", () => {
+  /** A v2-era ladder: it predates the combined rung, so every action is pure. */
+  const STORED_BY_0_4_31 = {
+    version: 2,
+    rungs: [
+      { id: "top", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-5-5" }, on: [] },
+      { id: "down", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-5" }, on: ["refusal", "empty"] },
+      { id: "text", action: { kind: "text", text: "продолжи" }, on: ["silence"] },
+      { id: "ask", action: { kind: "ask" }, on: ["refusal", "rejected", "empty", "silence", "transport"] },
+    ],
+  };
+
+  it("a_v2_ladder_migrates_to_v3_unchanged_and_then_round_trips", () => {
+    fs.writeFileSync(ladderFile(paths), JSON.stringify(STORED_BY_0_4_31));
+    const migrated = readLadder(paths);
+    // v2 → v3 touches nothing but the stamp: the person's own ticks and actions are left exactly as they were
+    expect(migrated.rungs).toEqual(STORED_BY_0_4_31.rungs);
+    expect(migrated.version).toBe(LADDER_VERSION);
+    // written back and read again, it is byte-for-byte the same ladder
+    writeLadder(paths, migrated);
+    expect(readLadder(paths)).toEqual(migrated);
+  });
 });
 
 describe("a ladder stored before «отклонение» existed", () => {
@@ -128,7 +171,12 @@ describe("a ladder stored before «отклонение» existed", () => {
 
   it("the_persons_own_stored_ladder_learns_the_new_class_without_being_asked", () => {
     fs.writeFileSync(ladderFile(paths), JSON.stringify(STORED_BY_0_4_24));
-    expect(readLadder(paths)).toEqual(DEFAULT_LADDER);
+    const migrated = readLadder(paths);
+    // every rung that already means «this model did not answer» gains «отклонение» — the same on-sets the default ships
+    expect(migrated.rungs.map((rung) => rung.on)).toEqual(DEFAULT_LADDER.rungs.map((rung) => rung.on));
+    // but the actions are left exactly as stored: a v3 migration adds no «продолжай» the person never had
+    expect(migrated.rungs.map((rung) => rung.action)).toEqual(STORED_BY_0_4_24.rungs.map((rung) => rung.action));
+    expect(migrated.version).toBe(LADDER_VERSION);
   });
 
   it("a_rung_that_answered_nothing_like_it_is_left_alone", () => {

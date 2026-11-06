@@ -69,16 +69,18 @@ describe.skipIf(!hasChrome)("the last message pinned over the feed (headless Chr
 
   afterAll(() => page?.close());
 
-  it("the_copy_is_docked_to_the_feeds_top_edge_at_three_lines_while_the_message_is_out_of_view", async () => {
+  it("the_copy_floats_as_a_bubble_inset_from_the_edges_at_three_lines_while_the_message_is_out_of_view", async () => {
     const pinned = await shape(page);
     expect(pinned.shown).toBe(true);
     expect(Math.round(pinned.textHeight / pinned.lineHeight)).toBe(3);
     expect(pinned.fullHeight).toBeGreaterThan(pinned.textHeight * 3); // the message is much longer than that
     expect(pinned.label).toBe("Показать полностью");
-    expect(pinned.pin.top).toBeCloseTo(pinned.feed.top, 0); // against the top edge, not floating below it
-    expect(pinned.pin.left).toBeCloseTo(pinned.feed.left, 0); // and the whole width of the feed
-    expect(pinned.pin.right).toBeCloseTo(pinned.feed.right, 0);
+    expect(pinned.pin.top).toBeGreaterThan(pinned.feed.top); // floating below the top edge, not welded to it
+    expect(pinned.pin.left).toBeGreaterThan(pinned.feed.left); // inset from the sides like a real message bubble
+    expect(pinned.pin.right).toBeLessThan(pinned.feed.right);
     expect(pinned.pin.height).toBeLessThan(0.2 * 700); // a fifth of the tab at most
+    const radius = await page.evaluate<number>(`parseFloat(getComputedStyle(document.querySelector('[data-role="pin"]')).borderTopLeftRadius)`);
+    expect(radius).toBeGreaterThan(0); // rounded corners, not a square strip
 
     // The timeline runs under the copy: it takes none of the feed's height.
     const timelineTop = await page.evaluate<number>(`document.querySelector(".timeline").getBoundingClientRect().top`);
@@ -121,5 +123,69 @@ describe.skipIf(!hasChrome)("the last message pinned over the feed (headless Chr
 
     await page.wheel(middle, 4_000);
     await waitFor(page, `document.querySelector(".pin-slot").hidden === false`);
+  }, 15_000);
+
+  it("the_jump_control_scrolls_the_feed_to_the_message_the_copy_mirrors", async () => {
+    await waitFor(page, `document.querySelector(".pin-slot").hidden === false`);
+    const before = await page.evaluate<number>(`document.querySelector("main.feed").scrollTop`);
+    const jump = await page.evaluate<Point>(
+      `(() => { const r = document.querySelector('[data-role="pin-jump"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+    );
+    await page.click(jump);
+    await waitFor(page, `document.querySelector(".pin-slot").hidden === true`); // the message came into view, so the copy went
+    const after = await page.evaluate<number>(`document.querySelector("main.feed").scrollTop`);
+    expect(after).toBeLessThan(before); // the feed moved up toward the message at the top
+
+    const where = await page.evaluate<{ top: number; feedTop: number; feedBottom: number }>(`(() => {
+      const row = document.querySelector('[data-block="u1"]').getBoundingClientRect();
+      const feed = document.querySelector("main.feed").getBoundingClientRect();
+      return { top: row.top, feedTop: feed.top, feedBottom: feed.bottom };
+    })()`);
+    expect(where.top).toBeGreaterThanOrEqual(where.feedTop - 1); // the message is where the person can see it
+    expect(where.top).toBeLessThanOrEqual(where.feedBottom);
+  }, 15_000);
+});
+
+/** Only the agent spoke: there is no sent message for the copy to mirror. */
+const NO_SENT_STUB = `
+(function () {
+  var reply = Array.from({ length: 60 }, function (_, i) { return "Шаг ответа " + (i + 1); }).join("\\n\\n");
+  var blocks = [{ kind: "assistant", id: "a1", text: reply, thinking: "", streaming: false }];
+  window.acquireVsCodeApi = function () {
+    return {
+      getState: function () { return undefined; },
+      setState: function () {},
+      postMessage: function (message) {
+        if (message.type !== "ready") return;
+        var state = { type: "state", reconnectable: true, tab: { modelMode: "auto", durableId: "id-1" }, state: { blocks: blocks, dialogs: [], agents: [], running: false } };
+        setTimeout(function () { window.postMessage(JSON.stringify(state), "*"); }, 5);
+      },
+    };
+  };
+})();`;
+
+describe.skipIf(!hasChrome)("the pinned copy's jump control with no sent message (headless Chrome)", () => {
+  let page: Page;
+
+  beforeAll(async () => {
+    page = await openPage(await webviewPage(NO_SENT_STUB));
+    await waitFor(page, `document.querySelector('[data-block="a1"]') !== null`);
+  }, 30_000);
+
+  afterAll(() => page?.close());
+
+  it("the_copy_stays_hidden_and_its_control_does_nothing", async () => {
+    const result = await page.evaluate<{ hidden: boolean; before: number; after: number; threw: boolean }>(`(() => {
+      const feed = document.querySelector("main.feed");
+      const slot = feed.querySelector(".pin-slot");
+      const jump = slot.querySelector('[data-role="pin-jump"]');
+      const before = feed.scrollTop;
+      let threw = false;
+      try { jump.click(); } catch (e) { threw = true; }
+      return { hidden: slot.hidden, before, after: feed.scrollTop, threw };
+    })()`);
+    expect(result.hidden).toBe(true); // no message, no copy
+    expect(result.threw).toBe(false); // the control is harmless
+    expect(result.after).toBe(result.before); // and it moved nothing
   }, 15_000);
 });

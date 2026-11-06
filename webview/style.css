@@ -331,17 +331,32 @@ button.icon-btn:disabled {
   z-index: 2; /* over the rows, under the composer (which comes after the feed) */
 }
 
-/* Docked to the top edge rather than another entry in the timeline: the full width, square corners and a shadow over
-   the rows that slide under it. The fill and the frame are a sent message's — it is the person's own message. */
+/* A floating bubble, not a bar welded to the top: it keeps the sent message's fill, frame and rounded corners and sits
+   in the feed's content column with a little room from the top edge, over the rows that slide under it. */
 .pin {
   position: absolute;
-  top: calc(-1 * var(--feed-top)); /* the slot sticks inside the feed's padding: the copy covers it */
-  left: calc(-1 * var(--feed-side));
-  right: calc(-1 * var(--feed-side));
-  padding: 8px var(--feed-side) 7px;
-  border-width: 0 0 1px;
-  border-radius: 0;
-  box-shadow: 0 6px 12px -6px var(--pop-shadow);
+  top: 6px; /* room below the feed's top edge, so it reads as a bubble floating in the chat */
+  left: 0;
+  right: 0;
+  padding-right: calc(12px + 22px); /* the jump control sits in the corner; the text clears it */
+  box-shadow: 0 6px 16px -8px var(--pop-shadow);
+}
+
+/* The corner control: quiet like the feed's other small buttons, always there while the copy is. */
+.pin > button.pin-jump {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  color: var(--muted);
+}
+
+.pin > button.pin-jump:hover {
+  color: var(--fg);
+}
+
+.pin > button.pin-jump .icon {
+  width: 15px;
+  height: 15px;
 }
 
 /* Three lines, and the fade starts later than a message's in the timeline so the third one still reads. */
@@ -1148,7 +1163,9 @@ button.copy-btn .icon {
 }
 
 .ask {
-  background: var(--surface);
+  /* Same translucent-over-blur fill as the composer box it stands in for, so the two read as one slot. */
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(8px);
   border: 1px solid var(--accent);
   border-radius: 12px;
   padding: 12px 6px 0;
@@ -1707,7 +1724,8 @@ button.qtab.on {
   bottom: 0;
   z-index: 2;
   padding: 28px 0 16px;
-  background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--bg) 80%, transparent) 35%, var(--bg) 65%);
+  /* The bottom stays translucent so the feed is seen scrolling behind the box, not sealed off by a solid fill. */
+  background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--bg) 70%, transparent) 35%, color-mix(in srgb, var(--bg) 82%, transparent) 65%);
   pointer-events: none;
 }
 
@@ -1716,7 +1734,9 @@ button.qtab.on {
   position: relative; /* the drop mark is placed against this box */
   width: min(860px, calc(100% - 2 * clamp(28px, 6.55%, 60px)));
   margin: 0 auto;
-  background: var(--surface);
+  /* Semi-transparent over a blur: the feed shows through moving, the typed text stays legible against it. */
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: blur(8px);
   border: 1px solid var(--line-2);
   border-radius: 12px;
   pointer-events: auto;

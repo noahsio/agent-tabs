@@ -117,6 +117,7 @@ const LONG_MESSAGE_LINES = 12;
  */
 const PIN_LINES = 3;
 const PIN_LABEL = "Ваше последнее сообщение";
+const PIN_JUMP = "Перейти к сообщению";
 const OPEN_MESSAGE = "Показать полностью";
 const CLOSE_MESSAGE = "Свернуть";
 /** 13px × 1.55, for when the computed line height is not a number. */
@@ -326,6 +327,8 @@ export class Feed {
   private readonly pin: HTMLElement;
   private readonly pinText: HTMLElement;
   private readonly pinToggle: HTMLButtonElement;
+  /** The corner control that scrolls the feed to the real message the copy mirrors. */
+  private readonly pinJump: HTMLButtonElement;
   /** The message the copy shows, and whether the person opened it (the next message is pinned closed again). */
   private pinned: string | undefined;
   private pinOpen = false;
@@ -370,7 +373,8 @@ export class Feed {
       this.pinOpen = !this.pinOpen;
       this.showPin(); // in place: the view never moves away from what the agent is doing
     });
-    this.pin = el("div", { class: "user-bubble pin", "data-role": "pin", role: "group", "aria-label": PIN_LABEL }, this.pinText, this.pinToggle);
+    this.pinJump = button(icon("jumpTo"), { class: "icon-btn pin-jump", "data-role": "pin-jump", title: PIN_JUMP, "aria-label": PIN_JUMP }, () => this.jumpToPinned());
+    this.pin = el("div", { class: "user-bubble pin", "data-role": "pin", role: "group", "aria-label": PIN_LABEL }, this.pinText, this.pinJump, this.pinToggle);
     this.pinSlot = el("div", { class: "pin-slot" }, this.pin);
     this.pinSlot.hidden = true;
     root.classList.add("feed");
@@ -543,6 +547,19 @@ export class Feed {
     const view = this.root.getBoundingClientRect();
     if (view.height === 0) return false; // a hidden tab has no layout: nothing is out of view
     return row.top < view.top || row.top > view.bottom;
+  }
+
+  /**
+   * Scrolls the feed to the real message the copy mirrors. Centred so it lands clear of the top edge where the copy
+   * docks — the view moving it into sight hides the copy through `outOfView`, with no fight for the top line. A target
+   * that is not in the DOM is a no-op.
+   */
+  private jumpToPinned(): void {
+    if (this.pinned === undefined) return;
+    const element = this.rendered.get(this.pinned)?.element;
+    if (element === undefined) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    element.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
   }
 
   /** The copy's own fold: `PIN_LINES` while closed, and the control only when the text does not fit in them. */

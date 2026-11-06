@@ -317,6 +317,17 @@ function notice(id: string, level: "info" | "warn" | "error", text: string, deta
   return block;
 }
 
+/**
+ * Appends a notice unless it only repeats the one already at the end: an identical consecutive line — same text and
+ * level — is noise (a reopen storm, OmO re-sending the same reflection notify) and shows once. A notice carrying new
+ * words, even under an id already seen, still replaces its own in place through `upsertBlock`.
+ */
+function appendNotice(blocks: Block[], block: NoticeBlock): Block[] {
+  const last = blocks[blocks.length - 1];
+  if (last?.kind === "notice" && last.level === block.level && last.text === block.text) return blocks;
+  return upsertBlock(blocks, block);
+}
+
 // ---------- answered questions ----------
 
 /**
@@ -743,8 +754,22 @@ export function lifecycleRunning(lifecycle: unknown): boolean | undefined {
   const runId = lifecycle["runId"];
   const stopped = isObject(lifecycle["lastStop"]) ? lifecycle["lastStop"]["runId"] : undefined;
   if (lifecycle["state"] === "done" || (typeof runId === "string" && runId === stopped)) return false;
-  if (lifecycle["state"] === "waiting_human") return !attentionOnly(lifecycle);
+  if (lifecycle["state"] === "waiting_human") return !(attentionOnly(lifecycle) || standingQuestion(lifecycle));
   return lifecycle["state"] === "running" ? true : undefined;
+}
+
+/**
+ * A non-blocking question (`request_user_input` / `ask_user_question` with `waitForAnswer: false`): the tool returned at
+ * once and the turn ended, but OmO keeps the session on `waiting_human` with a `question` wait — a standing invitation
+ * whose answer is the next user message. OmO marks it apart from a blocking question (whose turn is genuinely running) by
+ * carrying an `ask-user` wait in `waitingOn.background` (measured live, 5.1.59; a blocking question has none). Treating it
+ * as running is the trap this fixes: the composer would lock to a queue that never drains and the silence watch would
+ * offer «Снять зависание» for a turn that correctly ended.
+ */
+function standingQuestion(lifecycle: Json): boolean {
+  const waiting = lifecycle["waitingOn"];
+  const background = isObject(waiting) && Array.isArray(waiting["background"]) ? waiting["background"] : [];
+  return background.some((wait) => isObject(wait) && wait["source"] === "ask-user");
 }
 
 /**
@@ -835,11 +860,13 @@ function onUiRequest(s: ChatState, frame: Json): ChatState {
     const type = frame["notifyType"];
     const level = type === "error" ? "error" : type === "warning" || type === "warn" ? "warn" : "info";
     if (level === "info" && HOUSEKEEPING.test(text.trim())) return s;
-    return { ...s, blocks: upsertBlock(s.blocks, notice(`notify:${id}`, level, text)) };
+    return { ...s, blocks: appendNotice(s.blocks, notice(`notify:${id}`, level, text)) };
   }
   if (!id || typeof method !== "string" || !DIALOG_METHODS.has(method)) return s;
   if (s.dialogs.some((dialog) => dialog.id === id)) return s;
   const dialog: Dialog = { id, method: method as Dialog["method"], title: dialogTitle(frame) };
+  // A `question` the agent did not wait on (`waitForAnswer: false`) is a standing invitation, not a turn to block on.
+  if (method === "question" && frame["waitForAnswer"] === false) dialog.blocking = false;
   if (Array.isArray(frame["options"])) dialog.options = frame["options"].filter((option): option is string => typeof option === "string");
   if (Array.isArray(frame["questions"])) dialog.questions = frame["questions"];
   for (const key of ["message", "placeholder", "prefill"] as const) {
@@ -1186,6 +1213,10 @@ export function applyEntries(s: ChatState, entries: any[], sink?: ImageSink): Ch
           continue;
         }
         if (!existing && block.kind === "user" && isObject(entry["message"])) sinkImages(entry["message"], block.id, sink);
+        if (block.kind === "notice") {
+          blocks = appendNotice(blocks, block); // consecutive identical journal notices collapse too
+          continue;
+        }
         // Never regress a tool block that already carries a result.
         blocks = existing?.kind === "tool" && block.kind === "tool" ? blocks : upsertBlock(blocks, block);
       }

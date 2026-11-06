@@ -8,7 +8,7 @@ import { redact } from "../env";
 import type { ApprovalPanel, GuardApprovals } from "../guard/approvals";
 import type { Checkpointer } from "../rewind/checkpointer";
 import type { ForkDraft } from "../rewind/fork";
-import { claimAutoUnwedge } from "../sessions/autoUnwedge";
+import { claimAutoUnwedge, releaseAutoUnwedge } from "../sessions/autoUnwedge";
 import { SessionController, normalizeSessionName, type CommandRow, type TabState } from "../sessions/controller";
 import type { ReapOutcome } from "../sessions/reapHost";
 import { heldPause, ReconnectLoop } from "../sessions/reconnect";
@@ -153,8 +153,9 @@ export class ChatPanel implements ApprovalPanel {
   private banner: string | undefined;
   /**
    * The tab's own retry of a connection it cannot reach: it waits out the schedule's pause and attempts again by
-   * itself, and the webview shows that as one line over the composer. The top banner is left to what is not about this
-   * session's connection (an incomplete environment, the session's own errors).
+   * itself, and the webview shows that as one line over the composer. The top banner is left to what the person must
+   * act on (an incomplete environment, a session error the quiet line is not already carrying) — a connection failure
+   * the retry line already shows is never echoed there too (see `publish`).
    */
   private readonly retry = new ReconnectLoop(
     () => void this.runAttempt(),
@@ -576,9 +577,14 @@ export class ChatPanel implements ApprovalPanel {
         this.poster.send({ type: "queueResult", blockId: message.blockId, outcome: result.outcome });
         return;
       }
-      case "stop":
+      case "stop": {
+        // A person's «Стоп» is an explicit way out: clear the auto-restart ration so the bounded restart the composer
+        // falls back to (when abort does not end the turn) is never declined because an earlier automatic one spent it.
+        const durableId = controller?.sessionUuid;
+        if (durableId !== undefined) releaseAutoUnwedge(durableId);
         await controller?.stop();
         return;
+      }
       // The person's click on «Снять зависание», or the composer's own single attempt after an unanswered «Стоп».
       // Always answered, a refusal included.
       case "unwedge":
@@ -983,7 +989,10 @@ export class ChatPanel implements ApprovalPanel {
     if (daemon.value.connected && !controller.attached) {
       await controller.reattach();
       if (controller.attached) this.retry.stop();
+      // The line is fed the controller's own error verbatim: `publish` leans on that identity to keep the banner from
+      // echoing it, so a wrapper here would bring the duplicate banner back. Keep the two the same string.
       else this.retry.failed(controller.state.error ?? NOT_REOPENED);
+      this.publish(); // the banner re-reads now that the quiet line carries this failure: it is not shown twice
       return;
     }
     if (daemon.value.connected) this.retry.stop(); // live and attached: this tab's connection is not what is wrong
@@ -1031,10 +1040,13 @@ export class ChatPanel implements ApprovalPanel {
     const hiddenCommands = this.host.hiddenCommands?.();
     this.track(tab.sessionPath);
     this.setTitle(state.title ?? tab.title ?? UNTITLED);
-    const error = this.banner ?? state.error;
+    // A connection failure the quiet line over the composer already shows (it is handed the controller's own error
+    // text) must not be echoed into the red banner too — that duplication is the transient error the person asked to
+    // be rid of. The banner keeps a must-act `this.banner`, and a session error the retry line is not already showing.
+    const error = this.banner ?? (this.retry.view?.error === state.error ? undefined : state.error);
     const message: StateMessage = {
       type: "state",
-      state: error === undefined ? state : { ...state, error },
+      state: error === state.error ? state : { ...state, error },
       tab: { ...tab, ...(tab.durableId !== undefined ? { pinned: this.host.isPinned(tab.durableId) } : {}), ...(draft ? { draft: true as const } : {}) },
       reconnectable: this.reconnectable,
       ...(models !== undefined ? { models } : {}),

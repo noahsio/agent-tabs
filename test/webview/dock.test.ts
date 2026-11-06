@@ -517,6 +517,23 @@ describe("docked questions", () => {
     expect(resultText()).toEqual([]); // an answered question leaves the card in the feed, not a line saying the same
   });
 
+  it("a_non_blocking_question_shows_beside_a_usable_composer_and_no_spinner", () => {
+    // waitForAnswer:false → the turn ended; the tab is idle. The card is visible and declinable, but it does not take
+    // the composer's place and raises no «Ждёт…» spinner — the person answers it or just sends a message.
+    show({ running: false, dialogs: [{ id: "q", method: "question", title: CACHE.question, questions: [CACHE], blocking: false }] });
+    expect(panel()?.querySelector(".question-text")?.textContent).toBe("Как хранить кэш каталога после смены ноды?");
+    expect(composerBox().hidden).toBe(false); // composer stays usable
+    expect(indicator().hidden).toBe(true); // no spinner: the turn is over
+    key("1"); // the card still answers
+    expect(answers()).toEqual([{ type: "answer", dialogId: "q", answer: { answers: { q1: { selected: ["TTL и запасной кэш"] } } } }]);
+  });
+
+  it("a_non_blocking_question_can_be_declined_from_its_card", () => {
+    show({ running: false, dialogs: [{ id: "q", method: "question", title: CACHE.question, questions: [CACHE], blocking: false }] });
+    key("Escape");
+    expect(answers()).toEqual([{ type: "answer", dialogId: "q", answer: { cancelled: true } }]);
+  });
+
   it("other_sends_the_persons_own_words_as_text", () => {
     dialogs({ id: "q", method: "question", title: CACHE.question, questions: [CACHE] });
     key("4");

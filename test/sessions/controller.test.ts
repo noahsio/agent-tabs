@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyEntries, initialState } from "../../src/chat/reducer";
 import { DaemonManager, hostSocketPath } from "../../src/daemon";
 import type { OmoEnv } from "../../src/env";
+import { claimAutoUnwedge, resetAutoUnwedge } from "../../src/sessions/autoUnwedge";
 import { ImageStore } from "../../src/sessions/images";
 import type { LadderView } from "../../src/sessions/ladder";
 import { SessionController } from "../../src/sessions/controller";
@@ -153,6 +154,20 @@ describe("SessionController", () => {
       ["d2", true],
     ]);
     expect(controller.state.dialogs).toEqual([]);
+  });
+
+  it("a_non_blocking_question_is_idle_so_a_typed_message_is_delivered_not_queued", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    // request_user_input / ask_user_question with waitForAnswer:false: the turn ended, OmO holds a standing invitation.
+    daemon.push(frame({ type: "extension_ui_request", id: "q1", method: "question", waitForAnswer: false, questions: [{ id: "a", question: "Which color?" }] }));
+    daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "waiting_human", runId: "r1", waitingOn: { children: 0, background: [{ source: "ask-user", activeCount: 1 }], human: [{ kind: "question", requestId: "r1", revision: 1 }] } } }));
+    await settle(() => controller?.state.dialogs.length === 1);
+    expect(controller.state.running).toBe(false); // idle: the tab is not locked
+    expect(controller.state.dialogs[0]).toMatchObject({ method: "question", blocking: false });
+
+    await controller.send("green", "auto");
+    expect(ofType("prompt").at(-1)).toMatchObject({ message: "green" }); // delivered as a message, not stranded in the queue
+    expect(ofType("steer")).toEqual([]);
   });
 
   it("ignores_frames_of_other_sessions", async () => {
@@ -872,6 +887,46 @@ describe("SessionController", () => {
       expect(controller.state.error).toBe("nothing to compact");
     });
 
+    it("a_message_sent_during_compaction_is_queued_not_errored_and_delivered_after_it_ends", async () => {
+      controller = await SessionController.create(manager, "/tmp");
+      daemon.push(frame({ type: "compaction_start" }));
+      await settle(() => controller?.state.compacting === true);
+      await controller.send("while compacting", "auto");
+      expect(ofType("prompt")).toHaveLength(0); // never offered to OmO as a prompt, so never refused
+      const followUp = ofType("follow_up")[0] as Frame;
+      expect(followUp).toMatchObject({ message: "while compacting", sessionId: "rpc-1" });
+      expect(controller?.state.error).toBeUndefined(); // no banner
+      const id = String(followUp["clientMessageId"]);
+      daemon.push(frame({ type: "queue_update", ordered: [{ clientMessageId: id, queuedId: "q1", text: "while compacting" }] }));
+      await settle(() => controller?.state.blocks.some((block) => block.kind === "user" && block.delivery?.state === "queued") === true);
+      // OmO drains the queue when the compaction ends: the message leaves the queue and starts its turn.
+      daemon.push(frame({ type: "compaction_end" }));
+      daemon.push(frame({ type: "queue_update", ordered: [] }));
+      daemon.push(frame({ type: "message_start", message: { role: "user", clientMessageId: id, content: "while compacting" } }));
+      await settle(() => controller?.state.blocks.some((block) => block.kind === "user" && block.text === "while compacting" && block.delivery === undefined) === true);
+      expect(controller?.state.error).toBeUndefined();
+    });
+
+    it("a_prompt_that_races_a_compaction_is_re_routed_to_the_queue_not_the_banner", async () => {
+      // OmO began compacting after `type` was chosen (the flag had not reached us): it refuses the prompt by its text.
+      daemon.on("prompt", () => ({ error: "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry." }));
+      controller = await SessionController.create(manager, "/tmp");
+      const ok = await controller.send("racer", "auto");
+      expect(ok).toBe(true);
+      expect(ofType("prompt")).toHaveLength(1); // it tried the prompt first
+      expect(ofType("follow_up")[0]).toMatchObject({ message: "racer", sessionId: "rpc-1" }); // then re-routed to the queue
+      expect(controller?.state.error).toBeUndefined(); // the English refusal never reaches the banner
+      // same id both times: OmO answers a repeat from its record, never a second message
+      expect((ofType("follow_up")[0] as Frame)["clientMessageId"]).toBe((ofType("prompt")[0] as Frame)["clientMessageId"]);
+    });
+
+    it("a_genuine_action_failure_still_reaches_the_banner", async () => {
+      daemon.on("set_model", () => ({ error: "no such provider", errorCode: "x" }));
+      controller = await SessionController.create(manager, "/tmp");
+      await controller.setModel({ provider: "gw", id: "nope" });
+      expect(controller?.state.error).toBe("no such provider"); // a must-act error is still shown at the top
+    });
+
     it("thinking_level_failure_is_redacted_and_state_unchanged", async () => {
       daemon.on("set_thinking_level", () => ({ error: "bad sekret-key-123", errorCode: "x" }));
       controller = await SessionController.create(manager, "/tmp");
@@ -1188,6 +1243,159 @@ describe("SessionController", () => {
       controller.note("info", "x");
       expect(controller.state.blocks[controller.state.blocks.length - 1]).toMatchObject({ kind: "notice", level: "info", text: "x" });
       expect(controller.state.blocks[controller.state.blocks.length - 1]?.id).toMatch(/^rewind:/);
+    });
+  });
+
+  /**
+   * OmO's own liveness machinery kills the turn a millisecond after it starts. The two records that say so are real:
+   * the aborted assistant message is the one a live scratch host wrote (16 ms, one empty text part), and the stall row
+   * is the shape of all four in the person's journal.
+   */
+  describe("a turn OmO killed by itself", () => {
+    /** The assistant message of a turn abandoned as it was being made. */
+    const deadTurn = (over: Frame = {}): Frame =>
+      frame({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+          stopReason: "aborted",
+          errorMessage: "The operation was aborted.",
+          usage: { totalTokens: 0 },
+          timing: { requestedAt: 1793896968351, endedAt: 1793896968367 },
+          ...over,
+        },
+      });
+
+    /** OmO's own stall row, as `entry_appended` carries it. */
+    const stall = (openWork: Frame = { kind: "active-goal", goalId: "81ebe93c" }): Frame =>
+      frame({
+        type: "entry_appended",
+        entry: {
+          type: "custom",
+          customType: "turn-end-liveness",
+          id: "e9",
+          data: { verdict: { kind: "stalled", reason: "aborted", abortSource: "system" }, openWork },
+        },
+      });
+
+    function notices(): string[] {
+      return (controller as SessionController).state.blocks.flatMap((block) => (block.kind === "notice" ? [block.text] : []));
+    }
+
+    beforeEach(() => {
+      resetAutoUnwedge(); // the ration lives in the extension process, not in the controller
+      daemon.on("unload_session", () => ({ data: { outcome: "unloaded" } }));
+    });
+
+    it("says_what_happened_names_the_open_work_and_stops_claiming_it_works", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall());
+      await settle(() => notices().length > 0);
+
+      expect(notices()[0]).toBe("OmO оборвал ход сам, сразу после старта — ответа на это сообщение не будет (у сессии осталась незакрытая цель)");
+      expect(controller.state.running).toBe(false);
+    });
+
+    it("unloads_the_session_once_and_sends_the_message_again_under_a_new_id", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall({ kind: "none" }));
+      await settle(() => ofType("prompt").length === 2);
+
+      expect(ofType("unload_session")).toHaveLength(1);
+      expect(types().indexOf("unload_session")).toBeLessThan(types().lastIndexOf("prompt"));
+      const repeat = ofType("prompt")[1] as Frame;
+      expect(repeat["message"]).toBe("разбери кошельки");
+      expect(repeat["clientMessageId"]).not.toBe("m-own"); // the old id comes back from OmO's record without running anything
+      expect(notices()).toContain("Перезапустил сессию и отправил сообщение заново");
+    });
+
+    it("never_recovers_the_same_message_twice", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall());
+      await settle(() => ofType("prompt").length === 2);
+      // the resend dies exactly the same way
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall());
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(ofType("unload_session")).toHaveLength(1);
+      expect(ofType("prompt")).toHaveLength(2);
+      expect(notices()).toContain("Отправьте сообщение заново — а если повторится, перезапустите сессию кнопкой «Снять зависание»");
+    });
+
+    it("gives_up_into_the_honest_line_when_the_ration_is_spent", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      expect(claimAutoUnwedge("durable-1")).toBe(true); // the composer's own automatic unwedge took it
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall());
+      await settle(() => notices().length > 1);
+
+      expect(ofType("unload_session")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(1);
+      expect(notices()).toContain("Отправьте сообщение заново — а если повторится, перезапустите сессию кнопкой «Снять зависание»");
+    });
+
+    it("never_resends_when_omo_would_not_unload_the_session", async () => {
+      daemon.on("unload_session", () => ({ data: { outcome: "refused", reason: "work_pending" } }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall());
+      await settle(() => notices().length > 1);
+
+      expect(ofType("prompt")).toHaveLength(1); // without the reopen a resend would die the same way
+      expect(notices().at(-1)).toContain("Осталась незавершённая работа");
+    });
+
+    it("leaves_the_persons_own_compaction_alone", async () => {
+      daemon.on("compact", () => ({ data: {} }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      await controller.compact(); // OmO's compaction aborts the running turn with the same provenance
+      daemon.push(deadTurn());
+      daemon.push(stall());
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(notices()).toEqual([]);
+      expect(ofType("unload_session")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(1);
+    });
+
+    it("needs_both_records_and_only_this_shape", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      // a stall row with no dead turn before it, an abort of ours (no source), and a turn that did something
+      daemon.push(stall());
+      daemon.push(deadTurn({ content: [{ type: "text", text: "начал" }] }));
+      daemon.push(stall());
+      daemon.push(deadTurn());
+      daemon.push(
+        frame({
+          type: "entry_appended",
+          entry: { type: "custom", customType: "turn-end-liveness", id: "e8", data: { verdict: { kind: "stalled", reason: "aborted" }, openWork: { kind: "none" } } },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(notices()).toEqual([]);
+      expect(ofType("unload_session")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(1);
     });
   });
 

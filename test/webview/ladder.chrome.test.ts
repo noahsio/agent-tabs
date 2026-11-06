@@ -26,7 +26,7 @@ const LADDER_SETTINGS = {
     ],
     rungs: [
       { id: "r1", action: { kind: "model", provider: "gw-anthropic", id: "opus-5-5" }, on: [], label: "Claude Opus 5.5" },
-      { id: "r2", action: { kind: "model", provider: "gw-anthropic", id: "opus-5" }, on: ["empty", "silence", "transport"], label: "Claude Opus 5" },
+      { id: "r2", action: { kind: "model", provider: "gw-anthropic", id: "opus-5", text: "продолжай" }, on: ["empty", "silence", "transport"], label: "Claude Opus 5" },
       { id: "r3", action: { kind: "model", provider: "gw-anthropic", id: "opus-4-8" }, on: ["empty", "silence", "transport"], label: "Claude Opus 4.8" },
       { id: "r4", action: { kind: "model", provider: "gw-openai", id: "sol" }, on: ["refusal", "empty", "silence", "transport"], label: "GPT 6.1 Sol" },
       { id: "r5", action: { kind: "text", text: "продолжи" }, on: ["silence"], label: "продолжи" },
@@ -203,6 +203,25 @@ describe.skipIf(!hasChrome)("the model ladder (headless Chrome)", () => {
     }
     for (const name of ["composer-walking.png", "composer-settled.png", "settings-ladder.png"]) {
       expect(existsSync(join(SHOTS, name))).toBe(true);
+    }
+  }, 120_000);
+
+  // the continuation extension: the edited ladder section, with a model rung (rung 2) carrying «продолжай» alongside
+  // its model, and a pure text rung (rung 5) — the two shapes a rung can now take. Its own shot dir, for review.
+  it("the_continuation_section_screenshot", async () => {
+    const dir = "/tmp/agent-tabs-shots/ladder-cont";
+    mkdirSync(dir, { recursive: true });
+    const settings = await ladderSettings();
+    try {
+      const shot = join(dir, "settings-ladder-continue.png");
+      await settings.screenshot(shot);
+      expect(existsSync(shot)).toBe(true);
+      // the combined rung's phrase is really in the field, not just the fixture
+      expect(
+        await settings.evaluate<string>(`document.querySelector('[data-rung="r2"] [data-role="rung-text"]').value`),
+      ).toBe("продолжай");
+    } finally {
+      await settings.close();
     }
   }, 120_000);
 });

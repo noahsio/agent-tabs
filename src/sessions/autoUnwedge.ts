@@ -17,6 +17,15 @@ export function claimAutoUnwedge(durableId: string, now: number = Date.now()): b
   return true;
 }
 
+/**
+ * Clears a session's cooldown so the next claim succeeds. A person pressing «Стоп» is explicit intent to get out, not an
+ * automatic self-heal storm, so the restart it may trigger must never be declined because an earlier automatic one spent
+ * the ration — Stop has to free the tab every time it is pressed.
+ */
+export function releaseAutoUnwedge(durableId: string): void {
+  lastAttempt.delete(durableId);
+}
+
 /** Forgets every cooldown (tests start from a clean process). */
 export function resetAutoUnwedge(): void {
   lastAttempt.clear();

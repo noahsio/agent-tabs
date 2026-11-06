@@ -209,7 +209,7 @@ export function buildProfile({ home, agentDir, envs = [], vscodes = [], writable
   const literals = [
     ...agentDirs.flatMap((dir) => agentDirDenies(dir).literals),
     ...claudeDirs.flatMap((dir) => claudeDirDenies(dir).literals),
-    ...[".omo", ".omo/omo.jsonc", ".local", ".gitconfig", ".claude.json"].map(inHome),
+    ...[".omo", ".omo/omo.jsonc", ".gitconfig", ".claude.json"].map(inHome),
     // zsh prefers a compiled `<file>.zwc` next to each file it sources
     ...[...SHELL_RC.map(inHome), ...sourcedFiles(home)].flatMap((file) => [file, `${file}.zwc`]),
     ...installs.flatMap((install) => [

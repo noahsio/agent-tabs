@@ -19,7 +19,8 @@ const ASK_VALUE = "ask";
 const TEXT_VALUE = "text";
 const NOTE =
   "Первая ступенька — модель, с которой сессия начинает. Порог молчания — 5 минут. " +
-  "Лесенка идёт только для вашего сообщения и только если ход ничего не успел сделать.";
+  "Лесенка идёт только для вашего сообщения. Ступенька с текстом продолжает на новой модели в любом случае; " +
+  "ступенька только со сменой модели повторяет сообщение — и лишь если ход ничего не успел сделать.";
 
 /** `provider/id` of a model option, split on the first slash (a model id may contain more). */
 function modelAction(value: string): RungAction | undefined {
@@ -89,12 +90,13 @@ export class LadderSection implements SectionView {
   }
 
   /**
-   * What the rung does: the action picker, the phrase of a text rung, and whatever the row must say about it. The
-   * picker is the rung's name — printing the label above it as well would say the same thing twice on every row.
+   * What the rung does: the action picker, the phrase it sends, and whatever the row must say about it. A text rung
+   * needs its phrase; a model rung (but not the fixed top one) may carry one too, turning a bare model switch into a
+   * switch-and-continue. The picker is the rung's name — printing the label above it would say it twice on every row.
    */
   private body(rung: LadderRungView, view: LadderSectionView, top: boolean): HTMLElement {
     const body = el("div", { class: "st-rung-body" }, this.actionSelect(rung, view));
-    if (rung.action.kind === "text") body.append(this.textField(rung));
+    if (rung.action.kind === "text" || (rung.action.kind === "model" && !top)) body.append(this.textField(rung));
     if (top) body.append(el("span", { class: "st-s" }, TOP_NOTE));
     else if (rung.missing === true) body.append(el("span", { class: "st-s st-warn", "data-role": "rung-missing" }, MISSING));
     return body;
@@ -119,28 +121,39 @@ export class LadderSection implements SectionView {
         this.context.act({ kind: "rung.action", id: rung.id, action: { kind: "ask" } });
         return;
       }
+      // A phrase already on this rung follows the action it is moved to: a model's continuation becomes a text rung's,
+      // and a text rung's phrase rides onto the model it is pointed at. «продолжай» is the spec's own example.
+      const kept = rung.action.kind === "ask" ? undefined : rung.action.text;
       if (control.value === TEXT_VALUE) {
-        // the phrase itself is typed in the field the row grows next; «продолжи» is what the spec offers as the example
-        const text = rung.action.kind === "text" ? rung.action.text : "продолжи";
-        this.context.act({ kind: "rung.action", id: rung.id, action: { kind: "text", text } });
+        this.context.act({ kind: "rung.action", id: rung.id, action: { kind: "text", text: kept ?? "продолжай" } });
         return;
       }
       const action = modelAction(control.value);
-      if (action !== undefined) this.context.act({ kind: "rung.action", id: rung.id, action });
+      if (action !== undefined) this.context.act({ kind: "rung.action", id: rung.id, action: kept === undefined ? action : { ...action, text: kept } });
     });
     return control;
   }
 
+  /**
+   * The phrase the rung sends. On a text rung it is required, so a blank reverts to what it was. On a model rung it is
+   * optional: a phrase makes the rung switch and continue, an empty field makes it a bare model switch again.
+   */
   private textField(rung: LadderRungView): HTMLInputElement {
+    const model = rung.action.kind === "model" ? rung.action : undefined;
     const field = el("input", {
       type: "text",
       "data-role": "rung-text",
       "aria-label": `Что отправить: ${rung.label}`,
-      placeholder: "продолжи",
+      placeholder: model === undefined ? "продолжай" : "и ещё текст (необязательно)",
     });
-    field.value = rung.action.kind === "text" ? rung.action.text : "";
+    field.value = rung.action.kind === "text" ? rung.action.text : (model?.text ?? "");
     field.addEventListener("change", () => {
       const text = field.value.trim();
+      if (model !== undefined) {
+        const base = { kind: "model" as const, provider: model.provider, id: model.id };
+        this.context.act({ kind: "rung.action", id: rung.id, action: text === "" ? base : { ...base, text } });
+        return;
+      }
       if (text === "") {
         field.value = rung.action.kind === "text" ? rung.action.text : "";
         return;

@@ -17,15 +17,20 @@ import { LADDER_VERSION, type Ladder } from "./ladderShape";
  * A provider **rejection** («отклонение») descends the whole ladder instead. It is one model's answer about one
  * request — the live case came from `gw-openai/gpt-6-astra` — and says nothing about the next model, so there is no
  * reason to skip the two Anthropic steps the way a provider-wide classifier ban does.
+ *
+ * Every fallback rung carries «продолжай» alongside its model: it switches the session and sends that phrase, rather
+ * than replaying the person's original message. A continuation re-runs nothing, so it is safe even when the failed
+ * turn had already read a file or run a command — exactly the case a pure replay cannot touch. The original message
+ * stays in the session for the new model to carry on from.
  */
 export const DEFAULT_LADDER: Ladder = {
   version: LADDER_VERSION,
   rungs: [
     // The top: the model a session starts on. It answers nothing — there is nothing above it to fall back from.
     { id: "opus-5-5", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-5-5" }, on: [] },
-    { id: "opus-5", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-5" }, on: ["rejected", "empty", "silence", "transport"] },
-    { id: "opus-4-8", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-4-8" }, on: ["rejected", "empty", "silence", "transport"] },
-    { id: "gpt-6-1-sol", action: { kind: "model", provider: "gw-openai", id: "gpt-6.1-sol" }, on: ["refusal", "rejected", "empty", "silence", "transport"] },
+    { id: "opus-5", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-5", text: "продолжай" }, on: ["rejected", "empty", "silence", "transport"] },
+    { id: "opus-4-8", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-4-8", text: "продолжай" }, on: ["rejected", "empty", "silence", "transport"] },
+    { id: "gpt-6-1-sol", action: { kind: "model", provider: "gw-openai", id: "gpt-6.1-sol", text: "продолжай" }, on: ["refusal", "rejected", "empty", "silence", "transport"] },
     { id: "ask", action: { kind: "ask" }, on: ["refusal", "rejected", "empty", "silence", "transport"] },
   ],
 };

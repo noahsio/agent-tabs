@@ -1612,6 +1612,17 @@ export const READ_TOOLS = new Set([
 // P45 allows every one of them whatever its name says. codegraph_explore is read-only by its own declaration.
 const MCP_TOOL_RE = /^mcp_/i;
 export const MCP_READ_TOOLS = new Set(["mcp_codegraph_codegraph_explore"]);
+
+/**
+ * True when a tool call only reads — the reliable read-vs-write signal for guard-state (protect.mjs). A typed read
+ * tool (ls/read/grep/find/glob, codegraph…) names a path and runs nothing, so naming the guard's own files tampers
+ * with nothing. bash/eval are never read tools: their input is a shell command whose intent is not cheaply decidable,
+ * so they stay false and keep asking on a guard path. Pass the name lower-cased, as the service classifies it.
+ */
+export function isReadTool(toolName) {
+  const name = String(toolName ?? "");
+  return READ_TOOLS.has(name) || MCP_READ_TOOLS.has(name);
+}
 // P45: the MCP write-verb list is gone with the ask it fed. An MCP server is the person's own choice, and a verb in
 // its tool's name is neither a destructive form nor a route to the guard — `mcp_github_create_issue` was a question
 // about filing an issue.

@@ -189,8 +189,10 @@ describe("DaemonManager", () => {
     const [file, args, options] = spawnFn.mock.calls[0] as Parameters<SpawnFn>;
     expect(file).toBe("/fake/omo");
     expect(args).toEqual(["--mode", "rpc", "--listen", `unix://${join(daemon.agentDir, "rpc", "agent-tabs.sock")}`]);
-    expect(options).toEqual({ env: env.env, cwd: homedir(), stdio: "ignore", detached: true });
+    expect(options).toEqual({ env: { ...env.env, SENPI_BIN: "/fake/omo" }, cwd: homedir(), stdio: "ignore", detached: true });
     expect(options.env["CLAUDE_CONFIG_DIR"]).toBe("/tmp/claude-second");
+    expect(options.env["SENPI_BIN"]).toBe("/fake/omo");
+    expect(options.env["SENPI_MEMORY_REFLECTION"]).toBeUndefined(); // reflection stays on while protection is off
     expect(child?.unref).toHaveBeenCalled();
     expect(await readFile(hostPidPath(daemon.agentDir), "utf8")).toBe(String(FAKE_PID));
   });
@@ -441,7 +443,9 @@ describe("DaemonManager", () => {
       "--listen",
       `unix://${protectedHostSocketPath(agentDir)}`,
     ]);
-    expect(options.env).toEqual({ ...envFor(agentDir).env, OMO_LSP_DAEMON_DIR: lspDaemonDir(agentDir) });
+    expect(options.env).toEqual({ ...envFor(agentDir).env, SENPI_BIN: "/fake/omo", OMO_LSP_DAEMON_DIR: lspDaemonDir(agentDir), SENPI_MEMORY_REFLECTION: "1" });
+    expect(options.env["SENPI_BIN"]).toBe("/fake/omo");
+    expect(options.env["SENPI_MEMORY_REFLECTION"]).toBe("1"); // reflection disabled under protection (it cannot complete)
   });
 
   it("a_dead_protected_socket_is_cleared_before_the_host_starts", async () => {

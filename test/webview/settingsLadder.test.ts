@@ -202,6 +202,49 @@ describe("«Лесенка моделей» in the settings modal", () => {
     expect(actions()).toEqual([]);
   });
 
+  it("a_model_rung_takes_a_continuation_phrase_and_posts_it_combined", () => {
+    const field = row(1).querySelector('[data-role="rung-text"]') as HTMLInputElement;
+    expect(field.value).toBe(""); // a bare model rung has no phrase yet
+    field.value = "продолжай";
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(actions()).toEqual([
+      { kind: "rung.action", id: "r2", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-5", text: "продолжай" } },
+    ]);
+  });
+
+  it("clearing_a_model_rungs_phrase_makes_it_a_bare_switch_again", () => {
+    show({
+      ...LADDER,
+      rungs: [
+        LADDER.rungs[0] as never,
+        { id: "r2", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-5", text: "продолжай" }, on: ["empty"], label: "Opus 5" },
+      ],
+    });
+    const field = row(1).querySelector('[data-role="rung-text"]') as HTMLInputElement;
+    expect(field.value).toBe("продолжай");
+    field.value = "   ";
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(actions()).toEqual([{ kind: "rung.action", id: "r2", action: { kind: "model", provider: "gw-anthropic", id: "claude-opus-5" } }]);
+  });
+
+  it("the_top_rung_and_the_ask_rung_have_no_continuation_field", () => {
+    expect(row(0).querySelector('[data-role="rung-text"]')).toBeNull();
+    expect(row(4).querySelector('[data-role="rung-text"]')).toBeNull();
+  });
+
+  it("pointing_a_text_rung_at_a_model_carries_its_phrase_onto_it", () => {
+    show({
+      ...LADDER,
+      rungs: [LADDER.rungs[0] as never, { id: "rt", action: { kind: "text", text: "продолжи" }, on: ["silence"], label: "продолжи" }],
+    });
+    const select = row(1).querySelector("select") as HTMLSelectElement;
+    select.value = "gw-openai/gpt-6.1-sol";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(actions()).toEqual([
+      { kind: "rung.action", id: "rt", action: { kind: "model", provider: "gw-openai", id: "gpt-6.1-sol", text: "продолжи" } },
+    ]);
+  });
+
   it("the_arrows_move_a_rung_and_the_ends_have_none_to_offer", () => {
     role("rung-up", row(2)).click();
     expect(actions()).toEqual([{ kind: "rung.move", id: "r3", to: 1 }]);
@@ -242,7 +285,7 @@ describe("«Лесенка моделей» in the settings modal", () => {
 
   it("the_footer_says_what_the_first_rung_is_and_that_the_threshold_is_fixed", () => {
     expect(role("ladder-note").textContent).toBe(
-      "Первая ступенька — модель, с которой сессия начинает. Порог молчания — 5 минут. Лесенка идёт только для вашего сообщения и только если ход ничего не успел сделать.",
+      "Первая ступенька — модель, с которой сессия начинает. Порог молчания — 5 минут. Лесенка идёт только для вашего сообщения. Ступенька с текстом продолжает на новой модели в любом случае; ступенька только со сменой модели повторяет сообщение — и лишь если ход ничего не успел сделать.",
     );
   });
 

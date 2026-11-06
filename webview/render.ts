@@ -176,8 +176,12 @@ export class ChatView {
         return model !== undefined && model !== "" ? `${agent.label} · ${model}` : agent.label;
       },
       onChange: () => this.dockChanged(),
+      onStop: () => {
+        this.composer.noteStop(); // arm the bounded restart even while the composer is hidden behind the panel
+        this.post({ type: "stop" });
+      },
     });
-    composerRoot.append(this.dock.element); // the composer's slot: one of the two shows
+    composerRoot.append(this.dock.element); // the composer's slot: a modal request replaces the composer, a non-blocking question's card sits with it
     this.composer.input.addEventListener("keydown", () => {
       this.typedAt = Date.now();
     });
@@ -383,15 +387,17 @@ export class ChatView {
    * when it was on the composer (or nowhere), so typing never lands in a hidden input.
    */
   private dockChanged(): void {
-    const active = this.dock.active;
-    if (active !== this.dockShown) {
-      this.dockShown = active;
+    // Only a modal request (a guard, a dialog, a blocking question) takes the composer's place. A non-blocking question
+    // shows its card beside a usable composer, so the person answers it from the card or just sends a message.
+    const modal = this.dock.modal;
+    if (modal !== this.dockShown) {
+      this.dockShown = modal;
       const focused = document.activeElement;
       const typing = focused === this.composer.input || Date.now() - this.typedAt < TYPING_MS;
-      this.composer.box.hidden = active;
-      if (active && typing) this.composer.input.blur(); // no keystroke meant for the message lands on the prompt
-      else if (active && (focused === null || focused === document.body)) this.dock.focus();
-      if (!active && (focused === null || focused === document.body)) this.composer.input.focus();
+      this.composer.box.hidden = modal;
+      if (modal && typing) this.composer.input.blur(); // no keystroke meant for the message lands on the prompt
+      else if (modal && (focused === null || focused === document.body)) this.dock.focus();
+      if (!modal && (focused === null || focused === document.body)) this.composer.input.focus();
     }
     if (this.last !== undefined) this.renderFeed(); // the feed's «Ждёт вашего …» line follows
   }

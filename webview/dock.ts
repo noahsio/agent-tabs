@@ -105,6 +105,11 @@ type DialogItem = Base & {
 type Result = { name: string; verdict: string; ok: boolean };
 type Item = GuardItem | DialogItem;
 
+/** A non-blocking question is the one request that does not take the composer's place; everything else is modal. */
+function isModal(item: Item): boolean {
+  return !(item.kind === "dialog" && item.dialog.method === "question" && item.dialog.blocking === false);
+}
+
 type Row = { label: string; desc?: string; more?: boolean; checked?: boolean; field?: { label: string; placeholder: string; maxLength?: number } };
 
 export type DockOptions = {
@@ -115,6 +120,8 @@ export type DockOptions = {
   addRow: (id: string, element: HTMLElement, after: string | undefined) => void;
   /** Takes a row back out of the feed (an offer this chat never took up). */
   dropRow: (id: string) => void;
+  /** «Стоп» from the panel's own header: the owner arms the same bounded restart the composer's «Стоп» does, then stops. */
+  onStop: () => void;
   /** Who asks for a request of `session` («главный агент», or a subagent's name and model). */
   who: (session: string) => string;
   /** The prompts changed (one came, went or is shown instead of another). */
@@ -144,17 +151,26 @@ export class Dock {
     this.element = el("div", { class: "ask-slot", "data-role": "dock" });
     this.element.hidden = true;
     this.element.addEventListener("keydown", (event) => this.onKey(event));
-    this.stop = button("Стоп", { class: "ask-stop secondary", "data-role": "ask-stop", tabindex: "-1", title: "Остановить агента" }, () => this.options.post({ type: "stop" }));
+    this.stop = button("Стоп", { class: "ask-stop secondary", "data-role": "ask-stop", tabindex: "-1", title: "Остановить агента" }, () => this.options.onStop());
   }
 
   get active(): boolean {
     return this.items.length > 0;
   }
 
-  /** The feed's line while the panel waits: an approval asks for a decision, anything else for an answer. */
+  /**
+   * Whether the panel takes the composer's place: every request does, except a non-blocking question. That one is a
+   * standing invitation (its turn ended) — its card shows beside a usable composer, so the person answers it from the
+   * card or just sends a message. A guard, a dialog, and a blocking question all take over.
+   */
+  get modal(): boolean {
+    return this.items.some((item) => isModal(item));
+  }
+
+  /** The feed's line while the panel waits: an approval asks for a decision, anything else for an answer; nothing for a non-blocking question (the tab is idle). */
   get waiting(): string | undefined {
     const item = this.current;
-    if (item === undefined) return undefined;
+    if (item === undefined || !isModal(item)) return undefined;
     return item.kind === "guard" ? "Ждёт вашего решения" : "Ждёт вашего ответа";
   }
 

@@ -185,6 +185,28 @@ describe("a session whose connection fails", () => {
     expect(posted.at(-1)?.state.error).toBeUndefined(); // nothing for the banner element to show
   });
 
+  it("a_failed_reattach_shows_in_the_quiet_line_and_is_not_also_echoed_into_the_banner", async () => {
+    await symlink(daemon.socketPath, hostSocketPath(daemon.agentDir));
+    hostStarts = "works";
+    const { posted, notices, receive } = attach();
+    await settle(() => opens().length > 0 && posted.at(-1) !== undefined && posted.at(-1)?.state.error === undefined);
+
+    // The session is open; now every re-open fails and the host parks the session, so the tab detaches.
+    daemon.on("open_session", () => ({ error: "session gone", errorCode: "x" }));
+    daemon.push({ type: "session_parked", sessionId: "rpc-1" });
+    await settle(() => posted.at(-1)?.state.error === "session gone"); // the controller's own re-open failed
+
+    // «Переподключить»: the attempt fails too. Its reason belongs on the quiet line, not twice — not the red banner.
+    receive({ type: "reconnect" });
+    await settle(() => {
+      const notice = latest(notices);
+      return notice?.active === true && notice.error === "session gone" && posted.at(-1)?.state.error === undefined;
+    });
+    const notice = latest(notices);
+    expect(notice?.active === true && notice.error).toBe("session gone"); // the quiet line carries it
+    expect(posted.at(-1)?.state.error).toBeUndefined(); // the red banner does not echo it
+  });
+
   it("retries_by_itself_and_a_retry_that_works_clears_the_line_and_opens_the_session", async () => {
     const { posted, notices } = attach();
     await settle(() => latest(notices)?.active === true);

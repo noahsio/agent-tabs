@@ -11,9 +11,13 @@ export const FAILURE_CLASSES = ["refusal", "rejected", "empty", "silence", "tran
 
 /** What a rung does when it is reached. */
 export type RungAction =
-  /** Switch this session to that model and repeat the person's message. */
-  | { kind: "model"; provider: string; id: string }
-  /** Send the person's own phrase instead («продолжи»). */
+  /**
+   * Switch this session to that model. With no `text`, it repeats the person's own message — a *replay*, which the
+   * walk refuses once the turn has run a tool. With `text`, it sends that phrase instead on the new model — a
+   * *continuation*, safe to fire whatever the turn already did, because it re-runs nothing.
+   */
+  | { kind: "model"; provider: string; id: string; text?: string }
+  /** Send the person's own phrase instead («продолжи»), on the model the session is already on. */
   | { kind: "text"; text: string }
   /** End the ladder: the person decides. */
   | { kind: "ask" };
@@ -23,10 +27,11 @@ export type Rung = { id: string; action: RungAction; on: FailureClass[] };
 
 /**
  * The shape version a stored ladder was last written at. 2 added «отклонение» — a class that did not exist when 1
- * was written, so a rung stored then could not have been asked about it. `migrateLadder` answers for those rungs
- * once; after that the person's own ticks are the only thing that decides.
+ * was written, so a rung stored then could not have been asked about it. 3 let a model rung carry a `text` too, a
+ * field simply absent on every rung written before. `migrateLadder` answers for a v1 rung's «отклонение» once; after
+ * that the person's own ticks are the only thing that decides, and v3 adds nothing to a rung it did not already have.
  */
-export const LADDER_VERSION = 2;
+export const LADDER_VERSION = 3;
 
 export type Ladder = { rungs: Rung[]; version?: number };
 
@@ -64,7 +69,11 @@ export function parseAction(raw: unknown): RungAction | undefined {
   }
   if (raw["kind"] !== "model") return undefined;
   const { provider, id } = raw;
-  return typeof provider === "string" && provider !== "" && typeof id === "string" && id !== "" ? { kind: "model", provider, id } : undefined;
+  if (typeof provider !== "string" || provider === "" || typeof id !== "string" || id === "") return undefined;
+  const text = raw["text"];
+  if (text === undefined) return { kind: "model", provider, id };
+  // A model rung may carry a continuation phrase; a present-but-blank one is no phrase, and refused like a text rung's.
+  return typeof text === "string" && text.trim() !== "" ? { kind: "model", provider, id, text } : undefined;
 }
 
 function parseRung(raw: unknown): Rung | undefined {
@@ -92,21 +101,27 @@ export function parseLadder(raw: unknown): Ladder | undefined {
 }
 
 /**
- * A stored ladder brought up to the current shape. Version 1 knew four failures; «отклонение» is a fifth, and a
- * rung written then was never offered it. Every rung that already answers «отказ» or «пустой ответ» — the two that
- * mean *this model did not answer you* — gains it, which is exactly what the default table says. A rung that only
- * watched for silence or a broken connection is left alone: those are about the link, not the answer.
+ * A stored ladder brought up to the current shape, one version step at a time.
  *
- * It runs once. The migrated ladder carries the new version, so an untick after it sticks.
+ * v1 → v2: v1 knew four failures; «отклонение» is a fifth, and a rung written then was never offered it. Every rung
+ * that already answers «отказ» or «пустой ответ» — the two that mean *this model did not answer you* — gains it, which
+ * is exactly what the default table says. A rung that only watched for silence or a broken connection is left alone:
+ * those are about the link, not the answer. This step runs only on a v1 file, so a v2 untick of «отклонение» sticks.
+ *
+ * v2 → v3: a model rung may now carry a `text`. Nothing stored changes — the field is simply absent on every rung
+ * written before, which reads as the pure actions they already were. The rung gains nothing it did not have.
+ *
+ * It runs once. The migrated ladder carries the new version, so a later untick sticks.
  */
 export function migrateLadder(ladder: Ladder): Ladder {
   if (ladder.version === LADDER_VERSION) return ladder;
-  return {
-    version: LADDER_VERSION,
-    rungs: ladder.rungs.map((rung) =>
+  let rungs = ladder.rungs;
+  if ((ladder.version ?? 1) < 2) {
+    rungs = rungs.map((rung) =>
       rung.on.includes("refusal") || rung.on.includes("empty")
         ? { ...rung, on: FAILURE_CLASSES.filter((failure) => failure === "rejected" || rung.on.includes(failure)) }
         : rung,
-    ),
-  };
+    );
+  }
+  return { version: LADDER_VERSION, rungs };
 }

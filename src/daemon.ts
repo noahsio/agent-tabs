@@ -464,11 +464,19 @@ export class DaemonManager extends EventEmitter {
    */
   private hostCommand(location: HostLocation): { file: string; args: string[]; env: Record<string, string> } {
     const hostArgs = ["--mode", "rpc", "--listen", `unix://${location.socket}`];
-    if (!location.protected) return { file: this.env.omoPath, args: hostArgs, env: this.env.env };
+    // SENPI_BIN tells omo's memory-reflection child which executable to re-exec; it reads it from its parent env, and
+    // the bare `SENPI_` scrub (src/env.ts) drops any inherited one, so it is set here from the resolved omo path.
+    const env = { ...this.env.env, SENPI_BIN: this.env.omoPath };
+    if (!location.protected) return { file: this.env.omoPath, args: hostArgs, env };
+    // Under protection, omo's automatic memory reflection cannot complete: it writes git-worktree service files under
+    // .git (gitdir/commondir) that the sandbox profile forbids (profile.mjs P32, the escape primitives), so every run
+    // fails and omo spams «reflection paused». omo gates reflection off when SENPI_MEMORY_REFLECTION is "1", so set it
+    // here — only on the protected host. The unprotected branch above leaves it unset, so reflection returns the moment
+    // protection is off (SENPI_BIN is now set, so a fresh host reflects normally).
     return {
       file: SANDBOX_EXEC,
       args: ["-f", profilePath(this.env.agentDir), this.env.omoPath, ...hostArgs],
-      env: { ...this.env.env, OMO_LSP_DAEMON_DIR: lspDaemonDir(this.env.agentDir) },
+      env: { ...env, OMO_LSP_DAEMON_DIR: lspDaemonDir(this.env.agentDir), SENPI_MEMORY_REFLECTION: "1" },
     };
   }
 

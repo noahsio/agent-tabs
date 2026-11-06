@@ -252,6 +252,9 @@ export function writablePrefix(file: string, guard: PrefixGuard, isWritable: (fi
   const writable = below.filter(isWritable);
   const top = writable.at(-1);
   if (top === undefined) return undefined;
+  // ~/.local is an XDG base dir: bin is on PATH, but state/share/lib hold data ordinary tools keep writing
+  // (CLI tools keep their state in ~/.local/state/<tool>). Close the PATH entry itself, never the whole tree.
+  if (isWithin(file, path.join(home, ".local"))) return file;
   if (workspaces.some((dir) => isWithin(file, dir))) return file;
   if (below.some((dir) => isWithin(dir, home) && fs.existsSync(path.join(dir, ".git")))) return file;
   const bundle = [...below].reverse().find((dir) => dir.endsWith(".app"));
