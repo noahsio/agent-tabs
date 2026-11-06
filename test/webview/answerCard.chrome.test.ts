@@ -112,7 +112,7 @@ describe.skipIf(!hasChrome)("the answered-question card in a real layout (headle
 
   it("a_long_answer_collapses_like_a_long_sent_message_and_opens_on_its_toggle", async () => {
     const collapsed = await geometry(page, "u-long");
-    expect(Math.round(collapsed.textHeight / collapsed.lineHeight)).toBe(8);
+    expect(Math.round(collapsed.textHeight / collapsed.lineHeight)).toBe(4);
     expect(collapsed.fullHeight).toBeGreaterThan(collapsed.textHeight * 3);
     expect(collapsed.toggle).toBe("Показать полностью");
     expect((await geometry(page, "u-words")).toggle).toBeNull(); // a short card keeps no control

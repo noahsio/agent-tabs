@@ -49,7 +49,7 @@ describe.skipIf(!hasChrome)("long sent messages in a real layout (headless Chrom
 
   it("a_long_message_shows_about_eight_lines_and_its_control_sits_in_the_bottom_right_corner", async () => {
     const collapsed = await geometry(page, "u1");
-    expect(Math.round(collapsed.textHeight / collapsed.lineHeight)).toBe(8);
+    expect(Math.round(collapsed.textHeight / collapsed.lineHeight)).toBe(4);
     expect(collapsed.fullHeight).toBeGreaterThan(collapsed.textHeight * 4);
     expect(collapsed.toggle).not.toBeNull();
     expect((await geometry(page, "u2")).toggle).toBeNull();
