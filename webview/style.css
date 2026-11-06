@@ -358,16 +358,28 @@ button.icon-btn:disabled {
   z-index: 1; /* over its own turn's rows as they scroll under it; the next turn's bubble still pushes it out */
 }
 
-/* While stuck, the head is a band floating over the scroll: give it (the time row and the bubble's row) a solid
-   feed-background fill the full width of the feed, so no earlier row bleeds through beside the bubble or behind the
-   right-aligned time. The rounded bubble keeps its own `--surface` fill on top. Only when stuck — in flow the normal
-   transparent spacing stays. Raised above the top fade (`.feed::before`, z-index 3) so the time reads fully, crisp,
-   while the fade only softens whatever scrolls in the thin gap above the band. */
+/* While stuck, the head floats over the scroll. Raised above the top fade (`.feed::before`, z-index 3) so the time and
+   bubble read fully crisp, and backed by `::before` below — not a solid box but a soft-edged fill (see next). */
 .entry.user.head.is-stuck {
   z-index: 4;
-  background: var(--bg);
-  margin-inline: calc(-1 * var(--feed-side));
-  padding-inline: var(--feed-side);
+}
+
+/* The soft-edged backing behind the stuck head (time row + bubble). It is opaque feed-background the full width of the
+   feed, so no earlier row bleeds through beside the bubble or behind the right-aligned time — but it is NOT a hard
+   rectangle: it reaches up past the feed's top edge (clipped there, blending into the header with no strip of old
+   content above) and dissolves over its last few px into the scrolling content just below the bubble. The rounded
+   bubble keeps its own `--surface` fill on top. z-index:-1 keeps it behind the time and bubble yet (via the stuck
+   head's own z-index-4 stacking context) over every scrolling row. In flow — not stuck — there is no backing at all. */
+.entry.user.head.is-stuck::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  left: calc(-1 * var(--feed-side));
+  right: calc(-1 * var(--feed-side));
+  top: -80px; /* up past the feed's top edge; the feed's overflow clips it to the header, so the fill reaches the top */
+  bottom: 0; /* to the entry's bottom, a few px under the bubble */
+  background: linear-gradient(to bottom, var(--bg) calc(100% - 14px), transparent);
+  pointer-events: none;
 }
 
 /* A zero-height marker at each turn's natural top; the stick-watcher (feed.ts) reads it to flag `is-stuck`. */
