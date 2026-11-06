@@ -228,6 +228,7 @@ export function buildProfile({ home, agentDir, envs = [], vscodes = [], writable
   );
   const ownSocket = both(protectedHostSocketPath(agentDir));
   const knownHosts = both(inHome(".ssh/known_hosts"));
+  const sshDir = both(inHome(".ssh"));
   const socketRegexes = sorted([
     ...installs.flatMap((install) => both(install.userDataDir)).map((dir) => `^${reEscape(dir)}/[^/]*-main\\.sock$`),
     ...both(inHome(".omo/lsp-daemon")).map((dir) => `^${reEscape(dir)}/`),
@@ -267,6 +268,9 @@ export function buildProfile({ home, agentDir, envs = [], vscodes = [], writable
     `(allow file-write* ${knownHosts.map((file) => `(literal ${str(file)})`).join(" ")})`,
     "; …but never as a link: ssh would append through it into a protected file",
     ...knownHosts.map((file) => `(deny file-write-create (require-all (literal ${str(file)}) (vnode-type SYMLINK)))`),
+    "; ssh ControlMaster multiplexing binds and unlinks a unix socket under ~/.ssh; allow only socket vnodes, so keys,",
+    "; config and symlinks stay write-denied (after the deny block above: later rules win)",
+    ...sshDir.map((dir) => `(allow file-write* (require-all (subpath ${str(dir)}) (vnode-type SOCKET)))`),
     "",
     "; no driving a host over RPC, the decision service's admin socket, VS Code, the shared LSP daemon or sshd",
     ...sockets.map((file) => `(deny network-outbound (remote unix-socket (path-literal ${str(file)})))`),
