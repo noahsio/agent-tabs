@@ -1487,6 +1487,77 @@ describe("SessionController", () => {
       expect(ofType("unload_session")).toHaveLength(0);
       expect(ofType("prompt")).toHaveLength(1);
     });
+
+    /**
+     * The other shape, from the person's journal: the turn ran real work (tool calls, model output over ~2 minutes)
+     * and only then was aborted `"system"`. The final assistant message is aborted + empty but lasted far past the
+     * instant-dead bound, so `instantDeadTurn` is false and there is no dead turn to put back — the message was answered.
+     * Before this the feed showed a bare «Ход остановлен»; now it says what happened and leaves the tab usable.
+     */
+    const workedThenAborted = (over: Frame = {}): Frame =>
+      frame({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+          stopReason: "aborted",
+          errorMessage: "The operation was aborted.",
+          timing: { requestedAt: 1, endedAt: 120_000 },
+          ...over,
+        },
+      });
+
+    const systemAbortEnd = (): Frame => frame({ type: "agent_end", willRetry: false, aborted: true, abortSource: "system", clientMessageId: "m-own" });
+
+    it("after_real_work_says_omo_stopped_itself_names_the_plan_and_leaves_the_tab_usable", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(workedThenAborted());
+      daemon.push(systemAbortEnd()); // the reducer must NOT greet this with a bare «Ход остановлен»
+      daemon.push(stall({ kind: "open-todos", count: 9 }));
+      daemon.push(frame({ type: "agent_settled" })); // the turn is over with nothing resuming → a genuine park
+      await settle(() => notices().length > 0);
+
+      expect(notices()).toContain("OmO остановил ход сам (в плане остались незакрытые пункты: 9)");
+      expect(notices()).not.toContain("Ход остановлен");
+      expect(controller.state.running).toBe(false); // the tab is usable, not stuck on «Работаю…»
+      expect(ofType("unload_session")).toHaveLength(0); // the message was answered — nothing to resend
+      expect(ofType("prompt")).toHaveLength(1);
+    });
+
+    it("a_compaction_abort_reassures_and_does_not_wedge", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(workedThenAborted());
+      daemon.push(systemAbortEnd());
+      daemon.push(stall({ kind: "open-todos", count: 9 }));
+      daemon.push(frame({ type: "compaction_start", reason: "overflow" })); // OmO is compacting and will carry on
+      await settle(() => notices().length > 0);
+
+      expect(notices()).toContain("OmO сжимает контекст и продолжит сам");
+      expect(notices()).not.toContain("Ход остановлен");
+      expect(notices().some((text) => text.startsWith("OmO остановил ход сам"))).toBe(false);
+      expect(ofType("unload_session")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(1);
+      // the turn resumes on its own — the tab must not be left wedged
+      daemon.push(frame({ type: "compaction_end" }));
+      daemon.push(frame({ type: "agent_start" }));
+      await settle(() => controller?.state.running === true);
+    });
+
+    it("a_normal_completed_turn_shows_no_stopped_line", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(goodTurn());
+      daemon.push(frame({ type: "agent_end", willRetry: false, clientMessageId: "m-own" }));
+      daemon.push(frame({ type: "agent_settled" }));
+      await settle(() => controller?.state.running === false);
+
+      expect(notices()).toEqual([]);
+    });
   });
 
   describe("the model ladder", () => {

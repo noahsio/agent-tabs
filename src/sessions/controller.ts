@@ -108,6 +108,16 @@ const LIVENESS_RESENT_TEXT = "Перезапустил сессию и отпр�
 const LIVENESS_MANUAL_TEXT = "Отправьте сообщение заново — а если повторится, перезапустите сессию кнопкой «Снять зависание»";
 /** Why the automatic restart happened, for the «Agent Tabs» channel. */
 const LIVENESS_UNWEDGE_WHY = "OmO оборвал ход сам сразу после старта";
+/**
+ * A `"system"` abort that landed *after* the turn had done real work (tool calls, model output) — not the instant-dead
+ * one above. OmO's own machinery decided to park the turn: the stall row it leaves is written only once OmO has ruled
+ * out a retry or a queued continuation (`willRetry`/`continuationQueued` in the binary), so by the time we read it the
+ * turn is genuinely stopped. We say so plainly and leave the tab usable — the message was already answered, so there is
+ * nothing to resend; «Снять зависание» is still there if the person wants to nudge a stuck goal.
+ */
+const SYSTEM_ABORT_TEXT = "OmO остановил ход сам";
+/** The benign twin: the abort was OmO starting a context compaction, after which it continues the turn on its own. */
+const SYSTEM_ABORT_COMPACTING_TEXT = "OmO сжимает контекст и продолжит сам";
 
 function isObject(value: unknown): value is Frame {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -214,6 +224,12 @@ export class SessionController extends EventEmitter {
   private deadTurn: { id: string | undefined } | undefined;
   /** A compaction of ours is in flight: the abort it sends is `"system"` too, and it is not a hang. */
   private ownCompact = false;
+  /**
+   * A `"system"` abort after real work, held until the very next frame says which kind it is: a `compaction_start` makes
+   * it benign (OmO is compacting and will carry on), an end-of-turn frame (`agent_settled` / a settled lifecycle) makes
+   * it a genuine park. Holding it one frame keeps the honest line from flashing before the compaction that replaces it.
+   */
+  private pendingSysAbort: { key: string; work: OpenWork } | undefined;
   /** The model ladder, once the tab has given this session one. */
   private modelLadder: ModelLadder | undefined;
   /** What was sent and is not in the conversation yet, by clientMessageId: a dequeued message goes back to the composer as typed. */
@@ -652,6 +668,9 @@ export class SessionController extends EventEmitter {
     const type = frame["type"];
     if (type === "agent_start" || type === "turn_start") this.deadTurn = undefined; // a new turn: the old one's shape is spent
     if (type === "compaction_end") this.ownCompact = false;
+    // A held system-abort is settled by the very next frame: compaction makes it benign, the turn's end makes it a park.
+    if (type === "compaction_start") this.settlePendingSysAbort(true);
+    else if (type === "agent_settled" || (type === "session_lifecycle" && lifecycleRunning(frame["lifecycle"]) === false)) this.settlePendingSysAbort(false);
     if (type === "message_end") {
       const message = isObject(frame["message"]) ? frame["message"] : {};
       if (instantDeadTurn(frame["message"])) {
@@ -665,14 +684,47 @@ export class SessionController extends EventEmitter {
     }
     if (type !== "entry_appended") return;
     const work = systemAbortStall(frame["entry"]);
+    if (work === undefined) return;
     const dead = this.deadTurn;
-    if (work === undefined || dead === undefined) return;
     this.deadTurn = undefined;
     if (this.ownCompact) {
       this.ownCompact = false; // the person asked for this compaction, and it aborts the turn with the same provenance
       return;
     }
-    this.livenessAbort(work, dead.id);
+    if (dead !== undefined) {
+      this.livenessAbort(work, dead.id); // the instant-dead turn: the message never reached the model, so put it back
+      return;
+    }
+    this.sysAbortAfterWork(work);
+  }
+
+  /**
+   * A `"system"` abort read off a stall row after the turn had already done work. The tab stops claiming it works at
+   * once (the turn is over whatever the host says next), but which line to show waits one frame — `settlePendingSysAbort`
+   * decides it. A compaction already in flight is benign now; otherwise the next frame tells us.
+   */
+  private sysAbortAfterWork(work: OpenWork): void {
+    this.turnStarting = false;
+    this.commit({ ...this.current, running: false, activity: undefined, activityTool: undefined });
+    this.pendingSysAbort = { key: this.answering?.key ?? "turn", work };
+    if (this.current.compacting) this.settlePendingSysAbort(true);
+  }
+
+  /**
+   * Say which kind the held system-abort was, once a later frame has told us: `compacting` true means OmO is compacting
+   * and will carry the turn on by itself — a quiet, reassuring line and no recovery; false means the turn is genuinely
+   * parked — the honest line, naming what the plan still has open. Either way the tab is already usable (not «Работаю…»).
+   */
+  private settlePendingSysAbort(compacting: boolean): void {
+    const pending = this.pendingSysAbort;
+    if (pending === undefined) return;
+    this.pendingSysAbort = undefined;
+    if (compacting) {
+      this.noteOnce(`sysabort:${pending.key}`, "info", SYSTEM_ABORT_COMPACTING_TEXT);
+      return;
+    }
+    const left = openWorkText(pending.work);
+    this.noteOnce(`sysabort:${pending.key}`, "warn", left === undefined ? SYSTEM_ABORT_TEXT : `${SYSTEM_ABORT_TEXT} (${left})`);
   }
 
   /**

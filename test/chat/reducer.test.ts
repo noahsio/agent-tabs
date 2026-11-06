@@ -179,6 +179,18 @@ describe("chat reducer", () => {
     expect(state.blocks.some((b) => b.kind === "notice" && b.text === "Ход остановлен")).toBe(true);
   });
 
+  it("a_clean_turn_end_shows_no_stopped_line", () => {
+    // A finished turn carries no `aborted`: «Ход остановлен» must greet a stop, never an ordinary end.
+    const state = applyFrame({ ...initialState(), running: true }, { type: "agent_end", willRetry: false, clientMessageId: "p-1" });
+    expect(state.blocks.some((b) => b.kind === "notice" && b.text === "Ход остановлен")).toBe(false);
+  });
+
+  it("a_system_abort_shows_no_bare_stopped_line", () => {
+    // OmO's own abort (compaction / deadline / liveness) is not the person's «Стоп»: the controller tells that story.
+    const state = applyFrame({ ...initialState(), running: true }, { type: "agent_end", willRetry: false, aborted: true, abortSource: "system", clientMessageId: "p-1" });
+    expect(state.blocks.some((b) => b.kind === "notice" && b.text === "Ход остановлен")).toBe(false);
+  });
+
   it("permission_select_becomes_dialog_and_resolves", () => {
     const frames = loadFrames("permission");
     const state = replay(frames);
