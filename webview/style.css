@@ -275,7 +275,7 @@ button.icon-btn:disabled {
   padding: 8px 0 6px;
 }
 
-.timeline > .entry:first-child > .ts {
+.timeline > .turn:first-child > .entry:first-child > .ts {
   padding-top: 18px;
 }
 
@@ -320,58 +320,60 @@ button.icon-btn:disabled {
   color: var(--fg);
 }
 
-/* ---------- the sticky header of sent messages ----------
-   A sticky slot of no height at the top of the scroll content: the copy floats over the timeline without taking any of
-   the feed's height, so it can come and go without moving the line the person is reading. It mirrors the sent message
-   heading the view; the next one, rising through the top edge, pushes it up and out (a scroll-driven transform set on
-   `.pin`, so no CSS transition fights the scroll — reduced motion snaps it in feed.ts). */
+/* ---------- sticky sent bubbles ----------
+   Each sent message leads a `.turn` — its own containing block — and its real bubble is `position: sticky`. So the
+   bubble stops at the top of the feed and, when the next turn's sent bubble rises to meet it, the turn's bottom edge
+   pushes it up and out and the next one takes its place. No copy, no fade: the real bubbles carry the top, native. */
 
-.pin-slot {
+.turn {
+  /* A plain containing block for its sticky head; no box of its own so spacing reads exactly as the flat timeline did. */
+  display: flow-root;
+}
+
+.entry.user.head {
   position: sticky;
-  top: 0;
+  top: var(--feed-top);
+  z-index: 1; /* over its own turn's rows as they scroll under it; the next turn's bubble still pushes it out */
+}
+
+/* A long sent message is already folded to eight fading lines by default (`.user-bubble.collapsed` above), so a stuck
+   one never swallows the feed. If the person opened it in full that is their choice: it shows whole, in flow and stuck
+   alike — no separate sticky-only cap, since short messages dominate and nothing is ever permanently hidden. */
+
+/* ---------- the to-bottom control ----------
+   A zero-height sticky slot pinned just above the composer; the round button centres over the feed and floats there
+   while the feed is scrolled up. feed.ts sets the slot's `bottom` to clear the composer and hides it at the end. */
+.to-bottom-slot {
+  position: sticky;
+  bottom: 8px;
   height: 0;
-  z-index: 2; /* over the rows, under the composer (which comes after the feed) */
+  z-index: 1;
+  pointer-events: none; /* the empty strip never eats a scroll; only the button below takes the pointer */
 }
 
-/* A floating bubble, not a bar welded to the top: it keeps the sent message's fill, frame and rounded corners and sits
-   in the feed's content column with a little room from the top edge, over the rows that slide under it. */
-.pin {
+.to-bottom {
   position: absolute;
-  top: 6px; /* room below the feed's top edge, so it reads as a bubble floating in the chat */
-  left: 0;
-  right: 0;
-  padding-right: calc(12px + 22px); /* the jump control sits in the corner; the text clears it */
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--line-2);
   box-shadow: 0 6px 16px -8px var(--pop-shadow);
-}
-
-/* The corner control: quiet like the feed's other small buttons, always there while the copy is. */
-.pin > button.pin-jump {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  color: var(--muted);
-}
-
-.pin > button.pin-jump:hover {
   color: var(--fg);
+  pointer-events: auto;
 }
 
-.pin > button.pin-jump .icon {
-  width: 15px;
-  height: 15px;
+.to-bottom:hover {
+  border-color: var(--accent);
 }
 
-/* Three lines, and the fade starts later than a message's in the timeline so the third one still reads. */
-.user-bubble.pin.collapsed .user-text {
-  max-height: calc(3 * 1.55em);
-  -webkit-mask-image: linear-gradient(to bottom, #000 80%, transparent);
-  mask-image: linear-gradient(to bottom, #000 80%, transparent);
-}
-
-/* Opened: the whole message, and never more than a third of the feed — a longer one scrolls inside the copy. */
-.pin.long:not(.collapsed) .user-text {
-  max-height: 33vh;
-  overflow-y: auto;
+.to-bottom .icon {
+  width: 18px;
+  height: 18px;
 }
 
 .queued-label {

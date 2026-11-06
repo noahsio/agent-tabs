@@ -55,8 +55,8 @@ function type(text: string): void {
 
 /** The feed's timeline rows in order: a block's id, or `guard:<id>` for a guard row. */
 function timeline(): string[] {
-  return [...(root.querySelector(".timeline") as HTMLElement).children].map(
-    (row) => (row as HTMLElement).dataset["block"] ?? `row:${row.querySelector<HTMLElement>("[data-guard]")?.dataset["guard"] ?? row.textContent}`,
+  return [...root.querySelectorAll<HTMLElement>(".timeline > .turn > *")].map(
+    (row) => row.dataset["block"] ?? `row:${row.querySelector<HTMLElement>("[data-guard]")?.dataset["guard"] ?? row.textContent}`,
   );
 }
 

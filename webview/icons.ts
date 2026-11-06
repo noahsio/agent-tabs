@@ -52,11 +52,10 @@ const SHAPES = {
     ["path", "M12 19.5v-15"],
     ["path", "m6 10.5 6-6 6 6"],
   ],
-  // A downward arrow onto a baseline: jump the feed down to the message the pinned copy mirrors.
-  jumpTo: [
-    ["path", "M12 4.5v9.5"],
-    ["path", "m7 10 5 5 5-5"],
-    ["path", "M5.5 19.5h13"],
+  // A plain downward arrow (the `send` arrow turned over): jump the feed down to the latest message.
+  scrollDown: [
+    ["path", "M12 4.5v15"],
+    ["path", "m6 13.5 6 6 6-6"],
   ],
 } satisfies Record<string, Shape[]>;
 

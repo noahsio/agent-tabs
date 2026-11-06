@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { hasChrome, openPage, type Page, type Point, waitFor, webviewPage } from "../helpers/chrome";
+import { hasChrome, openPage, type Page, waitFor, webviewPage } from "../helpers/chrome";
 
 /** Stands in for VS Code: three sent messages, each under its own reply that is taller than the tab can show at once. */
 const STUB = `
@@ -14,157 +14,142 @@ const STUB = `
     { kind: "user", id: "u3", text: "Сообщение три" },
     { kind: "assistant", id: "a3", text: reply("C"), thinking: "", streaming: false },
   ];
+  var send = function (bl) {
+    window.postMessage(JSON.stringify({ type: "state", reconnectable: true, tab: { modelMode: "auto", durableId: "id-1" }, state: { blocks: bl, dialogs: [], agents: [], running: false } }), "*");
+  };
+  window.__blocks = blocks;
+  window.__send = send;
   window.acquireVsCodeApi = function () {
     return {
       getState: function () { return undefined; },
       setState: function () {},
-      postMessage: function (message) {
-        if (message.type !== "ready") return;
-        var state = { type: "state", reconnectable: true, tab: { modelMode: "auto", durableId: "id-1" }, state: { blocks: blocks, dialogs: [], agents: [], running: false } };
-        setTimeout(function () { window.postMessage(JSON.stringify(state), "*"); }, 5);
-      },
+      postMessage: function (message) { if (message.type === "ready") setTimeout(function () { send(blocks); }, 5); },
     };
   };
 })();`;
 
-type Shape = {
-  hidden: boolean;
-  text: string;
-  transform: string;
-  slotHeight: number;
-};
+/** A box, in feed-relative coordinates: a bubble's `top` is how far below the feed's own top edge it sits. */
+type Box = { top: number; bottom: number; height: number };
 
-/** The header's state: whether it shows, the message it mirrors, its push transform, and the slot's layout height. */
-function shape(page: Page): Promise<Shape> {
-  return page.evaluate<Shape>(`(() => {
-    const slot = document.querySelector(".pin-slot");
-    const pin = slot.querySelector('[data-role="pin"]');
-    return {
-      hidden: slot.hidden,
-      text: pin.querySelector(".user-text").textContent,
-      transform: pin.style.transform,
-      slotHeight: slot.getBoundingClientRect().height,
-    };
+function bubble(page: Page, id: string): Promise<Box | null> {
+  return page.evaluate<Box | null>(`(() => {
+    const row = document.querySelector('[data-block="${id}"] .user-bubble');
+    if (row === null) return null;
+    const r = row.getBoundingClientRect();
+    const f = document.querySelector("main.feed").getBoundingClientRect();
+    return { top: r.top - f.top, bottom: r.bottom - f.top, height: r.height };
   })()`);
 }
 
-/** Lets a programmatic scroll's rAF-scheduled `updatePin` run (the handler schedules one frame; `updatePin` runs in it). */
+function feedHeight(page: Page): Promise<number> {
+  return page.evaluate<number>(`document.querySelector("main.feed").getBoundingClientRect().height`);
+}
+
+/** The feed's top inset (`--feed-top`), the line a stuck bubble rests against. */
+function inset(page: Page): Promise<number> {
+  return page.evaluate<number>(`parseFloat(getComputedStyle(document.querySelector("main.feed")).getPropertyValue("--feed-top")) || 8`);
+}
+
 function settle(page: Page): Promise<unknown> {
   return page.evaluate(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))`);
 }
 
-/** Scrolls so `id`'s bubble top lands `viewportTop` px below the feed's top edge (negative = scrolled above it). */
-async function placeBubble(page: Page, id: string, viewportTop: number): Promise<void> {
+/**
+ * Scrolls so `id`'s *natural* top lands `viewportTop` px below the feed's top edge. The natural top is read at
+ * `scrollTop = 0`, where nothing is stuck, so a sticky bubble's clamped rect never throws the maths off.
+ */
+async function scrollSo(page: Page, id: string, viewportTop: number): Promise<void> {
+  await page.evaluate(`document.querySelector("main.feed").scrollTop = 0`);
+  await settle(page);
   await page.evaluate(`(() => {
     const feed = document.querySelector("main.feed");
-    const row = document.querySelector('[data-block="${id}"]').getBoundingClientRect();
-    const target = feed.getBoundingClientRect().top + ${viewportTop};
-    feed.scrollTop = feed.scrollTop + (row.top - target);
+    const r = document.querySelector('[data-block="${id}"]').getBoundingClientRect();
+    feed.scrollTop = (r.top - feed.getBoundingClientRect().top) - ${viewportTop};
   })()`);
   await settle(page);
 }
 
-describe.skipIf(!hasChrome)("the sticky header of sent messages (headless Chrome)", () => {
+describe.skipIf(!hasChrome)("sent bubbles that stick natively (headless Chrome)", () => {
   let page: Page;
-  const SHOTS = "/tmp/agent-tabs-shots/sticky";
+  const SHOTS = "/tmp/agent-tabs-shots/native-sticky";
 
   beforeAll(async () => {
     page = await openPage(await webviewPage(STUB));
     await waitFor(page, `document.querySelector('[data-block="a3"]') !== null`);
-    await waitFor(page, `document.querySelector(".pin-slot")?.hidden === false`);
   }, 30_000);
 
   afterAll(() => page?.close());
 
-  it("at_the_bottom_the_latest_sent_message_heads_the_view", async () => {
-    const header = await shape(page);
-    expect(header.hidden).toBe(false);
-    expect(header.text).toBe("Сообщение три"); // the latest, matching the single-pin behaviour it replaces
-    expect(header.transform).toBe(""); // nothing crossing: the copy rests
+  it("the_latest_sent_bubble_is_stuck_at_the_feed_top_at_the_bottom", async () => {
+    await page.evaluate(`document.querySelector("main.feed").scrollTop = document.querySelector("main.feed").scrollHeight`);
+    await settle(page);
+    const u3 = await bubble(page, "u3");
+    const gap = await inset(page);
+    expect(u3).not.toBeNull();
+    expect((u3 as Box).top).toBeGreaterThanOrEqual(gap - 1); // resting on the top inset, not above it
+    expect((u3 as Box).top).toBeLessThan(28); // and not scrolled down the feed: it is stuck at the top line
+    // The real bubble is the one at the top — no copy doubling its text anywhere.
+    const copies = await page.evaluate<number>(`Array.from(document.querySelectorAll(".user-text")).filter((n) => (n.textContent ?? "").trim() === "Сообщение три").length`);
+    expect(copies).toBe(1);
   });
 
-  it("a_message_still_in_view_never_heads_the_view", async () => {
-    await placeBubble(page, "u3", 80); // u3 fully below the top edge, on screen
-    expect((await shape(page)).text).not.toBe("Сообщение три"); // not copied into the header while it is visible
+  it("the_next_bubble_pushes_the_stuck_one_up_and_out_and_takes_its_place", async () => {
+    await scrollSo(page, "u2", -100); // deep in u2's turn: u2 stuck at the top, u3 far below
+    const restU2 = await bubble(page, "u2");
+    expect((restU2 as Box).top).toBeGreaterThanOrEqual((await inset(page)) - 1);
+    expect((restU2 as Box).top).toBeLessThan(28); // u2 resting on the top line
+    await page.screenshot(`${SHOTS}/stuck-midscroll.png`); // one bubble stuck mid-feed, the reply scrolling under it
+
+    await scrollSo(page, "u3", 16); // u3's top has reached the top line, right where u2 rests
+    const pushedU2 = await bubble(page, "u2");
+    const arrivedU3 = await bubble(page, "u3");
+    expect((pushedU2 as Box).top).toBeLessThan((restU2 as Box).top - 10); // u2 shoved up by u3's arrival
+    expect((pushedU2 as Box).bottom).toBeLessThanOrEqual((arrivedU3 as Box).top + 1); // u2 rides above u3, not over it
+    expect((arrivedU3 as Box).top).toBeLessThan(28); // u3 taking the top
+    await page.screenshot(`${SHOTS}/handoff.png`); // the hand-off: u3's top meeting u2 and carrying it off
   });
 
-  it("a_message_straddling_the_top_edge_is_in_transition_not_the_header", async () => {
-    await placeBubble(page, "u2", -8); // u2 crossing the edge; its tall real bubble is what the person sees, rising
-    const header = await shape(page);
-    expect(header.hidden).toBe(false);
-    expect(header.text).toBe("Сообщение один"); // u1 (the last message wholly past) heads the view
-    expect(header.text).not.toContain("Строка"); // u2 is not duplicated into the header while it is visible
-    expect(header.transform).toMatch(/^translateY\(-\d/); // the arriving bubble pushes the copy up and out
-    expect(header.slotHeight).toBe(0); // and takes none of the feed's height
-
-    // No doubling: u2's text shows once, as its own real bubble crossing the edge — never also as the header copy.
-    const u2Copies = await page.evaluate<number>(
-      `Array.from(document.querySelectorAll(".user-text")).filter((node) => (node.textContent ?? "").startsWith("Строка 1")).length`,
-    );
-    expect(u2Copies).toBe(1);
-    // The handoff: the copy of u1 pushed up (a sliver), the tall u2 reading right below it as it rises — two in a row.
-    await page.screenshot(`${SHOTS}/push-handoff.png`);
+  it("agent_and_tool_rows_never_stick", async () => {
+    const sticky = await page.evaluate<boolean>(`Array.from(document.querySelectorAll(".entry.steps")).some((e) => getComputedStyle(e).position === "sticky")`);
+    expect(sticky).toBe(false); // only sent bubbles are sticky
+    await scrollSo(page, "a1", -40); // scroll a reply up past the top edge
+    const a1 = await page.evaluate<number>(`(() => { const r = document.querySelector('[data-block="a1"]').getBoundingClientRect(); const f = document.querySelector("main.feed").getBoundingClientRect(); return r.top - f.top; })()`);
+    expect(a1).toBeLessThan(0); // the reply scrolled away above the edge; it did not pin there
   });
 
-  it("the_header_swaps_to_an_earlier_message_as_the_scroll_climbs", async () => {
-    await placeBubble(page, "u3", 80); // u3 back on screen, u2 the latest one wholly past
-    expect((await shape(page)).text).toContain("Строка 1");
-    await page.screenshot(`${SHOTS}/header-single.png`); // one message, resting, mid-feed
-
-    await placeBubble(page, "u2", -24); // scrolled up: u2 crossing, u1 now the latest wholly past
-    expect((await shape(page)).text).toBe("Сообщение один"); // swapped to the earlier message
-  });
-
-  it("agent_and_tool_output_never_become_the_header", async () => {
-    for (const viewportTop of [-24, 80, -200]) {
-      await placeBubble(page, "u2", viewportTop);
-      const header = await shape(page);
-      if (!header.hidden) expect(header.text).toMatch(/^(Сообщение один|Сообщение три|Строка 1)/); // only a sent message, never a reply step
-    }
-  });
-
-  it("at_the_very_top_no_message_heads_the_view", async () => {
+  it("at_the_very_top_the_first_message_leads_with_nothing_stacked_over_it", async () => {
     await page.evaluate(`document.querySelector("main.feed").scrollTop = 0`);
     await settle(page);
-    expect((await shape(page)).hidden).toBe(true); // above the first sent message, nothing heads the view
+    const u1 = await bubble(page, "u1");
+    const u2 = await bubble(page, "u2");
+    const gap = await inset(page);
+    expect((u1 as Box).top).toBeGreaterThanOrEqual(gap - 1); // u1 sits at the top in natural flow
+    expect((u2 as Box).top).toBeGreaterThan((u1 as Box).bottom); // u2 is far below, not stacked over u1
   });
 
-  it("the_jump_control_targets_the_message_the_header_mirrors_now", async () => {
-    await placeBubble(page, "u3", -24); // header mirrors u2
-    expect((await shape(page)).text).toContain("Строка 1");
-    const jump = await page.evaluate<Point>(
-      `(() => { const r = document.querySelector('[data-role="pin-jump"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
-    );
-    await page.click(jump);
-    // The smooth scroll settles with u2 — the message the header mirrored — back in view, not u1 or u3.
-    await waitFor(
-      page,
-      `(() => { const r = document.querySelector('[data-block="u2"]').getBoundingClientRect(); const f = document.querySelector("main.feed").getBoundingClientRect(); return r.top >= f.top && r.top <= f.bottom; })()`,
-    );
-    const where = await page.evaluate<{ u2: number; feedTop: number; feedBottom: number }>(`(() => {
-      const r = document.querySelector('[data-block="u2"]').getBoundingClientRect();
-      const f = document.querySelector("main.feed").getBoundingClientRect();
-      return { u2: r.top, feedTop: f.top, feedBottom: f.bottom };
+  it("a_long_stuck_bubble_does_not_swallow_the_feed", async () => {
+    await scrollSo(page, "u2", -100); // u2 (a 20-line message) stuck at the top while its reply shows below
+    const u2 = await bubble(page, "u2");
+    const height = await feedHeight(page);
+    expect((u2 as Box).top).toBeLessThan(28); // it is the stuck one
+    expect((u2 as Box).height).toBeLessThan(0.6 * height); // yet capped: content below it stays in view
+  });
+
+  it("a_streaming_re_render_keeps_the_stuck_bubble_in_place", async () => {
+    await scrollSo(page, "u2", -100); // u2 stuck at the top
+    const before = await page.evaluate<{ top: number; scroll: number }>(`(() => {
+      const r = document.querySelector('[data-block="u2"] .user-bubble').getBoundingClientRect();
+      const f = document.querySelector("main.feed");
+      return { top: r.top - f.getBoundingClientRect().top, scroll: f.scrollTop };
     })()`);
-    expect(where.u2).toBeGreaterThanOrEqual(where.feedTop - 1);
-    expect(where.u2).toBeLessThanOrEqual(where.feedBottom);
-  });
-
-  it("opening_the_stuck_header_reaches_the_whole_message_without_moving_the_feed", async () => {
-    await placeBubble(page, "u3", -24); // header mirrors the long u2, collapsed
-    await waitFor(page, `document.querySelector('[data-role="pin-toggle"]').textContent === "Показать полностью"`);
-    const before = await page.evaluate<{ scroll: number; textHeight: number }>(
-      `(() => { const t = document.querySelector('[data-role="pin"] .user-text'); return { scroll: document.querySelector("main.feed").scrollTop, textHeight: t.clientHeight }; })()`,
-    );
-    const toggle = await page.evaluate<Point>(
-      `(() => { const r = document.querySelector('[data-role="pin-toggle"]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
-    );
-    await page.click(toggle);
-    await waitFor(page, `document.querySelector('[data-role="pin-toggle"]').textContent === "Свернуть"`);
-    const after = await page.evaluate<{ scroll: number; textHeight: number }>(
-      `(() => { const t = document.querySelector('[data-role="pin"] .user-text'); return { scroll: document.querySelector("main.feed").scrollTop, textHeight: t.clientHeight }; })()`,
-    );
-    expect(after.scroll).toBe(before.scroll); // opening it reads in place: the feed does not move
-    expect(after.textHeight).toBeGreaterThan(before.textHeight); // and the whole message is reachable
+    await page.evaluate(`(() => { const b = window.__blocks.map((x) => ({ ...x })); const a2 = b.find((x) => x.id === "a2"); a2.text = a2.text + "\\n\\nновый шаг"; window.__send(b); })()`);
+    await settle(page);
+    const after = await page.evaluate<{ top: number; scroll: number }>(`(() => {
+      const r = document.querySelector('[data-block="u2"] .user-bubble').getBoundingClientRect();
+      const f = document.querySelector("main.feed");
+      return { top: r.top - f.getBoundingClientRect().top, scroll: f.scrollTop };
+    })()`);
+    expect(after.scroll).toBe(before.scroll); // the agent streamed on, but the feed did not jump
+    expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(1); // and the stuck bubble held its line
   });
 });
