@@ -40,6 +40,8 @@ export type ProtectionDeps = {
   restartHost(): Promise<void>;
   /** True once something accepts connections on `file` within `ms` (0: one probe). */
   waitForSocket(file: string, ms: number): Promise<boolean>;
+  /** Waits between bootstrap attempts (a timer; tests pass a no-op). */
+  pause?(ms: number): Promise<void>;
   /** The directories of the person's login-shell PATH, read outside the sandbox when protection is turned on. */
   loginPath(): Promise<string[]>;
   /** This window's VS Code workspace folders: never closed as a whole (P38). */
@@ -365,8 +367,28 @@ async function bootService(paths: EnvPaths, deps: ProtectionDeps, plistFile: str
   if (!plistChanged && (await deps.waitForSocket(service.hookSock, 0))) return true;
   const label = serviceLabel(paths.agentDir);
   await deps.launchctl(["bootout", `gui/${deps.uid}/${label}`]).catch(() => undefined); // not loaded: nothing to stop
-  await deps.launchctl(["bootstrap", `gui/${deps.uid}`, plistFile]);
+  await bootstrapWhenUnloaded(deps, plistFile);
   return deps.waitForSocket(service.hookSock, SERVICE_START_MS);
+}
+
+const BOOTSTRAP_ATTEMPTS = 20;
+const BOOTSTRAP_PAUSE_MS = 250;
+
+/**
+ * `bootout` returns before launchd has let go of the label; a `bootstrap` of it meanwhile fails with «Bootstrap
+ * failed: 5: Input/output error» (measured), so that one error is retried for up to ~5 s. Any other error is final.
+ */
+async function bootstrapWhenUnloaded(deps: ProtectionDeps, plistFile: string): Promise<void> {
+  const pause = deps.pause ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await deps.launchctl(["bootstrap", `gui/${deps.uid}`, plistFile]);
+    } catch (error) {
+      const unloading = /Bootstrap failed: 5:/.test(error instanceof Error ? error.message : String(error));
+      if (!unloading || attempt >= BOOTSTRAP_ATTEMPTS) throw error;
+      await pause(BOOTSTRAP_PAUSE_MS);
+    }
+  }
 }
 
 /**
@@ -389,9 +411,12 @@ async function provision(paths: EnvPaths, deps: ProtectionDeps, spec: { node: st
   const label = serviceLabel(paths.agentDir);
   const plistFile = launchAgentPath(paths.home, label);
   const plistChanged = await writeIfDifferent(deps, plistFile, plistFor(paths, spec.node, kitGuard), 0o644);
-  if (!(await bootService(paths, deps, plistFile, plistChanged))) {
+  // A service that did not come up, or that launchd refused, is undone alike: no plist is left behind to read as «broken».
+  const up = await bootService(paths, deps, plistFile, plistChanged).catch((error: unknown) => error);
+  if (up !== true) {
     await deps.launchctl(["bootout", `gui/${deps.uid}/${label}`]).catch(() => undefined);
     await deps.removeFile(plistFile);
+    if (up !== false) throw up;
     throw new Error(`Служба защиты не запустилась за ${SERVICE_START_MS / 1000} с — журнал: ${path.join(service.dir, "service.log")}`);
   }
 
