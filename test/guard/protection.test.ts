@@ -210,6 +210,48 @@ describe("protection lifecycle", () => {
     expect(await protectionState(paths, vscode)).toBe("off");
   });
 
+  /**
+   * Measured on macOS: `launchctl bootstrap` right after `bootout` of the same label fails with «Bootstrap failed: 5:
+   * Input/output error» while the old copy is still unloading, and succeeds a moment later. «Починить» hit exactly that.
+   */
+  it("a_bootstrap_refused_while_the_old_copy_unloads_is_retried", async () => {
+    const real = deps.launchctl;
+    let refusals = 2;
+    deps.pause = async () => undefined;
+    deps.launchctl = async (args) => {
+      if (args[0] === "bootstrap" && refusals-- > 0) {
+        calls.push("bootstrap");
+        throw new Error(`Command failed: /bin/launchctl bootstrap gui/501 ${args[2]}\nBootstrap failed: 5: Input/output error`);
+      }
+      return real(args);
+    };
+    await enableProtection(paths, deps);
+    expect(calls.filter((call) => call === "bootstrap")).toHaveLength(3);
+    expect(await protectionState(paths, vscode)).toBe("on");
+  });
+
+  it("a_bootstrap_that_keeps_failing_or_fails_otherwise_is_not_retried_forever", async () => {
+    deps.pause = async () => undefined;
+    let attempts = 0;
+    deps.launchctl = async (args) => {
+      calls.push(args[0] as string);
+      if (args[0] !== "bootstrap") return;
+      attempts += 1;
+      throw new Error("Bootstrap failed: 5: Input/output error");
+    };
+    await expect(enableProtection(paths, deps)).rejects.toThrow(/Bootstrap failed: 5/);
+    expect(attempts).toBe(20);
+    attempts = 0;
+    deps.launchctl = async (args) => {
+      if (args[0] !== "bootstrap") return;
+      attempts += 1;
+      throw new Error("Bootstrap failed: 122: Path had bad ownership/permissions");
+    };
+    await expect(enableProtection(paths, deps)).rejects.toThrow(/bad ownership/);
+    expect(attempts).toBe(1);
+    expect(await protectionState(paths, vscode)).toBe("off");
+  });
+
   it("on_needs_the_running_host_to_be_sandboxed", async () => {
     await enableProtection(paths, deps);
     const listen = async (file: string): Promise<net.Server> => {
