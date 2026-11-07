@@ -390,6 +390,7 @@ export class ChatView {
     // Only a modal request (a guard, a dialog, a blocking question) takes the composer's place. A non-blocking question
     // shows its card beside a usable composer, so the person answers it from the card or just sends a message.
     const modal = this.dock.modal;
+    this.dock.element.classList.toggle("over-composer", !modal); // a gap from the input only when the composer is shown below the card
     if (modal !== this.dockShown) {
       this.dockShown = modal;
       const focused = document.activeElement;

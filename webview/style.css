@@ -1221,6 +1221,10 @@ button.copy-btn .icon {
   margin: 0 auto;
   pointer-events: auto;
 }
+/* A non-blocking question's card sits over a visible composer: give it breathing room from the input, like the popovers. */
+.ask-slot.over-composer {
+  margin-bottom: 12px;
+}
 
 .ask {
   /* Same translucent-over-blur fill as the composer box it stands in for, so the two read as one slot. */
