@@ -10,6 +10,7 @@ import {
   GatewayError,
   fetchModels,
   modelsUrl,
+  normaliseModel,
   pickProbeModel,
   probe,
   readGateways,
@@ -200,6 +201,27 @@ describe("model capabilities", () => {
       capabilities: { thinking: { supported: true }, image_input: { supported: true } },
     });
     expect(written).toEqual({ id: "claude-haiku-5-5", name: "Claude Haiku 5.5", reasoning: true, input: ["text", "image"], contextWindow: 1_000_000, maxTokens: 128_000 });
+  });
+
+  it("openais_input_modalities_say_what_the_model_takes", () => {
+    expect(normaliseModel({ id: "gpt-6-astra", input_modalities: ["text", "image"] })?.input).toEqual(["text", "image"]);
+    expect(normaliseModel({ id: "gpt-6-astra", inputModalities: ["text", "image"] })?.input).toEqual(["text", "image"]);
+    expect(normaliseModel({ id: "gpt-6-luna", input_modalities: ["text"] })?.input).toEqual(["text"]);
+    // a modality OmO has no input kind for (audio) does not hide the ones it has
+    expect(normaliseModel({ id: "gpt-6-voice", input_modalities: ["text", "image", "audio"] })?.input).toEqual(["text", "image"]);
+    expect(normaliseModel({ id: "m-odd", input_modalities: ["audio"] })?.input).toBeUndefined();
+  });
+
+  it("anthropics_image_input_flag_is_read_both_ways", () => {
+    expect(normaliseModel({ id: "claude-x", capabilities: { image_input: { supported: true } } })?.input).toEqual(["text", "image"]);
+    expect(normaliseModel({ id: "claude-x", capabilities: { image_input: { supported: false } } })?.input).toEqual(["text"]);
+  });
+
+  it("input_types_the_server_sent_replace_an_old_text_only_entry", async () => {
+    // The first hand-written catalogue marked GPT models text-only; a server that now names its types must win over it.
+    fs.mkdirSync(paths.agentDir, { recursive: true });
+    fs.writeFileSync(paths.modelsJson, JSON.stringify({ providers: { "gw-test": { models: [{ id: "gpt-6-astra", input: ["text"] }] } } }));
+    expect((await entry({ id: "gpt-6-astra", input_modalities: ["text", "image"] }))["input"]).toEqual(["text", "image"]);
   });
 
   it("a_model_that_says_it_does_not_think_says_so", async () => {
