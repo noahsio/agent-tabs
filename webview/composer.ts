@@ -249,6 +249,8 @@ export class Composer {
   /** The blocks and activity line that `progressAt` was taken from. */
   private progressFrom: Block[] = [];
   private progressActivity: string | undefined;
+  /** A tool call or a subagent is running: silence is not counted while it lasts. */
+  private inFlight = false;
   /** «Отмена» (or an answered offer): no offer again until another SILENT_MS of silence. */
   private dismissedAt = Number.NEGATIVE_INFINITY;
   /** This session's sent messages, newest first, for ↑/↓; rebuilt only when its user blocks change (not per streamed delta). */
@@ -475,6 +477,9 @@ export class Composer {
       state.blocks.some((block, index) => block !== this.progressFrom[index]);
     this.progressFrom = state.blocks;
     this.progressActivity = state.activity;
+    // A tool or a subagent at work is the model waiting on it, not the model gone quiet (its feed may stay still for long).
+    this.inFlight =
+      state.blocks.some((block) => block.kind === "tool" && block.state === "running") || state.agents.some((agent) => agent.status === "running");
     if (moved) this.progressAt = Date.now();
     if (!this.running) {
       this.stoppedAt = undefined;
@@ -504,6 +509,11 @@ export class Composer {
       // One attempt for this «Стоп»: `stoppedAt` is cleared by the answer, and nothing re-arms while it runs.
       this.showWedge("working", AUTO_WEDGE_TEXT);
       this.post({ type: "unwedge", auto: true });
+      return;
+    }
+    if (this.inFlight) {
+      this.progressAt = now; // the silence starts when the last tool or subagent is done
+      this.armWedge();
       return;
     }
     const quiet = now - Math.max(this.progressAt, this.dismissedAt);
