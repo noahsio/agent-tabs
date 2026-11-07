@@ -78,6 +78,37 @@ describe("the wedge line under the composer", () => {
     expect(posted.at(-1)).toEqual({ type: "unwedge" });
   });
 
+  /**
+   * Seen live: the main turn waited on a working subagent, the feed stayed still, and after 3 minutes the tab offered
+   * «Снять зависание» for a session that was fine. While a tool or a subagent runs the model owes nothing yet.
+   */
+  it("a_running_subagent_or_tool_is_not_silence", () => {
+    const agent = { id: "t1", role: "deep-low", description: "x", status: "running" } as unknown as ChatState["agents"][number];
+    show({ running: true, agents: [agent] });
+    vi.advanceTimersByTime(SILENT_MS * 3);
+    expect(line()).toBeUndefined();
+
+    const tool = { kind: "tool", id: "b1", name: "bash", summary: "sleep", args: {}, state: "running" } as unknown as Block;
+    show({ running: true, blocks: [tool] });
+    vi.advanceTimersByTime(SILENT_MS * 3);
+    expect(line()).toBeUndefined();
+
+    // once nothing is in flight, the silence counts from then
+    show({ running: true, blocks: [{ ...tool, state: "ok" } as Block] });
+    vi.advanceTimersByTime(SILENT_MS - 1_000);
+    expect(line()).toBeUndefined();
+    vi.advanceTimersByTime(2_000);
+    expect(line()).toBe("От модели нет ответа 3 мин");
+  });
+
+  it("stop_still_restarts_a_turn_whose_subagent_runs", () => {
+    const agent = { id: "t1", role: "deep-low", description: "x", status: "running" } as unknown as ChatState["agents"][number];
+    show({ running: true, agents: [agent] });
+    composer.noteStop();
+    vi.advanceTimersByTime(STOP_WAIT_MS);
+    expect(autos()).toHaveLength(1);
+  });
+
   it("restarts_the_session_by_itself_when_stop_goes_unanswered", () => {
     show({ running: true });
     role("stop").click();
