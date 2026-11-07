@@ -225,11 +225,13 @@ export class SessionController extends EventEmitter {
   /** A compaction of ours is in flight: the abort it sends is `"system"` too, and it is not a hang. */
   private ownCompact = false;
   /**
-   * A `"system"` abort after real work, held until the very next frame says which kind it is: a `compaction_start` makes
-   * it benign (OmO is compacting and will carry on), an end-of-turn frame (`agent_settled` / a settled lifecycle) makes
-   * it a genuine park. Holding it one frame keeps the honest line from flashing before the compaction that replaces it.
+   * A `"system"` abort held until the very next frame says which kind it is: a `compaction_start` makes it benign (OmO
+   * is compacting and will carry on), an end-of-turn frame (`agent_settled` / a settled lifecycle) makes it a genuine
+   * park. Holding it one frame keeps the honest line from flashing before the compaction that replaces it — and routes
+   * both shapes of a `"system"` abort through one decision: the instant-dead turn (`dead` set, the message never reached
+   * the model, so it can be put back) and the abort after real work (`dead` undefined, the message was answered).
    */
-  private pendingSysAbort: { key: string; work: OpenWork } | undefined;
+  private pendingSysAbort: { key: string; work: OpenWork; dead: { id: string | undefined } | undefined } | undefined;
   /** The model ladder, once the tab has given this session one. */
   private modelLadder: ModelLadder | undefined;
   /** What was sent and is not in the conversation yet, by clientMessageId: a dequeued message goes back to the composer as typed. */
@@ -694,29 +696,29 @@ export class SessionController extends EventEmitter {
       this.ownCompact = false; // the person asked for this compaction, and it aborts the turn with the same provenance
       return;
     }
-    if (dead !== undefined) {
-      this.livenessAbort(work, dead.id); // the instant-dead turn: the message never reached the model, so put it back
-      return;
-    }
-    this.sysAbortAfterWork(work);
+    this.holdSysAbort(work, dead);
   }
 
   /**
-   * A `"system"` abort read off a stall row after the turn had already done work. The tab stops claiming it works at
-   * once (the turn is over whatever the host says next), but which line to show waits one frame — `settlePendingSysAbort`
-   * decides it. A compaction already in flight is benign now; otherwise the next frame tells us.
+   * A `"system"` abort read off a stall row. The tab stops claiming it works at once (the turn is over whatever the host
+   * says next), but which kind it is waits one frame — `settlePendingSysAbort` decides it, so a compaction OmO starts at
+   * turn start (its `compaction_start` follows the abort) is never mistaken for a hang. `dead` carries the instant-dead
+   * turn when there was one: the same system abort can be OmO compacting, a genuine park, or a turn it killed at birth,
+   * and one place now tells them apart. A compaction already in flight is benign now; otherwise the next frame tells us.
    */
-  private sysAbortAfterWork(work: OpenWork): void {
+  private holdSysAbort(work: OpenWork, dead: { id: string | undefined } | undefined): void {
     this.turnStarting = false;
     this.commit({ ...this.current, running: false, activity: undefined, activityTool: undefined });
-    this.pendingSysAbort = { key: this.answering?.key ?? "turn", work };
+    this.pendingSysAbort = { key: this.answering?.key ?? dead?.id ?? "turn", work, dead };
     if (this.current.compacting) this.settlePendingSysAbort(true);
   }
 
   /**
    * Say which kind the held system-abort was, once a later frame has told us: `compacting` true means OmO is compacting
-   * and will carry the turn on by itself — a quiet, reassuring line and no recovery; false means the turn is genuinely
-   * parked — the honest line, naming what the plan still has open. Either way the tab is already usable (not «Работаю…»).
+   * and will carry the turn on by itself — a quiet, reassuring line and no recovery, whether the abort came after real
+   * work or at the turn's birth; false means the turn is genuinely stopped. A `dead` instant-dead turn then gets the
+   * unload-and-resend recovery (the message never reached the model); otherwise the honest line names what the plan
+   * still has open. Either way the tab is already usable (not «Работаю…»).
    */
   private settlePendingSysAbort(compacting: boolean): void {
     const pending = this.pendingSysAbort;
@@ -726,20 +728,23 @@ export class SessionController extends EventEmitter {
       this.noteOnce(`sysabort:${pending.key}`, "info", SYSTEM_ABORT_COMPACTING_TEXT);
       return;
     }
+    if (pending.dead !== undefined) {
+      this.livenessAbort(pending.work, pending.dead.id); // a real park of a turn killed at birth: put the message back
+      return;
+    }
     const left = openWorkText(pending.work);
     this.noteOnce(`sysabort:${pending.key}`, "warn", left === undefined ? SYSTEM_ABORT_TEXT : `${SYSTEM_ABORT_TEXT} (${left})`);
   }
 
   /**
-   * OmO killed the turn itself a millisecond after it started. The turn ends here whatever the host says next (the tab
-   * must never be left claiming it is working), the feed hears it plainly once, and the message gets one automatic way
-   * back: the session is unloaded and reopened — the only reset of this state a client can reach — and the message is
-   * sent again under a new id. Bounded by `answering.recovered` (once per message) and by the auto-unwedge ration
-   * (`src/sessions/autoUnwedge.ts`, one automatic restart per session per cooldown, shared with «Снять зависание»).
+   * OmO killed the turn itself a millisecond after it started, and the held abort has now settled as a genuine park (no
+   * compaction followed). The tab already stopped claiming it works when the abort was held (`holdSysAbort`); here the
+   * feed hears it plainly once, and the message gets one automatic way back: the session is unloaded and reopened — the
+   * only reset of this state a client can reach — and the message is sent again under a new id. Bounded by
+   * `answering.recovered` (once per message) and by the auto-unwedge ration (`src/sessions/autoUnwedge.ts`, one
+   * automatic restart per session per cooldown, shared with «Снять зависание»).
    */
   private livenessAbort(work: OpenWork, deadId: string | undefined): void {
-    this.turnStarting = false;
-    this.commit({ ...this.current, running: false, activity: undefined, activityTool: undefined });
     const answering = this.answering;
     const key = answering?.key ?? deadId ?? "turn";
     const left = openWorkText(work);

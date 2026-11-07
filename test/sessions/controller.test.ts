@@ -1347,6 +1347,13 @@ describe("SessionController", () => {
         },
       });
 
+    /**
+     * The lifecycle frame a genuine stalled park settles into, once the abort has been held one frame and no compaction
+     * followed: the session waits on a human for a stalled run, so `lifecycleRunning` reads it as not running. It is the
+     * frame the after-work park uses too — the one place the held system-abort learns it is a park, not a compaction.
+     */
+    const parked = (): Frame => frame({ type: "session_lifecycle", lifecycle: { state: "waiting_human", waitingOn: { human: [{ kind: "stalled" }] } } });
+
     function notices(): string[] {
       return (controller as SessionController).state.blocks.flatMap((block) => (block.kind === "notice" ? [block.text] : []));
     }
@@ -1362,6 +1369,7 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "agent_start" }));
       daemon.push(deadTurn());
       daemon.push(stall());
+      daemon.push(parked()); // no compaction followed: the held abort settles as a genuine park
       await settle(() => notices().length > 0);
 
       expect(notices()[0]).toBe("OmO оборвал ход сам, сразу после старта — ответа на это сообщение не будет (у сессии осталась незакрытая цель)");
@@ -1374,6 +1382,7 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "agent_start" }));
       daemon.push(deadTurn());
       daemon.push(stall({ kind: "none" }));
+      daemon.push(parked());
       await settle(() => ofType("prompt").length === 2);
 
       expect(ofType("unload_session")).toHaveLength(1);
@@ -1390,6 +1399,7 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "agent_start" }));
       daemon.push(deadTurn());
       daemon.push(stall({ kind: "none" }));
+      daemon.push(parked());
       await settle(() => ofType("prompt").length === 2);
       return String((ofType("prompt")[1] as Frame)["clientMessageId"]);
     }
@@ -1449,11 +1459,13 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "agent_start" }));
       daemon.push(deadTurn());
       daemon.push(stall());
+      daemon.push(parked());
       await settle(() => ofType("prompt").length === 2);
       // the resend dies exactly the same way
       daemon.push(frame({ type: "agent_start" }));
       daemon.push(deadTurn());
       daemon.push(stall());
+      daemon.push(parked());
       await new Promise((resolve) => setTimeout(resolve, 200));
 
       expect(ofType("unload_session")).toHaveLength(1);
@@ -1468,6 +1480,7 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "agent_start" }));
       daemon.push(deadTurn());
       daemon.push(stall());
+      daemon.push(parked());
       await settle(() => notices().length > 1);
 
       expect(ofType("unload_session")).toHaveLength(0);
@@ -1482,6 +1495,7 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "agent_start" }));
       daemon.push(deadTurn());
       daemon.push(stall());
+      daemon.push(parked());
       await settle(() => notices().length > 1);
 
       expect(ofType("prompt")).toHaveLength(1); // without the reopen a resend would die the same way
@@ -1515,6 +1529,7 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "agent_start" })); // OmO carries the goal on by itself
       daemon.push(deadTurn());
       daemon.push(stall()); // active-goal
+      daemon.push(parked());
       await settle(() => notices().length > 0);
       await new Promise((resolve) => setTimeout(resolve, 150));
 
@@ -1535,6 +1550,7 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "agent_start" }));
       daemon.push(deadTurn());
       daemon.push(stall({ kind: "none" }));
+      daemon.push(parked());
       await settle(() => ofType("prompt").length === 3);
 
       const messages = (ofType("prompt") as Frame[]).map((request) => request["message"]);
@@ -1622,6 +1638,49 @@ describe("SessionController", () => {
       daemon.push(frame({ type: "compaction_end" }));
       daemon.push(frame({ type: "agent_start" }));
       await settle(() => controller?.state.running === true);
+    });
+
+    /**
+     * The person's own bug: OmO aborts the turn at its very birth to compact (an instant-dead message, zero work), and
+     * `compaction_start` follows the stall row. The instant-dead path must defer to the compaction exactly as the
+     * after-work path does — the calm line, no «ответа не будет / отправьте заново», and no unload/resend. The tab is
+     * compacting, not wedged, and resumes on its own.
+     */
+    it("an_instant_abort_to_compact_reassures_and_never_resends", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn()); // the turn is killed at birth: instant-dead, zero work
+      daemon.push(stall()); // OmO's own stall row names the abort "system"
+      daemon.push(frame({ type: "compaction_start", reason: "overflow" })); // ...then it compacts and will carry on
+      await settle(() => notices().length > 0);
+
+      expect(notices()).toContain("OmO сжимает контекст и продолжит сам");
+      expect(notices()).not.toContain("OmO оборвал ход сам, сразу после старта — ответа на это сообщение не будет (у сессии осталась незакрытая цель)");
+      expect(notices().some((text) => text.startsWith("OmO оборвал ход сам"))).toBe(false);
+      expect(notices()).not.toContain("Отправьте сообщение заново — а если повторится, перезапустите сессию кнопкой «Снять зависание»");
+      expect(ofType("unload_session")).toHaveLength(0); // compaction resumes on its own — restarting the session is wrong
+      expect(ofType("prompt")).toHaveLength(1); // the message is never put back in
+      // the turn resumes on its own once compaction ends
+      daemon.push(frame({ type: "compaction_end" }));
+      daemon.push(frame({ type: "agent_start" }));
+      await settle(() => controller?.state.running === true);
+    });
+
+    it("an_instant_abort_reassures_when_a_compaction_was_already_in_flight", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(frame({ type: "compaction_start", reason: "overflow" })); // compaction began before the stall row
+      await settle(() => controller?.state.compacting === true);
+      daemon.push(deadTurn());
+      daemon.push(stall());
+      await settle(() => notices().length > 0);
+
+      expect(notices()).toContain("OmO сжимает контекст и продолжит сам");
+      expect(notices().some((text) => text.startsWith("OmO оборвал ход сам"))).toBe(false);
+      expect(ofType("unload_session")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(1);
     });
 
     it("a_normal_completed_turn_shows_no_stopped_line", async () => {
