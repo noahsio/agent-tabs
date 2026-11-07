@@ -166,10 +166,21 @@ function reasoningOf(entry: Record<string, unknown>, levels: string[] | undefine
   return flags.includes(false) ? false : undefined;
 }
 
+/**
+ * What the model takes, from OmO's own `input`, OpenAI's `input_modalities` or Anthropic's `image_input` flag. Any of
+ * them is the server's word and replaces whatever the catalogue held (an old hand-written `["text"]` included); none of
+ * them is silence, left to OmO. OpenAI may list a modality OmO has no input kind for (audio): it is dropped, not fatal.
+ */
 function inputOf(entry: Record<string, unknown>): string[] | undefined {
   const listed = names(entry["input"]);
   if (listed !== undefined) return listed.every((kind) => INPUT_KINDS.includes(kind)) ? listed : undefined;
-  return capability(entry, "image_input")?.["supported"] === true ? ["text", "image"] : undefined;
+  const modalities = first([names(entry["input_modalities"]), names(entry["inputModalities"])]);
+  if (modalities !== undefined) {
+    const known = modalities.filter((kind) => INPUT_KINDS.includes(kind));
+    return known.includes("text") ? known : undefined;
+  }
+  const image = flag(capability(entry, "image_input")?.["supported"]);
+  return image === undefined ? undefined : image ? ["text", "image"] : ["text"];
 }
 
 /** One listed model in OmO's own names. Both spellings are read (snake_case and camelCase); junk reads as absent. */
