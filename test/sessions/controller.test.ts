@@ -1535,7 +1535,74 @@ describe("SessionController", () => {
 
       expect(ofType("unload_session")).toHaveLength(0);
       expect(ofType("prompt")).toHaveLength(1); // the earlier, delivered message is never resent
-      expect(notices()).toContain("Отправьте сообщение заново — а если повторится, перезапустите сессию кнопкой «Снять зависание»");
+      // it was answered: no «right after start, no answer to this message», no advice to send it again
+      expect(notices()).toEqual(["OmO остановил ход сам (у сессии осталась незакрытая цель)"]);
+    });
+
+    /**
+     * Seen live (chain_discover_platform, 2026-11-07 18:41Z): mid-turn, after a tool result, OmO's next request died in
+     * 2 ms with a `"system"` stall row. The tab said «right after start — no answer to this message» and «send it again»
+     * about a message the agent had been working on for minutes.
+     */
+    it("an_instant_abort_after_tool_work_is_a_plain_stop_not_a_dead_message", async () => {
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("разбери кошельки", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(
+        frame({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }], stopReason: "toolUse", timing: { requestedAt: 1, endedAt: 28_000 } },
+        }),
+      );
+      daemon.push(deadTurn()); // the request after the tool result, killed at birth
+      daemon.push(stall());
+      daemon.push(parked());
+      await settle(() => notices().length > 0);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      expect(notices()).toEqual(["OmO остановил ход сам (у сессии осталась незакрытая цель)"]);
+      expect(ofType("unload_session")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(1);
+      expect(controller.state.running).toBe(false);
+    });
+
+    /**
+     * Seen live: «продолжай» died at birth, the recovery reopened the session, the reopen resumed the stopped goal (the
+     * agent carried on by itself, with the message already in its history) — and the message was sent again on top, so
+     * it showed twice and reached the agent twice.
+     */
+    it("a_reopen_that_resumed_the_goal_does_not_send_the_message_again", async () => {
+      let opens = 0;
+      daemon.on("open_session", () => {
+        opens += 1;
+        if (opens === 1) return { data: openData("rpc-1") };
+        return {
+          data: openData("rpc-1", { lifecycle: { state: "waiting_human", waitingOn: { human: [{ kind: "goal_blocked", requestId: "goal:1", revision: 1 }] } } }),
+          frames: [
+            frame({
+              type: "extension_ui_request",
+              id: "n1",
+              method: "notify",
+              notifyType: "info",
+              message: "Goal remains blocked after session resume. Resume it explicitly after the session finishes loading.",
+            }),
+          ],
+        };
+      });
+      daemon.on("prompt", (request) =>
+        request["message"] === "/goal resume" ? { data: { disposition: "handled" } } : { data: { disposition: "started", clientMessageId: request["clientMessageId"] } },
+      );
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("продолжай", "auto", [], "m-own");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(deadTurn());
+      daemon.push(stall());
+      daemon.push(parked());
+      await settle(() => notices().some((text) => text.startsWith("Перезапустил сессию")));
+
+      expect(ofType("unload_session")).toHaveLength(1);
+      expect(ofType("prompt").filter((request) => request["message"] === "продолжай")).toHaveLength(1); // never a second copy
+      expect(notices()).toContain("Перезапустил сессию — агент продолжает по цели, ваше сообщение у него уже есть");
     });
 
     it("resends_only_the_newly_aborted_message_after_an_earlier_one_was_delivered", async () => {

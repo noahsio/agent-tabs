@@ -105,6 +105,7 @@ const REOPEN_STORM_TEXT = "Сессия раз за разом выгружае�
  */
 const LIVENESS_ABORT_TEXT = "OmO оборвал ход сам, сразу после старта — ответа на это сообщение не будет";
 const LIVENESS_RESENT_TEXT = "Перезапустил сессию и отправил сообщение заново";
+const LIVENESS_GOAL_TEXT = "Перезапустил сессию — агент продолжает по цели, ваше сообщение у него уже есть";
 const LIVENESS_MANUAL_TEXT = "Отправьте сообщение заново — а если повторится, перезапустите сессию кнопкой «Снять зависание»";
 /** Why the automatic restart happened, for the «Agent Tabs» channel. */
 const LIVENESS_UNWEDGE_WHY = "OmO оборвал ход сам сразу после старта";
@@ -204,6 +205,10 @@ export class SessionController extends EventEmitter {
   private turnStarting = false;
   /** A `/goal resume` of this tab's own is in flight: one at a time, and its goal card is OmO's echo, not news. */
   private goalResuming = false;
+  /** How many `/goal resume`s of this tab's own OmO accepted: a liveness recovery reads whether its reopen made one. */
+  private goalsResumed = 0;
+  /** The latest `/goal resume` of this tab's own, settled or not: a reopen starts it before it hands control back. */
+  private goalResumeRun: Promise<void> = Promise.resolve();
   /**
    * The message a turn of ours is answering, and whether its one automatic recovery from a liveness abort is spent.
    * `key` is the person's own message id — a recovery's resend inherits it, so its own death cannot buy a second try.
@@ -653,6 +658,7 @@ export class SessionController extends EventEmitter {
       const data = await this.request<Frame>("prompt", { message: GOAL_RESUME_COMMAND, clientMessageId: randomUUID() });
       if (this.released || this.handle !== handle) return;
       if (data?.["disposition"] !== "handled") throw new Error(`OmO не выполнил «${GOAL_RESUME_COMMAND}»`);
+      this.goalsResumed += 1;
       this.noteOnce("goal-resumed", "info", GOAL_RESUMED_TEXT);
     } catch (error) {
       // A turn is running after all: the goal continues with it, and the person is not waiting on anything.
@@ -728,7 +734,11 @@ export class SessionController extends EventEmitter {
       this.noteOnce(`sysabort:${pending.key}`, "info", SYSTEM_ABORT_COMPACTING_TEXT);
       return;
     }
-    if (pending.dead !== undefined) {
+    // Killed at birth *and* the message it carried never got an answer: only then is it «no answer to this message».
+    // The same 2 ms death after a tool result, or in a turn OmO started on its own, is a plain stop of answered work.
+    const answering = this.answering;
+    const unanswered = answering !== undefined && !answering.delivered && (pending.dead?.id === undefined || pending.dead.id === answering.id);
+    if (pending.dead !== undefined && unanswered) {
       this.livenessAbort(pending.work, pending.dead.id); // a real park of a turn killed at birth: put the message back
       return;
     }
@@ -769,11 +779,20 @@ export class SessionController extends EventEmitter {
   /** The way back, in order: unload and reopen the session, then put the message in again under a new id. */
   private async recoverLivenessAbort(answering: { key: string; text: string; images: OutgoingImage[] }): Promise<void> {
     const { key, text, images } = answering;
+    const goalsBefore = this.goalsResumed;
     const unwedged = await this.unwedgeSession(LIVENESS_UNWEDGE_WHY);
     if (this.released) return;
     if (unwedged.outcome !== "unloaded") {
       // Without the reopen the state that killed the turn is still there: a resend would die the same way.
       this.noteOnce(`liveness-fix:${key}`, "warn", `${unwedged.reason} — ${LIVENESS_MANUAL_TEXT}`);
+      return;
+    }
+    await this.goalResumeRun; // the reopen may have just asked OmO to resume the goal: hear its answer first
+    if (this.released) return;
+    if (this.goalsResumed !== goalsBefore) {
+      // The reopen resumed the goal: the agent carries on by itself with the message already in its history, so a
+      // resend would show it twice and hand it to the agent twice.
+      this.noteOnce(`liveness-fix:${key}`, "info", LIVENESS_GOAL_TEXT);
       return;
     }
     const id = randomUUID();
@@ -1363,7 +1382,7 @@ export class SessionController extends EventEmitter {
       return;
     }
     if (stoppedGoalNotice(frame) !== undefined) {
-      void this.resumeStoppedGoal();
+      if (!this.goalResuming) this.goalResumeRun = this.resumeStoppedGoal();
       return; // the English line never reaches the feed; the Russian one comes from the resume
     }
     if (this.goalResuming && goalCardNotice(frame)) return; // our own command's echo, in English, that nobody asked for
