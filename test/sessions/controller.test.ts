@@ -582,6 +582,11 @@ describe("SessionController", () => {
     expect(own).toMatchObject({ uiRequestId: "q2", answers: { a: { selected: ["red", "blue"], text: "own words" } }, comment: "" });
     expect("value" in own || "confirmed" in own).toBe(false);
     expect(controller.state.dialogs).toEqual([]);
+    // «Отложить»: no answer, the comment alone — OmO settles it `comment-submitted` and the model reads the words
+    daemon.push(frame({ type: "extension_ui_request", id: "q3", method: "question", questions: [{ id: "a", question: "Pick?" }] }));
+    await settle(() => controller?.state.dialogs.length === 1);
+    await controller.answer("q3", { answers: {}, comment: "отложено" });
+    expect(ofType("extension_ui_response")[2]).toMatchObject({ uiRequestId: "q3", answers: {}, comment: "отложено" });
     expect(await controller.models()).toEqual([{ provider: "gw", id: "m1", name: "M1" }]);
     controller.release();
     await settle(() => ofType("release_attachment").length === 1);

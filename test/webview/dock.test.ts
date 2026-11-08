@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRow, Block, ChatState, Dialog } from "../../src/chat/model";
 import { applyEntries, initialState } from "../../src/chat/reducer";
 import type { PendingView } from "../../src/guard/admin";
-import type { WebviewMessage } from "../../src/panel/protocol";
+import { DEFER_QUESTION_COMMENT, type WebviewMessage } from "../../src/panel/protocol";
 import { ChatView } from "../../webview/render";
 import { text } from "../helpers/composer";
 
@@ -528,6 +528,33 @@ describe("docked questions", () => {
     expect(answers()).toEqual([{ type: "answer", dialogId: "q", answer: { answers: { q1: { selected: ["TTL и запасной кэш"] } } } }]);
   });
 
+  it("a_question_can_be_deferred_from_its_card", () => {
+    dialogs({ id: "q", method: "question", title: CACHE.question, questions: [CACHE] });
+    const defer = [...root.querySelectorAll<HTMLButtonElement>(".ask .foot button")].find((item) => item.textContent === "Отложить");
+    expect(defer).toBeDefined();
+    defer?.click();
+    expect(answers()).toEqual([{ type: "answer", dialogId: "q", answer: { answers: {}, comment: DEFER_QUESTION_COMMENT } }]);
+  });
+
+  it("a_set_of_questions_is_deferred_as_a_whole", () => {
+    dialogs({ id: "q", method: "question", title: CACHE.question, questions: [CACHE, CHECKS] });
+    [...root.querySelectorAll<HTMLButtonElement>(".ask .foot button")].find((item) => item.textContent === "Отложить")?.click();
+    expect(answers()).toEqual([{ type: "answer", dialogId: "q", answer: { answers: {}, comment: DEFER_QUESTION_COMMENT } }]);
+  });
+
+  it("a_question_shows_how_long_it_still_waits_and_counts_down", () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    dialogs({ id: "q", method: "question", title: CACHE.question, questions: [CACHE], deadlineAt: Date.now() + 252_000 });
+    const left = (): string | null | undefined => panel()?.querySelector('[data-role="ask-deadline"]')?.textContent;
+    expect(left()).toBe("ждёт ответа 4:12, потом агент продолжит сам");
+    vi.advanceTimersByTime(3_000);
+    expect(left()).toBe("ждёт ответа 4:09, потом агент продолжит сам");
+    vi.advanceTimersByTime(300_000);
+    expect(left()).toBe("время на ответ вышло — агент продолжает сам");
+    dialogs({ id: "q2", method: "question", title: CACHE.question, questions: [CACHE] }); // no deadline: nothing to count
+    expect(left()).toBeUndefined();
+  });
+
   it("a_non_blocking_question_can_be_declined_from_its_card", () => {
     show({ running: false, dialogs: [{ id: "q", method: "question", title: CACHE.question, questions: [CACHE], blocking: false }] });
     key("Escape");
@@ -565,11 +592,11 @@ describe("docked questions", () => {
     expect(ask().querySelector(".ask-title")?.textContent).toBe("Вопросы агента");
     expect(ask().querySelector(".who")?.textContent).toBe("Вопрос 1 из 2");
     expect([...ask().querySelectorAll(".qtab")].map((tab) => tab.textContent)).toEqual(["Кэш", "Проверки"]);
-    expect([...ask().querySelectorAll(".foot button")].map((button) => button.textContent)).toEqual(["Далее"]);
+    expect([...ask().querySelectorAll(".foot button")].map((button) => button.textContent)).toEqual(["Отложить", "Далее"]);
     key("1"); // a single-select question moves on once answered
     expect(ask().querySelector(".who")?.textContent).toBe("Вопрос 2 из 2");
     expect(ask().querySelector(".qtab")?.querySelector("svg")).not.toBeNull(); // the answered one keeps its check
-    expect([...ask().querySelectorAll(".foot button")].map((button) => button.textContent)).toEqual(["Назад", "Ответить"]);
+    expect([...ask().querySelectorAll(".foot button")].map((button) => button.textContent)).toEqual(["Отложить", "Назад", "Ответить"]);
     expect(ask().querySelector<HTMLButtonElement>(".foot button.primary")?.disabled).toBe(false); // the first is answered
     expect(ask().querySelector(".hint")?.textContent).toBe("Пробел отметить · Enter ответить · ← к вопросу 1");
     key("ArrowLeft");

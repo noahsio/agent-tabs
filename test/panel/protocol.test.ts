@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isExternalLink, parseWebviewMessage, rejectedSendId } from "../../src/panel/protocol";
+import { DEFER_QUESTION_COMMENT, isExternalLink, parseWebviewMessage, rejectedSendId } from "../../src/panel/protocol";
 
 describe("parseWebviewMessage", () => {
   it("accepts_well_formed_messages", () => {
@@ -12,6 +12,13 @@ describe("parseWebviewMessage", () => {
       dialogId: "d",
       answer: { answers: { q1: { selected: ["a"] } } },
     });
+  });
+
+  it("a_deferred_question_is_answered_with_a_comment_alone", () => {
+    const comment = DEFER_QUESTION_COMMENT;
+    expect(parseWebviewMessage({ type: "answer", dialogId: "d", answer: { answers: {}, comment } })).toEqual({ type: "answer", dialogId: "d", answer: { answers: {}, comment } });
+    expect(parseWebviewMessage({ type: "answer", dialogId: "d", answer: { answers: {}, comment: 7 } })).toEqual({ type: "answer", dialogId: "d", answer: { answers: {} } });
+    expect(parseWebviewMessage({ type: "answer", dialogId: "d", answer: { answers: {}, comment: "x".repeat(2001) } })).toBeUndefined();
   });
 
   it("an_answer_to_a_question_set_passes_through_as_omo_reads_it", () => {
