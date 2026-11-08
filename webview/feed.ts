@@ -388,6 +388,15 @@ export class Feed {
     this.feedTopPx = parseFloat(getComputedStyle(root).getPropertyValue("--feed-top")) || 8;
     root.replaceChildren(this.list, ...(options.tail ?? []), this.indicator, this.toBottomSlot);
     root.addEventListener("click", (event) => this.onClick(event));
+    root.addEventListener("contextmenu", (event) => {
+      const link = (event.target as Element | null)?.closest("a, [data-open-file]");
+      const selection = window.getSelection();
+      if (link === null || link === undefined || selection === null || !selection.isCollapsed) return;
+      const range = document.createRange();
+      range.selectNodeContents(link);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
     // Sticky bubbles ride the scroll natively; the handler flags which sent bubble is pinned and shows the to-bottom control.
     root.addEventListener("scroll", () => {
       if (this.scrollFrame !== undefined) return;

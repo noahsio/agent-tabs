@@ -48,16 +48,18 @@ type Attachment = { key: string; name: string; placed: boolean } & (
   | { status: "error"; reason: string; image?: OutgoingImage; size?: Size }
 );
 type Ready = Extract<Attachment, { status: "ready" }>;
+/** The text offset and image index of a generated marker, excluding marker-like text the person typed. */
+type Marker = { offset: number; image: number };
 /** A message the host has not confirmed (or refused): the text as it went out (labels and all), its pictures in that order, and what was posted. */
-type Unconfirmed = { text: string; images: Ready[]; message: SendMessage };
+type Unconfirmed = { text: string; images: Ready[]; markers: Marker[]; message: SendMessage };
 
 /** Where a picture lands: at the caret as a pill, or on the shelf above the input when there is no caret to aim at. */
 export type Spot = "caret" | "shelf";
 
 /** A message this session already sent, as ↑ gives it back. */
-type Sent = { text: string; images: ImageRef[] };
+type Sent = { text: string; images: ImageRef[]; markers?: Marker[] };
 /** What the field holds, taken apart so it can be put back: a label per pill and the record each label points at. */
-type Recalled = { text: string; images: Attachment[] };
+type Recalled = { text: string; images: Attachment[]; markers?: Marker[] };
 
 /** The label that stands for a picture in the text that goes to the agent, and the pattern that reads it back. */
 export function imageLabel(index: number): string {
@@ -239,6 +241,9 @@ export class Composer {
   private readonly unconfirmed = new Map<string, Unconfirmed>();
   /** What the host refused, by send id, until it is sent again («Повторить») or dropped («Убрать»). */
   private readonly refused = new Map<string, Unconfirmed>();
+  /** Exact generated markers distinguish our chips from identical text the person typed. No image bytes are kept. */
+  private readonly sentLayouts = new Map<string, { text: string; markers: Marker[] }>();
+  private readonly preview = el("div", { class: "attachment-preview", "aria-hidden": "true" });
   private nextKey = 0;
   private dragDepth = 0;
   /** Whether a turn is running, as the host last said: the send button's words and the wedge watch follow it. */
@@ -279,9 +284,11 @@ export class Composer {
     });
     this.input.addEventListener("paste", (event) => this.onPaste(event));
     this.input.addEventListener("click", (event) => {
-      const cross = (event.target as Element | null)?.closest<HTMLElement>('[data-role="pill-remove"]');
-      const key = cross?.closest<HTMLElement>("[data-key]")?.dataset["key"];
-      if (key !== undefined) this.remove(key);
+      const target = event.target as Element | null;
+      const key = target?.closest<HTMLElement>(".att[data-key]")?.dataset["key"];
+      if (key === undefined) return;
+      if (target?.closest('[data-role="pill-remove"]') !== null) this.remove(key);
+      else this.openImage(key);
     });
     // ⌘V with the caret somewhere else (the feed, nothing at all) still attaches: the shelf takes what has no position.
     document.addEventListener("paste", (event) => {
@@ -384,7 +391,23 @@ export class Composer {
     );
     root.classList.add("composer");
     this.backgroundLine.hidden = true;
-    root.replaceChildren(this.box, this.backgroundLine, this.ladderLine, this.wedge);
+    this.preview.hidden = true;
+    root.replaceChildren(this.box, this.backgroundLine, this.ladderLine, this.wedge, this.preview);
+    root.addEventListener("mouseover", (event) => {
+      const anchor = (event.target as Element | null)?.closest<HTMLElement>(".att[data-key], .thumb-view[data-key]");
+      if (anchor !== null && anchor !== undefined && !anchor.contains(event.relatedTarget as Node | null)) this.previewImage(anchor);
+    });
+    root.addEventListener("mouseout", (event) => {
+      const anchor = (event.target as Element | null)?.closest(".att[data-key], .thumb-view[data-key]");
+      if (anchor !== null && anchor !== undefined && !anchor.contains(event.relatedTarget as Node | null)) this.preview.hidden = true;
+    });
+    root.addEventListener("focusin", (event) => {
+      const anchor = (event.target as Element | null)?.closest<HTMLElement>(".thumb-view[data-key]");
+      if (anchor !== null && anchor !== undefined) this.previewImage(anchor);
+    });
+    root.addEventListener("focusout", () => { this.preview.hidden = true; });
+    root.addEventListener("keydown", () => { this.preview.hidden = true; });
+    this.input.addEventListener("scroll", () => { this.preview.hidden = true; });
     this.renderAttachments();
   }
 
@@ -622,7 +645,7 @@ export class Composer {
     this.unconfirmed.delete(id);
     if (ok || pending === undefined) return;
     this.refused.set(id, pending);
-    this.place(pending.text, pending.images);
+    this.place(pending.text, pending.images, pending.markers);
   }
 
   /**
@@ -783,14 +806,33 @@ export class Composer {
   }
 
   private openImage(key: string): void {
-    const ready = this.attachments.filter(isReady);
+    const ready = this.ordered().filter(isReady);
+    const index = ready.findIndex((attachment) => attachment.key === key);
+    if (index < 0) return;
+    this.preview.hidden = true;
     this.options.onOpenImage?.(
       ready.map((attachment) => ({ id: attachment.key, dataUrl: dataUrl(attachment.image) })),
-      ready.findIndex((attachment) => attachment.key === key),
+      index,
     );
   }
 
+  private previewImage(anchor: HTMLElement): void {
+    const attachment = this.attachments.find((item) => item.key === anchor.dataset["key"]);
+    if (attachment?.status !== "ready") return;
+    this.preview.replaceChildren(el("img", {
+      src: dataUrl(attachment.image), alt: "", width: String(attachment.size.width), height: String(attachment.size.height),
+    }));
+    this.preview.hidden = false;
+    const gap = 8;
+    const bounds = anchor.getBoundingClientRect();
+    const { width, height } = this.preview.getBoundingClientRect();
+    const top = bounds.top >= height + gap ? bounds.top - height - gap : bounds.bottom + gap;
+    this.preview.style.left = `${Math.max(gap, Math.min(bounds.left, window.innerWidth - width - gap))}px`;
+    this.preview.style.top = `${Math.max(gap, Math.min(top, window.innerHeight - height - gap))}px`;
+  }
+
   private renderAttachments(): void {
+    this.preview.hidden = true;
     this.refreshSend();
     const shelf = this.attachments.filter((attachment) => !attachment.placed);
     this.thumbs.hidden = shelf.length === 0;
@@ -841,7 +883,7 @@ export class Composer {
     let body: HTMLElement;
     if (attachment.status === "ready") {
       const preview = el("span", { class: "tn" }, el("img", { src: dataUrl(attachment.image), alt: "" }));
-      body = button(preview, { class: "thumb-view", "data-role": "thumb-view", "aria-label": `Открыть: ${attachment.name}` }, () => this.openImage(attachment.key));
+      body = button(preview, { class: "thumb-view", "data-role": "thumb-view", "data-key": attachment.key, "aria-label": `Открыть: ${attachment.name}` }, () => this.openImage(attachment.key));
       body.append(name, el("span", { class: "dim", "data-role": "thumb-size" }, `${attachment.size.width}×${attachment.size.height}`));
     } else {
       const mark = el("span", { class: "thumb-mark", "aria-hidden": "true" }, attachment.status === "error" ? "!" : "…");
@@ -1055,7 +1097,7 @@ export class Composer {
     const text = mode === undefined ? typed : `${mode} ${typed}`;
     const images = ready.map((attachment) => attachment.image);
     const message: SendMessage = { type: "send", id: crypto.randomUUID(), text, mode: queue ? "followUp" : "auto", ...(images.length > 0 ? { images } : {}) };
-    this.dispatch({ text: typed, images: ready, message });
+    this.dispatch({ text: typed, images: ready, markers: going.markers ?? [], message });
     this.field.value = "";
     this.recalled = undefined;
     this.attachments = [];
@@ -1074,6 +1116,7 @@ export class Composer {
     const keys = this.field.pills().map((node) => node.dataset["key"] ?? "");
     const byKey = new Map(this.attachments.map((attachment) => [attachment.key, attachment]));
     const images: Attachment[] = [];
+    const markers: Marker[] = [];
     let text = "";
     let seen = 0;
     for (const character of this.field.value) {
@@ -1084,10 +1127,11 @@ export class Composer {
       const attachment = byKey.get(keys[seen++] ?? "");
       if (attachment === undefined || (going && !isReady(attachment))) continue;
       images.push(attachment);
+      markers.push({ offset: text.length, image: images.length - 1 });
       text += imageLabel(images.length);
     }
     const shelf = this.attachments.filter((attachment) => !attachment.placed).filter((attachment) => !going || isReady(attachment));
-    return { text, images: [...images, ...shelf] };
+    return { text, images: [...images, ...shelf], markers };
   }
 
   /**
@@ -1095,29 +1139,42 @@ export class Composer {
    * whatever is already typed under it. Pictures past the last label (the shelf's, which never had a place) go back to
    * the shelf.
    */
-  private place(text: string, images: Attachment[]): void {
+  private place(text: string, images: Attachment[], markers?: Marker[]): void {
     const had = this.field.value !== ""; // what is already there stays, under the message coming back
     this.field.setSelectionRange(0);
+    const nodes: Node[] = [];
     const used = new Set<number>();
     let at = 0;
-    LABEL.lastIndex = 0;
-    for (let match = LABEL.exec(text); match !== null; match = LABEL.exec(text)) {
-      const image = images[Number(match[1]) - 1];
-      if (image === undefined) continue; // a label the person typed themselves: it stays text
-      this.field.insertText(text.slice(at, match.index));
-      this.add({ ...image, placed: false }, "caret"); // `add` places the pill and keeps the record
-      used.add(Number(match[1]) - 1);
-      at = match.index + match[0].length;
+    const positions = markers ?? [...text.matchAll(LABEL)].map((match) => ({ offset: match.index, image: Number(match[1]) - 1 }));
+    const placed: Attachment[] = [];
+    for (const marker of positions) {
+      const image = images[marker.image];
+      if (image === undefined || used.has(marker.image)) continue;
+      const record = { ...image, placed: true };
+      nodes.push(document.createTextNode(text.slice(at, marker.offset)));
+      const pill = this.pillFor(record);
+      pill.dataset["label"] = imageLabel(marker.image + 1);
+      nodes.push(pill);
+      placed.push(record);
+      used.add(marker.image);
+      at = marker.offset + imageLabel(marker.image + 1).length;
     }
-    this.field.insertText(text.slice(at) + (had ? "\n" : ""));
+    nodes.push(document.createTextNode(text.slice(at) + (had ? "\n" : "")));
     // Pictures that never had a place go back on the shelf, and before anything the person has attached since.
     const shelf = images.filter((_, index) => !used.has(index)).map((image) => ({ ...image, placed: false }));
-    this.attachments = [...shelf, ...this.attachments];
+    this.attachments = [...placed, ...shelf, ...this.attachments];
+    // Restore in one DOM insertion: repeated execCommand edits repaint pills and move the native caret.
+    this.field.insertNodes(nodes);
     this.afterEdit();
   }
 
   private dispatch(pending: Unconfirmed): void {
     this.unconfirmed.set(pending.message.id, pending);
+    const prefix = pending.message.text.length - pending.text.length;
+    this.sentLayouts.set(pending.message.id, {
+      text: pending.message.text,
+      markers: pending.markers.map((marker) => ({ ...marker, offset: marker.offset + prefix })),
+    });
     this.post(pending.message);
     this.options.onSend?.(pending.message);
   }
@@ -1128,7 +1185,11 @@ export class Composer {
     if (users.length === this.historyFrom.length && users.every((block, index) => block === this.historyFrom[index])) return;
     this.historyFrom = users;
     this.history = users
-      .flatMap((block) => (block.kind === "user" && block.text.trim() !== "" ? [{ text: block.text, images: block.images ?? [] }] : []))
+      .flatMap((block): Sent[] => {
+        if (block.kind !== "user" || block.text.trim() === "") return [];
+        const layout = this.sentLayouts.get(block.id);
+        return [{ text: block.text, images: block.images ?? [], ...(layout?.text === block.text ? { markers: layout.markers } : {}) }];
+      })
       .reverse();
   }
 
@@ -1145,14 +1206,14 @@ export class Composer {
     });
   }
 
-  /** The host's answer for a recalled picture: an empty answer means it has none left, and the chip says so. */
+  /** The host's answer for a recalled picture: an empty answer keeps its marker as ordinary text. */
   image(id: string, dataUrl: string): void {
     const key = this.awaiting.get(id);
     if (key === undefined) return;
     this.awaiting.delete(id);
     const match = /^data:([^;,]+);base64,(.*)$/s.exec(dataUrl);
     if (match === null) {
-      this.settle(key, { ok: false, reason: GONE });
+      this.missingImage(key);
       return;
     }
     const [, mimeType, data] = match as unknown as [string, string, string];
@@ -1164,7 +1225,19 @@ export class Composer {
         this.settle(key, { ok: true, image: { mimeType, data, ...(name !== undefined ? { name } : {}) }, width: bitmap.width, height: bitmap.height });
         bitmap.close?.();
       })
-      .catch(() => this.settle(key, { ok: false, reason: GONE }));
+      .catch(() => this.missingImage(key));
+  }
+
+  private missingImage(key: string): void {
+    const attachment = this.attachments.find((item) => item.key === key);
+    if (attachment === undefined) return; // the person has already left this recall or removed the image
+    const pill = this.field.pill(key);
+    if (pill !== undefined) pill.replaceWith(document.createTextNode(pill.dataset["label"] ?? ""));
+    this.attachments = this.attachments.filter((item) => item.key !== key);
+    this.retired.delete(key);
+    this.enforceLimits();
+    this.renderAttachments();
+    this.flash(`${attachment.name} — ${GONE}`);
   }
 
   /** Shows a message from the history (or the draft set aside for the way back) in place of what the field holds. */
@@ -1172,7 +1245,7 @@ export class Composer {
     this.field.value = "";
     this.attachments = [];
     this.retired.clear();
-    this.place(entry.text, entry.images);
+    this.place(entry.text, entry.images, entry.markers);
   }
 
   /**
@@ -1191,7 +1264,7 @@ export class Composer {
     this.recalled = next < 0 ? undefined : next;
     this.awaiting.clear(); // the message being left behind is no longer waiting for anything
     const sent = this.history[next];
-    this.show(next < 0 || sent === undefined ? this.draft : { text: sent.text, images: this.recallImages(sent.images) });
+    this.show(next < 0 || sent === undefined ? this.draft : { text: sent.text, images: this.recallImages(sent.images), markers: sent.markers });
     const caret = step === 1 ? 0 : field.value.length; // where the same key goes on
     field.setSelectionRange(caret, caret);
     this.recalled = next < 0 ? undefined : next; // `place` counts as an edit; this is still a recall

@@ -672,6 +672,42 @@ describe("selecting text in the feed", () => {
 
   const streaming = (text: string): Block => ({ kind: "assistant", id: "a1", text, thinking: "", streaming: true });
 
+  it.each(["web", "file"])("contextmenu_selects_the_%s_link_without_opening_it", (kind) => {
+    feed.update([
+      streaming("Смотри [страницу](https://example.com/a)"),
+      { kind: "tool", id: "t1", name: "read", file: "src/main.ts", summary: "src/main.ts", args: {}, output: "", truncated: false, state: "ok" },
+    ], false);
+    const link = root.querySelector<HTMLElement>(kind === "web" ? ".markdown a" : "[data-open-file]") as HTMLElement;
+    clear();
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 });
+    link.dispatchEvent(event);
+    expect(window.getSelection()?.toString()).toBe(link.textContent);
+    expect(event.defaultPrevented).toBe(false);
+    expect(posted).toEqual([]);
+  });
+
+  it.each(["inside", "across", "elsewhere"])("contextmenu_preserves_a_selection_%s_the_link", (where) => {
+    feed.update([streaming("Смотри https://example.com/a дальше")], false);
+    const link = entry("a1").querySelector("a") as HTMLAnchorElement;
+    if (where === "inside") select(link, "example.com");
+    else if (where === "elsewhere") select(entry("a1"), "Смотри");
+    else {
+      const range = document.createRange();
+      range.selectNodeContents(link.parentNode as Node);
+      window.getSelection()?.removeAllRanges();
+      window.getSelection()?.addRange(range);
+    }
+    const selection = window.getSelection() as Selection;
+    const before = selection.getRangeAt(0).cloneRange();
+    const selected = selection.toString();
+    link.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    expect(selection.toString()).toBe(selected);
+    expect(selection.getRangeAt(0).startContainer).toBe(before.startContainer);
+    expect(selection.getRangeAt(0).startOffset).toBe(before.startOffset);
+    expect(selection.getRangeAt(0).endContainer).toBe(before.endContainer);
+    expect(selection.getRangeAt(0).endOffset).toBe(before.endOffset);
+  });
+
   it("a_block_whose_text_is_being_selected_keeps_its_nodes_until_the_selection_lets_go", () => {
     feed.update([streaming("Смотри https://example.com/a")], true);
     const before = entry("a1");

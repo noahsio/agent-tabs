@@ -519,15 +519,15 @@ describe("Composer", () => {
       ]);
     });
 
-    it("a_picture_the_host_no_longer_has_is_marked_where_it_stood", async () => {
+    it("a_picture_the_host_no_longer_has_leaves_its_text_and_a_quiet_notice", async () => {
       show({ blocks: [{ kind: "user", id: "u9", text: "было так [картинка 1]", images: [{ id: "u9:0", mimeType: "image/png", name: "gone.png" }] }] });
       press("ArrowUp");
       composer.image("u9:0", "");
-      await vi.waitFor(() => expect(pills(input())[0]?.dataset["status"]).toBe("error"));
-      expect(role("attach-notes").textContent).toContain("gone.png — Картинки больше нет");
+      expect(pills(input())).toHaveLength(0);
+      expect(role("attach-notice").textContent).toContain("gone.png — Картинки больше нет");
       press("Enter");
       const again = posted.filter((message) => message.type === "send").at(-1) as Send;
-      expect(again.text).toBe("было так "); // no label for a picture that is not there
+      expect(again.text).toBe("было так [картинка 1]");
       expect(again.images).toBeUndefined();
     });
 
