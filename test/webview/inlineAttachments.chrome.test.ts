@@ -192,4 +192,30 @@ describe.skipIf(!hasChrome)("pictures standing in the line of text (headless Chr
     expect(await page.evaluate<string>(`document.querySelector(".lightbox").textContent`)).toContain("2 / 3"); // in the order of the text
     await page.key("Escape");
   });
+
+  it("recall_reconstructs_the_native_editor_before_any_image_bytes_arrive", async () => {
+    await page.evaluate(`(() => {
+      const input = document.querySelector(".input");
+      input.focus();
+      input.replaceChildren();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      range.collapse(true);
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    })()`);
+    const parts = await page.evaluate<string>(`(() => {
+      const copy = document.querySelector(".input").cloneNode(true);
+      copy.querySelectorAll(".att").forEach((pill) => pill.replaceWith("■"));
+      copy.querySelectorAll("br").forEach((br) => br.replaceWith("\\n"));
+      return copy.textContent;
+    })()`);
+    expect(parts).toBe("вот тут ошибка ■ а на втором экране ■ всё нормально\n\nпочини по порядку:\n1. проверь, что каталог не отдаёт пустой список\n2. вот как он выглядит пустым ■");
+    await waitFor(page, `document.querySelectorAll('.input .att[data-status="ready"]').length === 3`);
+    await shot(page, "recall-inline");
+    await page.key("Enter");
+    expect(await page.evaluate<string>(`window.__posted.filter((message) => message.type === "send").at(-1).text`)).toBe("вот тут ошибка [картинка 1] а на втором экране [картинка 2] всё нормально\n\nпочини по порядку:\n1. проверь, что каталог не отдаёт пустой список\n2. вот как он выглядит пустым [картинка 3]");
+  });
 });

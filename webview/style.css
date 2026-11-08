@@ -34,6 +34,8 @@
   /* Composer chips: a step lighter than the composer they sit on. */
   --chip: color-mix(in srgb, var(--fg) 10%, var(--surface));
   --chip-hover: color-mix(in srgb, var(--fg) 16%, var(--surface));
+  --attachment-preview-width: 240px;
+  --attachment-preview-height: 180px;
   --mono: var(--vscode-editor-font-family, ui-monospace, "SF Mono", Menlo, monospace);
   /* A diff's whole-line tints, as the diff editor paints them; translucent, so they read on light and dark themes. */
   --diff-add: var(--vscode-diffEditor-insertedLineBackground, var(--vscode-diffEditor-insertedTextBackground, rgba(155, 185, 85, 0.2)));
@@ -1932,6 +1934,31 @@ button.qtab.on {
    thing on the line worth reading, so that part alone takes the foreground colour. */
 .wedge.ladder[data-state="walking"] .wedge-text {
   color: var(--fg);
+}
+
+.attachment-preview {
+  position: fixed;
+  z-index: 10;
+  width: min(var(--attachment-preview-width), calc(100vw - 16px));
+  padding: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--pop-bg);
+  box-shadow: 0 4px 16px var(--pop-shadow);
+  pointer-events: none;
+}
+
+.attachment-preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: min(var(--attachment-preview-height), calc(100vh - 26px));
+  object-fit: contain;
+  border-radius: 3px;
+}
+
+.input .att[data-status="ready"] {
+  cursor: zoom-in;
 }
 
 /* Inline pills need a looser line than plain prose: 1.9 keeps a 20 px chip from touching the line above. */
