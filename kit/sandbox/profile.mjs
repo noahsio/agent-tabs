@@ -191,7 +191,7 @@ export function loadedResourceDenies(home, agentDirs) {
  * on the login PATH and the service's node prefix), whatever the shell rc files source, and what OmO loads as skills
  * or extensions (loadedResourceDenies).
  */
-export function buildProfile({ home, agentDir, envs = [], vscodes = [], writableDirs = [] }) {
+export function buildProfile({ home, agentDir, envs = [], vscodes = [], writableDirs = [], layers = { launch: true, agentCode: true, localServices: true }, tempDirs = ["/private/tmp", os.tmpdir()] }) {
   const inHome = (name) => path.join(home, name);
   const allEnvs = [...ENV_NAMES.map((name) => resolveEnv(name, home)), ...envs];
   const agentDirs = sorted([agentDir, ...allEnvs.map((env) => env.agentDir)]);
@@ -200,28 +200,55 @@ export function buildProfile({ home, agentDir, envs = [], vscodes = [], writable
 
   const subpaths = [
     ...agentDirs.flatMap((dir) => agentDirDenies(dir).subpaths),
-    ...claudeDirs.flatMap((dir) => claudeDirDenies(dir).subpaths),
-    ...[".omo/kit", ".omo/packages", ".omo/binary-runtime", ".omo/lsp-daemon", ".local/bin", "Library/LaunchAgents", ".ssh", ".config/git", ".config/fish"].map(inHome),
-    ...installs.flatMap((install) => [install.appRoot, install.userDataDir, install.extensionsDir].filter(Boolean)),
-    ...writableDirs,
-    ...loadedResourceDenies(home, agentDirs),
+    ...[".omo/kit", ".omo/binary-runtime", "Library/LaunchAgents"].map(inHome),
+    ...(layers.agentCode !== false ? [
+      ...claudeDirs.flatMap((dir) => claudeDirDenies(dir).subpaths),
+      inHome(".omo/packages"),
+      ...loadedResourceDenies(home, agentDirs),
+    ] : []),
+    ...(layers.localServices !== false ? [inHome(".omo/lsp-daemon")] : []),
+    ...(layers.launch !== false ? [
+      ...[".local/bin", ".ssh", ".config/git", ".config/fish"].map(inHome),
+      ...installs.flatMap((install) => [install.appRoot, install.userDataDir, install.extensionsDir].filter(Boolean)),
+      ...writableDirs,
+    ] : []),
   ];
   const literals = [
     ...agentDirs.flatMap((dir) => agentDirDenies(dir).literals),
-    ...claudeDirs.flatMap((dir) => claudeDirDenies(dir).literals),
-    ...[".omo", ".omo/omo.jsonc", ".gitconfig", ".claude.json"].map(inHome),
+    ...[".omo", ".omo/omo.jsonc"].map(inHome),
+    ...(layers.agentCode !== false ? [...claudeDirs.flatMap((dir) => claudeDirDenies(dir).literals), inHome(".claude.json")] : []),
+    ...(layers.launch !== false ? [
+    inHome(".gitconfig"),
     // zsh prefers a compiled `<file>.zwc` next to each file it sources
     ...[...SHELL_RC.map(inHome), ...sourcedFiles(home)].flatMap((file) => [file, `${file}.zwc`]),
     ...installs.flatMap((install) => [
       install.userSettings ?? path.join(install.userDataDir, "User", "settings.json"),
       path.join(path.dirname(install.extensionsDir), "argv.json"),
     ]),
+    ] : []),
   ];
   const subpathSet = sorted(subpaths.flatMap(both));
   const literalSet = sorted(literals.flatMap(both)).filter((file) => !subpathSet.includes(file));
   const listed = new Set([...subpathSet, ...literalSet]);
   const parents = sorted([...listed].flatMap(ancestors)).filter((dir) => !listed.has(dir));
-  const claudeRegexes = sorted(claudeDirs.flatMap((dir) => claudeDirDenies(dir).regexes));
+  const claudeRegexes = layers.agentCode !== false ? sorted(claudeDirs.flatMap((dir) => claudeDirDenies(dir).regexes)) : [];
+  const projectRules = [
+    ...(layers.agentCode !== false ? [
+      "  ; project hook/config files, the dirs that hold them, new MCP servers, Claude Code project settings",
+      '  (regex #"/\\.(omo|senpi|pi)/(hooks|hooks-state|settings|mcp)\\.json$")',
+      '  (regex #"/\\.(omo|senpi|pi)/extensions(/|$)")',
+      '  (regex #"/\\.(omo|senpi|pi)$")',
+      '  (regex #"/\\.mcp\\.json$")',
+      '  (regex #"/\\.claude/settings(\\.local)?\\.json$")',
+      '  (regex #"/\\.claude$")',
+      '  (regex #"/\\.claude/(commands|skills|agents)(/|$)")',
+    ] : []),
+    ...(layers.launch !== false ? [
+      "  ; git runs config and hooks outside the sandbox (VS Code, the person): no repo config, hooks or new .git (P32)",
+      '  (regex #"/\\.git/(.*/)?(config(\\.worktree)?|hooks(/.*)?|commondir|gitdir)$")',
+      '  (regex #"/\\.git$")',
+    ] : []),
+  ];
 
   const sockets = sorted(
     agentDirs.flatMap((dir) => [hostSocketPath(dir), protectedHostSocketPath(dir), servicePaths(dir).adminSock]).flatMap(both),
@@ -229,13 +256,13 @@ export function buildProfile({ home, agentDir, envs = [], vscodes = [], writable
   const ownSocket = both(protectedHostSocketPath(agentDir));
   const knownHosts = both(inHome(".ssh/known_hosts"));
   const sshDir = both(inHome(".ssh"));
-  const socketRegexes = sorted([
+  const socketRegexes = layers.localServices !== false ? sorted([
     ...installs.flatMap((install) => both(install.userDataDir)).map((dir) => `^${reEscape(dir)}/[^/]*-main\\.sock$`),
     ...both(inHome(".omo/lsp-daemon")).map((dir) => `^${reEscape(dir)}/`),
     // VS Code's git askpass and terminal IPC sockets in $TMPDIR (the `code` CLI runs things outside the sandbox)
     ...both(os.tmpdir()).map((dir) => `^${reEscape(dir)}/vscode-(git|ipc)-[^/]*\\.sock$`),
     "^(/private)?/var/folders/[^/]+/[^/]+/T/vscode-(git|ipc)-[^/]*\\.sock$",
-  ]);
+  ]) : [];
 
   const lines = [
     "(version 1)",
@@ -250,35 +277,48 @@ export function buildProfile({ home, agentDir, envs = [], vscodes = [], writable
     "  ; the directories above them: no renaming a protected tree away and recreating it",
     ...parents.map((dir) => `  (literal ${str(dir)})`),
     ...claudeRegexes.map((regex) => `  (regex ${str(regex)})`),
-    "  ; project hook/config files, the dirs that hold them, new MCP servers, Claude Code project settings",
-    '  (regex #"/\\.(omo|senpi|pi)/(hooks|hooks-state|settings|mcp)\\.json$")',
-    '  (regex #"/\\.(omo|senpi|pi)/extensions(/|$)")',
-    '  (regex #"/\\.(omo|senpi|pi)$")',
-    '  (regex #"/\\.mcp\\.json$")',
-    '  (regex #"/\\.claude/settings(\\.local)?\\.json$")',
-    '  (regex #"/\\.claude$")',
-    '  (regex #"/\\.claude/(commands|skills|agents)(/|$)")',
-    "  ; git runs config and hooks outside the sandbox (VS Code, the person): no repo config, hooks or new .git (P32)",
-    '  (regex #"/\\.git/(.*/)?(config(\\.worktree)?|hooks(/.*)?|commondir|gitdir)$")',
-    '  (regex #"/\\.git$"))',
+    ...projectRules.slice(0, -1),
+    `${projectRules.at(-1) ?? ""})`,
+    ...(projectRules.length > 0 && tempDirs.length > 0 ? [
+      "; temporary project files: explicit protected paths and their parents stay closed",
+      "(allow file-write* (require-all",
+      `  (require-any ${sorted(tempDirs.flatMap(both)).map((dir) => `(subpath ${str(dir)})`).join(" ")})`,
+      "  (require-any",
+      ...projectRules.filter((rule) => rule.startsWith("  (regex")),
+      "  )",
+      "  (require-not (require-any",
+      ...subpathSet.map((dir) => `    (subpath ${str(dir)})`),
+      ...[...literalSet, ...parents].map((file) => `    (literal ${str(file)})`),
+      "  ))))",
+      "; end temporary project files",
+    ] : []),
     "",
     "; the host binds (and chmods: OmO does) its own socket in the closed dir; first ssh connections still record the",
     "; host key (P34)",
     `(allow file-write-create file-write-mode ${ownSocket.map((file) => `(literal ${str(file)})`).join(" ")})`,
+    ...(layers.launch !== false ? [
     `(allow file-write* ${knownHosts.map((file) => `(literal ${str(file)})`).join(" ")})`,
     "; …but never as a link: ssh would append through it into a protected file",
     ...knownHosts.map((file) => `(deny file-write-create (require-all (literal ${str(file)}) (vnode-type SYMLINK)))`),
     "; ssh ControlMaster multiplexing binds and unlinks a unix socket under ~/.ssh; allow only socket vnodes, so keys,",
     "; config and symlinks stay write-denied (after the deny block above: later rules win)",
     ...sshDir.map((dir) => `(allow file-write* (require-all (subpath ${str(dir)}) (vnode-type SOCKET)))`),
+    ] : []),
     "",
     "; no driving a host over RPC, the decision service's admin socket, VS Code, the shared LSP daemon or sshd",
     ...sockets.map((file) => `(deny network-outbound (remote unix-socket (path-literal ${str(file)})))`),
     ...socketRegexes.map((regex) => `(deny network-outbound (remote unix-socket (regex ${str(regex)})))`),
+    ...(layers.localServices !== false ? [
     '(deny network-outbound (remote tcp "localhost:22"))',
     "; no starting code outside the sandbox through LaunchServices or Apple Events",
     "(deny lsopen)",
     "(deny appleevent-send)",
+    "; Claude Code IDE bridge locks carry editor credentials",
+    "(deny file-read*",
+    ...sorted(claudeDirs.flatMap(both)).map((dir) => `  (regex ${str(`^${reEscape(dir)}/ide/[^/]*\\.lock$`)})`),
+    ")",
+    "; end IDE bridge locks",
+    ] : []),
     "",
   ];
   return lines.join("\n");

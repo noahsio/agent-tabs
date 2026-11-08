@@ -1,13 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { guardFilesDir, rulesToWrite, servicePaths } from "../../kit/guard/lifecycle.mjs";
-import { DECIDER_MODES, GROUP_IDS, isUserAllow, validateRules, WAIT_SECONDS } from "../../kit/guard/rules.mjs";
+import { DECIDER_MODES, GROUP_IDS, isUserAllow, validateRules, WAIT_SECONDS, escalationRules, REMOTE_ASK_RULES } from "../../kit/guard/rules.mjs";
 import { formatIpLines, importClaudeDeny, parseLines } from "../../kit/guard/rulesText.mjs";
 import { httpTransport, latestPrivateChat, loadTelegramConfig, resolveTelegramConfig, telegramKeyFile } from "../../kit/guard/telegram.mjs";
-import { profilePath } from "../../kit/sandbox/profile.mjs";
+import { profilePath, type SandboxLayer, type SandboxLayers } from "../../kit/sandbox/profile.mjs";
 import { GuardRulesInvalid, type DeciderMode, type GroupId, type GuardRulesAdmin, type RulesV2, type WaitSeconds } from "../guard/admin";
 import { launchAgentPath, serviceLabel } from "../guard/launchAgent";
-import type { ProtectionStatus } from "../guard/protection";
+import { sandboxLayers, type ProtectionStatus } from "../guard/protection";
 import { writeOmoFile } from "./files";
 import { writeKeyFile } from "./gateway";
 import type { EnvPaths } from "./paths";
@@ -36,7 +36,8 @@ export type SecurityView = {
   installed?: { dir: string; installedAt?: number; stale: boolean };
   refreshError?: string;
   text: Record<TextField, string>;
-  groups: RulesV2["groups"];
+  layers: SandboxLayers;
+  asks: string[];
   decider: RulesV2["decider"];
   human: RulesV2["human"];
   /**
@@ -54,6 +55,7 @@ type WhitelistView = SecurityView["whitelist"][number];
 
 export type SecurityAction =
   | { kind: "protection.set"; on: boolean; confirmed: boolean }
+  | { kind: "layer.set"; layer: SandboxLayer; on: boolean }
   | { kind: "text.set"; field: TextField; text: string }
   | { kind: "group.set"; group: GroupId; on: boolean }
   | { kind: "decider.set"; mode?: DeciderMode; model?: string }
@@ -74,6 +76,7 @@ export interface SecurityDeps {
     status(): Promise<ProtectionStatus>;
     enable(): Promise<void>;
     disable(): Promise<void>;
+    setLayer(layer: SandboxLayer, on: boolean): Promise<void>;
     writeDenies(): Promise<string[]>;
     /** The guard copy running now and the last failure of the activation refresh (`installedKit`, held by the window). */
     installed(): { installed?: SecurityView["installed"]; refreshError?: string };
@@ -145,6 +148,9 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
     switch (raw["kind"]) {
       case "protection.set":
         return isBoolean(raw["on"]) && isBoolean(raw["confirmed"]) ? { kind: "protection.set", on: raw["on"], confirmed: raw["confirmed"] } : undefined;
+      case "layer.set":
+        return (raw["layer"] === "launch" || raw["layer"] === "agentCode" || raw["layer"] === "localServices") && isBoolean(raw["on"])
+          ? { kind: "layer.set", layer: raw["layer"], on: raw["on"] } : undefined;
       case "text.set":
         return TEXT_FIELDS.includes(raw["field"] as TextField) && typeof raw["text"] === "string"
           ? { kind: "text.set", field: raw["field"] as TextField, text: raw["text"] }
@@ -203,7 +209,14 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
         writeDenies: status.state === "on" ? [] : await this.writeDenies(),
       },
       text: { hardDeny: rules.hardDeny.join("\n"), askCustom: rules.askCustom.join("\n"), ipWhitelist: formatIpLines(rules.ipWhitelist) },
-      groups: rules.groups,
+      layers: sandboxLayers(paths.agentDir),
+      asks: [
+        ...escalationRules(rules).map((entry) => ({
+          "rm -rf of a path held in a variable": "rm -rf: путь из переменной",
+          "find -delete over the home directory": "find -delete по домашней папке",
+        }[entry.label] ?? entry.label)),
+        ...REMOTE_ASK_RULES.map((entry) => entry.label),
+      ],
       decider: rules.decider,
       human: rules.human,
       telegram: this.telegramView(rules.human),
@@ -270,6 +283,7 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
   /** Never while protection is being switched: the writer (file or service) is changing hands. */
   private async editRules(action: Exclude<SecurityAction, { kind: "protection.set" }>): Promise<void | string> {
     if (this.switching) throw new FieldErrors(IN_PROGRESS, []);
+    if (action.kind === "layer.set") return this.deps.protection.setLayer(action.layer, action.on);
     const status = await this.deps.protection.status();
     const { rules, invalid } = await this.readRules(status);
     if (invalid !== undefined) throw new FieldErrors(`${invalid}. Исправьте ${servicePaths(this.deps.paths.agentDir).rules} вручную или удалите его — вернутся правила по умолчанию`, []);
@@ -348,7 +362,7 @@ export class SecurityHost implements SettingsSectionHost<SecurityAction> {
   }
 
   /** The rules after `action`; a field's bad lines are reported with their line in the text, nothing else changes. */
-  private edited(rules: RulesV2, action: Exclude<SecurityAction, { kind: "protection.set" | "importClaude" | `telegram.${"token" | "find" | "test"}` }>): RulesV2 {
+  private edited(rules: RulesV2, action: Exclude<SecurityAction, { kind: "protection.set" | "layer.set" | "importClaude" | `telegram.${"token" | "find" | "test"}` }>): RulesV2 {
     switch (action.kind) {
       case "text.set": {
         if (action.field === "ipWhitelist") return { ...rules, ipWhitelist: this.lines(action.field, parseLines(action.text, "ip")) };

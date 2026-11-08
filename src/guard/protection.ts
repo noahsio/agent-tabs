@@ -22,6 +22,8 @@ import {
   protectedHostPidPath,
   protectedHostSocketPath,
   type VscodeInstall,
+  type SandboxLayer,
+  type SandboxLayers,
 } from "../../kit/sandbox/profile.mjs";
 import { MAX_SOCKET_PATH } from "../../kit/guard/sockets.mjs";
 import { bindStartLock, listensOn } from "../daemon";
@@ -57,7 +59,7 @@ export type ProtectionDeps = {
  * writes it): every VS Code install that ran this environment while protected, and the P33 directories fixed when
  * protection was turned on. Every window builds the same profile from it.
  */
-type SandboxInputs = { vscodeInstalls: VscodeInstall[]; writableDirs: string[] };
+type SandboxInputs = { vscodeInstalls: VscodeInstall[]; writableDirs: string[]; layers?: SandboxLayers };
 
 const SERVICE_START_MS = 10_000;
 const SOCKET_POLL_MS = 100;
@@ -96,8 +98,22 @@ function readInputs(agentDir: string): SandboxInputs {
   const raw = JSON.parse(text) as Record<string, unknown>;
   const installs = raw["vscodeInstalls"];
   const dirs = raw["writableDirs"];
+  const layers = raw["layers"];
   if (!Array.isArray(installs) || !installs.every(isInstall) || !isStringList(dirs)) throw new Error(`${inputsFile(agentDir)}: не тот формат`);
-  return { vscodeInstalls: installs, writableDirs: dirs };
+  if (layers !== undefined && !isLayers(layers)) throw new Error(`${inputsFile(agentDir)}: не тот формат`);
+  return { vscodeInstalls: installs, writableDirs: dirs, ...(layers !== undefined ? { layers } : {}) };
+}
+
+function isLayers(value: unknown): value is SandboxLayers {
+  return typeof value === "object" && value !== null &&
+    "launch" in value && typeof value.launch === "boolean" &&
+    "agentCode" in value && typeof value.agentCode === "boolean" &&
+    "localServices" in value && typeof value.localServices === "boolean";
+}
+
+/** The saved choice, including defaults for installations predating layers. */
+export function sandboxLayers(agentDir: string): SandboxLayers {
+  return readInputs(agentDir).layers ?? { launch: true, agentCode: true, localServices: true };
 }
 
 const installKey = (install: VscodeInstall): string =>
@@ -124,7 +140,7 @@ function otherEnvInstalls(paths: EnvPaths): VscodeInstall[][] {
 /** sandbox.json with this window's install added (and, when given, the P33 dirs replaced). */
 function nextInputs(paths: EnvPaths, vscode: VscodePaths, writableDirs?: string[]): SandboxInputs {
   const current = readInputs(paths.agentDir);
-  return { vscodeInstalls: mergeInstalls([current.vscodeInstalls, [vscode]]), writableDirs: writableDirs ?? current.writableDirs };
+  return { ...current, vscodeInstalls: mergeInstalls([current.vscodeInstalls, [vscode]]), writableDirs: writableDirs ?? current.writableDirs };
 }
 
 /** The profile for `inputs` and every other env's installs: identical whichever VS Code builds it once all recorded. */
@@ -135,6 +151,7 @@ function profileFor(paths: EnvPaths, inputs: SandboxInputs): string {
     envs: [{ agentDir: paths.agentDir, claudeDir: paths.claudeDir }],
     vscodes: mergeInstalls([...otherEnvInstalls(paths), inputs.vscodeInstalls]),
     writableDirs: inputs.writableDirs,
+    ...(inputs.layers !== undefined ? { layers: inputs.layers } : {}),
   });
 }
 
@@ -343,8 +360,12 @@ async function plan(paths: EnvPaths, deps: PlanDeps): Promise<{ node: string; wr
  * sandbox.json, and what OmO loads as skills or extensions, which every profile build reads afresh from the settings.
  */
 export async function plannedWriteDenies(paths: EnvPaths, deps: PlanDeps): Promise<string[]> {
+  const layers = sandboxLayers(paths.agentDir);
   const agentDirs = [paths.agentDir, ...ENV_NAMES.map((name) => resolveEnv(name, paths.home).agentDir)];
-  return [...new Set([...(await plan(paths, deps)).writableDirs, ...loadedResourceDenies(paths.home, agentDirs)])].sort();
+  return [...new Set([
+    ...(layers.launch ? (await plan(paths, deps)).writableDirs : []),
+    ...(layers.agentCode ? loadedResourceDenies(paths.home, agentDirs) : []),
+  ])].sort();
 }
 
 /** The LaunchAgent that runs `kitGuard`'s service with `node`: the one place the plist's content is decided. */
@@ -438,6 +459,19 @@ async function provision(paths: EnvPaths, deps: ProtectionDeps, spec: { node: st
  */
 export async function enableProtection(paths: EnvPaths, deps: ProtectionDeps): Promise<void> {
   await provision(paths, deps, await plan(paths, deps));
+  await deps.restartHost();
+}
+
+/** A profile exists exactly while launchers use protection; its rules take effect only at host start. */
+export async function setSandboxLayer(paths: EnvPaths, deps: ProtectionDeps, layer: SandboxLayer, on: boolean): Promise<void> {
+  const inputs = readInputs(paths.agentDir);
+  const layers = inputs.layers ?? { launch: true, agentCode: true, localServices: true };
+  if (layers[layer] === on) return;
+  const next = { ...inputs, layers: { ...layers, [layer]: on } };
+  writeInputs(paths.agentDir, next);
+  const profile = profilePath(paths.agentDir);
+  if (!fs.existsSync(profile)) return;
+  await writeIfDifferent(deps, profile, profileFor(paths, next), 0o644);
   await deps.restartHost();
 }
 

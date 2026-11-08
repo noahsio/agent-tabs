@@ -1,4 +1,5 @@
-import type { DeciderMode, GroupId, WaitSeconds } from "../../src/guard/admin";
+import type { DeciderMode, WaitSeconds } from "../../src/guard/admin";
+import type { SandboxLayer } from "../../kit/sandbox/profile.mjs";
 import type { FieldError, SettingsView } from "../../src/settings/protocol";
 import type { SecurityView, TextField } from "../../src/settings/security";
 import { breakable, button, el } from "../dom";
@@ -14,12 +15,10 @@ const WAITS: ReadonlyArray<[WaitSeconds, string]> = [
   [180, "3 мин"],
   [300, "5 мин"],
 ];
-const GROUPS: ReadonlyArray<[GroupId, string, string]> = [
-  ["git-push", "Отправка в git", "git push, push --force"],
-  ["history", "Переписывание истории git", "reset --hard, rebase, clean, branch -D"],
-  ["secrets", "Ключи и секреты", "~/.ssh, ~/.aws, *.pem, ключи"],
-  ["external-ip", "Внешние адреса", "IP не из белого списка"],
-  ["global-install", "Глобальная установка пакетов", "npm -g, pip install"],
+const LAYERS: ReadonlyArray<[SandboxLayer, string, string]> = [
+  ["launch", "Запуск вне песочницы", "папки из PATH, файлы оболочки, конфиг и хуки git, приложения и их расширения"],
+  ["agentCode", "Инструкции и код агентов", "навыки, плагины, пакеты, .omo / .claude / .mcp.json в проектах"],
+  ["localServices", "Выход через локальные службы", "ssh на этот Mac, сокеты редактора и OmO, открытие приложений"],
 ];
 const SWIFT_FLAGS = "swift build --disable-sandbox (и test, run); xcodebuild -IDEPackageSupportDisableManifestSandbox=YES -IDEPackageSupportDisablePackageSandbox=YES";
 const SANDBOX_HINT = `Под песочницей вложенная песочница запрещена ядром: Swift и Xcode собирают с флагами — ${SWIFT_FLAGS}.`;
@@ -247,7 +246,7 @@ class TelegramSetup {
 
 /**
  * «Безопасность» after the mockup: protection on/off (each way only after the person confirms what changes),
- * «broken» with its reason and «Починить», who decides disputed commands, the rule fields, the groups and the IP list.
+ * «broken» with its reason and «Починить», who decides disputed commands, the rule fields, sandbox layers and the IP list.
  */
 export class SecuritySection implements SectionView {
   readonly element: HTMLElement;
@@ -260,7 +259,10 @@ export class SecuritySection implements SectionView {
   private readonly consent: HTMLElement;
   private readonly hint: HTMLElement;
   private readonly decider: HTMLElement;
-  private readonly groups: HTMLElement;
+  private readonly layers: HTMLElement;
+  private readonly asks: HTMLElement;
+  private readonly layerRestart: HTMLElement;
+  private changingLayer: string | undefined;
   /** The person's «always allow» list: each entry with what it allows and a «Забыть» button. */
   private readonly whitelist: HTMLElement;
   private readonly fields: Record<TextField, RuleField>;
@@ -290,7 +292,9 @@ export class SecuritySection implements SectionView {
     this.hint = el("p", { class: "st-s st-hint", "data-role": "sandbox-hint" }, SANDBOX_HINT);
     this.decider = el("div", { class: "st-card" });
     this.telegram = new TelegramSetup((action) => this.context.act(action));
-    this.groups = el("div", { class: "st-groups", role: "table", "aria-label": "Спросить перед выполнением" });
+    this.layers = el("div", { class: "st-groups", role: "group", "aria-label": "Что закрыто песочницей" });
+    this.asks = el("ul", { class: "st-consent-list", "data-role": "guard-asks" });
+    this.layerRestart = el("p", { class: "st-s st-hint", "data-role": "layer-restart" });
     this.whitelist = el("div", { class: "st-whitelist", role: "list", "aria-label": "Всегда разрешать" });
     const { hardDeny, askCustom, ipWhitelist } = this.fields;
     const rulesHint = el("span", { class: "st-h3-note" }, "· одна строка — одно правило, можно вставить сразу много");
@@ -318,8 +322,12 @@ export class SecuritySection implements SectionView {
       ),
       el("h3", { class: "st-h3" }, "Всегда разрешать · ваши правила «разрешать такое впредь» с карточек"),
       el("div", { class: "st-card" }, this.whitelist),
-      el("h3", { class: "st-h3" }, "Спросить перед выполнением"),
-      this.groups,
+      el("h3", { class: "st-h3" }, "Что закрыто песочницей"),
+      el("p", { class: "st-s", "data-role": "sandbox-core" }, "Ядро защиты — правила, ключи, хуки, кит: всегда, пока включена защита"),
+      this.layers,
+      this.layerRestart,
+      el("h3", { class: "st-h3" }, "О чём спрашивает защита"),
+      this.asks,
       el(
         "div",
         { class: "st-card st-ask-custom" },
@@ -347,6 +355,10 @@ export class SecuritySection implements SectionView {
   }
 
   result(id: string, ok: boolean, errors: readonly FieldError[], notice?: string): void {
+    if (id === this.changingLayer) {
+      this.changingLayer = undefined;
+      if (this.last !== undefined) this.render(this.last);
+    }
     for (const field of Object.values(this.fields)) field.result(id, ok, errors);
     this.telegram.result(id, ok, errors, notice);
     if (id === this.importAfter) {
@@ -395,16 +407,27 @@ export class SecuritySection implements SectionView {
     this.renderProtection(view);
     this.renderDecider(view);
     this.telegram.show(view);
-    this.groups.replaceChildren(
-      ...GROUPS.map(([id, title, example]) =>
-        el(
+    this.layers.replaceChildren(
+      ...LAYERS.map(([id, title, example]) => {
+        const control = toggle(`layer:${id}`, title, view.layers[id], (on) => {
+          this.changingLayer = this.context.act({ kind: "layer.set", layer: id, on });
+          this.render(view);
+        });
+        control.disabled = this.changingLayer !== undefined || this.switching !== undefined;
+        return el(
           "div",
-          { class: "st-group", role: "row", "data-group": id },
+          { class: "st-group", "data-layer": id },
           el("div", {}, el("b", { class: "st-t" }, title), el("span", { class: "st-s" }, example)),
-          toggle(`group:${id}`, title, view.groups[id], (on) => this.context.act({ kind: "group.set", group: id, on })),
-        ),
-      ),
+          control,
+        );
+      }),
     );
+    this.layerRestart.textContent = this.changingLayer !== undefined
+      ? "Применяется…"
+      : view.state === "off"
+        ? "Выбор сохранится и применится при включении защиты."
+        : "При изменении слоя OmO этой среды перезапустится — идущие ходы агентов во всех окнах прервутся.";
+    this.asks.replaceChildren(...view.asks.map((label) => el("li", {}, label)));
     this.renderWhitelist(view);
     for (const [name, field] of Object.entries(this.fields) as Array<[TextField, RuleField]>) field.show(view.text[name]);
   }
@@ -443,7 +466,7 @@ export class SecuritySection implements SectionView {
             ? el("span", { class: "st-badge err" }, "● не в порядке")
             : el("span", { class: "st-badge" }, "выключена");
     const control = toggle("protection", "Защита команд", on, (next) => this.ask(next));
-    control.disabled = this.switching !== undefined;
+    control.disabled = this.switching !== undefined || this.changingLayer !== undefined;
     this.protection.replaceChildren(
       el(
         "div",
@@ -511,8 +534,10 @@ export class SecuritySection implements SectionView {
             "ul",
             { class: "st-consent-list" },
             item("OmO этой среды перезапустится — идущие ходы агентов во всех окнах прервутся."),
-            item("Агенты не смогут менять .git/config, .git/hooks и ~/.gitconfig: git clone, git init и git remote add выполняешь ты."),
-            item("Папки из PATH, в которые ты можешь писать (например, /opt/homebrew), закрыты для агентов: brew install и глобальные установки — тоже ты."),
+            ...(view.layers.launch ? [
+              item("Агенты не смогут менять .git/config, .git/hooks и ~/.gitconfig: git clone, git init и git remote add выполняешь ты."),
+              item("Папки из PATH, в которые ты можешь писать (например, /opt/homebrew), закрыты для агентов: brew install и глобальные установки — тоже ты."),
+            ] : []),
             item(`Swift и Xcode собирают с флагами: ${SWIFT_FLAGS}.`),
             item(BACKGROUND_NOTICE),
           ),

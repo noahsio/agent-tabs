@@ -102,7 +102,7 @@ beforeAll(async () => {
     userSettings: path.join(vscodeRoot, "data/User/settings.json"),
     extensionsDir: path.join(vscodeRoot, "ext/extensions"),
   };
-  spec = { home, agentDir, vscodes: [current], writableDirs: [brewBin] };
+  spec = { home, agentDir, vscodes: [current], writableDirs: [brewBin], tempDirs: [] };
   profileFile = path.join(tmp, "own.sb");
   fs.writeFileSync(profileFile, buildProfile(spec));
 
@@ -389,6 +389,35 @@ describe("sandbox profile", () => {
   it.runIf(darwin)("ps_runs_outside_the_sandbox", () => {
     expect(denied(`/bin/ps -o lstart= -p $$`)).toBe(false);
   });
+
+  it.runIf(darwin)("an_explicit_temporary_root_opens_project_rules_but_never_core", () => {
+    const project = path.join(tmp, "temporary-project");
+    fs.mkdirSync(project);
+    const temporary = buildProfile({ ...spec, tempDirs: [tmp] });
+    for (const command of [
+      `mkdir ${project}/.omo`,
+      `echo x > ${project}/.omo/settings.json`,
+      `mkdir -p ${project}/.omo/extensions/tool`,
+      `echo x > ${project}/.mcp.json`,
+      `mkdir ${project}/.claude && echo x > ${project}/.claude/settings.local.json`,
+      `git init -q ${project}`,
+      `git -C ${project} config test.sandbox yes`,
+      `echo x > ${project}/.git/hooks/pre-commit`,
+      `mkdir -p ${project}/.git/worktrees/w && echo x > ${project}/.git/worktrees/w/commondir`,
+      `echo x > ${project}/.git/worktrees/w/gitdir`,
+      `echo x > ${project}/.git/worktrees/w/config`,
+    ]) {
+      expect(underProfile(command).code, command).not.toBe(0);
+      expect(underProfileText(temporary, command).code, command).toBe(0);
+    }
+    for (const dir of [path.join(agentDir, "guard"), path.join(agentDir, "keys"), path.join(home, ".omo/kit"), path.join(home, "Library/LaunchAgents")]) {
+      fs.mkdirSync(dir, { recursive: true });
+      // Match a project regex inside core so a broad temporary allow would fail this check.
+      const target = path.join(dir, ".mcp.json");
+      expect(underProfileText(temporary, `echo x > ${q(target)}`).code, target).not.toBe(0);
+      expect(fs.existsSync(target), target).toBe(false);
+    }
+  });
 });
 
 describe("what OmO loads as skills or extensions", () => {
@@ -429,7 +458,7 @@ describe("what OmO loads as skills or extensions", () => {
     );
     write(path.join(secondAgent, "settings.json"), JSON.stringify({ skills: [path.join(tmp, "other-skills")], packages: [clone, "~/my-pkg", "npm:@scope/pkg", "git:github.com/a/b"] }));
     file = path.join(tmp, "res.sb");
-    fs.writeFileSync(file, buildProfile({ home: h, agentDir: sysAgent }));
+    fs.writeFileSync(file, buildProfile({ home: h, agentDir: sysAgent, tempDirs: [] }));
   });
 
   it("each_entry_is_closed_alone_the_clone_whole_and_never_home_or_an_agent_dir", () => {

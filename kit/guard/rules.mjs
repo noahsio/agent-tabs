@@ -68,6 +68,31 @@ export const GROUP_RULES = {
   ],
 };
 
+export const REMOTE_ASK_RULES = [
+  { label: "На удалённой машине: рекурсивное удаление путей с переменными, шаблонами или выходом из папки", patterns: [
+    "(?<![\\w.-])(?<!git\\s)rm\\s+(-[\\w-]+\\s+)*(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\\s+-[\\w-]+)*(\\s+[^\\s;&|()]+)*?\\s+(?![;&|()])(?!\\d*[<>])(?=[^\\s;&|()]*(\\.\\.|[*?\\[{])|(?!(\\./)?[\\w@%+=:,-][\\w@%+=:,.-]*(/[\\w@%+=:,.-]+)*/?(?=[\\s;&|)]|$)))",
+    "^(?=[\\s\\S]*(\\b(cd|pushd|popd)\\b|\\())(?=[\\s\\S]*(?<![\\w.-])(?<!git\\s)rm\\s+(-[\\w-]+\\s+)*(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?![\\w-]))",
+  ] },
+  { label: "На удалённой машине: удаление контейнеров и образов Docker", patterns: [
+    "\\bdocker\\s+(rm|rmi)(?![\\w-])",
+  ] },
+  { label: "На удалённой машине: удаление и очистка ресурсов Docker", patterns: [
+    "\\bdocker\\s+(container|image|volume|network)\\s+(rm|prune)(?![\\w-])",
+    "\\bdocker\\s+(system|builder)\\s+prune(?![\\w-])",
+    "\\bdocker(-compose|\\s+compose)\\s+(-[\\w-]+\\s+(\\S+\\s+)?)*(rm(?![\\w-])|down(\\s+-[\\w-]+)*\\s+(-v|--volumes)(?![\\w-]))",
+  ] },
+  { label: "На удалённой машине: удаление объектов и очистка таблиц SQL", patterns: [
+    "\\b([Dd][Rr][Oo][Pp]\\s+([Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa]|[Vv][Ii][Ee][Ww]|[Ii][Nn][Dd][Ee][Xx]|[Rr][Oo][Ll][Ee]|[Uu][Ss][Ee][Rr])|[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]\\s+[Tt][Aa][Bb][Ll][Ee])\\b",
+    "\\b[Dd][Ee][Ll][Ee][Tt][Ee]\\s+[Ff][Rr][Oo][Mm]\\s+[^\\s;]+(?=[\\s;]|$)(?!\\s+[Ww][Hh][Ee][Rr][Ee]\\b)",
+    "\\b[Dd][Ee][Ll][Ee][Tt][Ee]\\s+[Ff][Rr][Oo][Mm]\\s+[^;]*?\\b[Ww][Hh][Ee][Rr][Ee]\\s+[(\\s]*(1|[Tt][Rr][Uu][Ee]|(\\w+)\\s*=\\s*\\2|'(\\w*)'\\s*=\\s*'\\3'|\\\"(\\w*)\\\"\\s*=\\s*\\\"\\4\\\")\\s*[)\\s]*($|[;'\\\"\\\\])",
+    "\\b[Dd][Ee][Ll][Ee][Tt][Ee]\\s+[Ff][Rr][Oo][Mm]\\s+[^;]*?\\b[Ww][Hh][Ee][Rr][Ee]\\b[^;]*\\s[Oo][Rr]\\s+[(\\s]*(1|[Tt][Rr][Uu][Ee]|(\\w+)\\s*=\\s*\\2|'(\\w*)'\\s*=\\s*'\\3'|\\\"(\\w*)\\\"\\s*=\\s*\\\"\\4\\\")(?![\\w=])",
+  ] },
+  { label: "На удалённой машине: массовое или принудительное завершение процессов", patterns: [
+    "\\b(pkill|killall)(?![\\w-])",
+    "\\bkill\\s+(-9|-KILL|-SIGKILL|-s\\s+(9|KILL|SIGKILL))(?![\\w-])",
+  ] },
+];
+
 // Checks for commands that run on another host (ssh, a heredoc fed to a remote shell). Built in, so that
 // deleting or editing an allow rule cannot switch them off.
 export const REMOTE_CHECKS = {
@@ -79,20 +104,7 @@ export const REMOTE_CHECKS = {
     "(^|[^\\w])find\\s+(-[HLP]\\s+)*/+\\.?/*\\s([^;|&]*\\s)?-delete(?![\\w-])",
     "\\bdiskutil\\s+(erase\\w*|zeroDisk|randomDisk|secureErase|partitionDisk)\\b",
   ],
-  escalateIf: [
-    "(?<![\\w.-])(?<!git\\s)rm\\s+(-[\\w-]+\\s+)*(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\\s+-[\\w-]+)*(\\s+[^\\s;&|()]+)*?\\s+(?![;&|()])(?!\\d*[<>])(?=[^\\s;&|()]*(\\.\\.|[*?\\[{])|(?!(\\./)?[\\w@%+=:,-][\\w@%+=:,.-]*(/[\\w@%+=:,.-]+)*/?(?=[\\s;&|)]|$)))",
-    "^(?=[\\s\\S]*(\\b(cd|pushd|popd)\\b|\\())(?=[\\s\\S]*(?<![\\w.-])(?<!git\\s)rm\\s+(-[\\w-]+\\s+)*(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?![\\w-]))",
-    "\\bdocker\\s+(rm|rmi)(?![\\w-])",
-    "\\bdocker\\s+(container|image|volume|network)\\s+(rm|prune)(?![\\w-])",
-    "\\bdocker\\s+(system|builder)\\s+prune(?![\\w-])",
-    "\\bdocker(-compose|\\s+compose)\\s+(-[\\w-]+\\s+(\\S+\\s+)?)*(rm(?![\\w-])|down(\\s+-[\\w-]+)*\\s+(-v|--volumes)(?![\\w-]))",
-    "\\b([Dd][Rr][Oo][Pp]\\s+([Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa]|[Vv][Ii][Ee][Ww]|[Ii][Nn][Dd][Ee][Xx]|[Rr][Oo][Ll][Ee]|[Uu][Ss][Ee][Rr])|[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]\\s+[Tt][Aa][Bb][Ll][Ee])\\b",
-    "\\b[Dd][Ee][Ll][Ee][Tt][Ee]\\s+[Ff][Rr][Oo][Mm]\\s+[^\\s;]+(?=[\\s;]|$)(?!\\s+[Ww][Hh][Ee][Rr][Ee]\\b)",
-    "\\b[Dd][Ee][Ll][Ee][Tt][Ee]\\s+[Ff][Rr][Oo][Mm]\\s+[^;]*?\\b[Ww][Hh][Ee][Rr][Ee]\\s+[(\\s]*(1|[Tt][Rr][Uu][Ee]|(\\w+)\\s*=\\s*\\2|'(\\w*)'\\s*=\\s*'\\3'|\\\"(\\w*)\\\"\\s*=\\s*\\\"\\4\\\")\\s*[)\\s]*($|[;'\\\"\\\\])",
-    "\\b[Dd][Ee][Ll][Ee][Tt][Ee]\\s+[Ff][Rr][Oo][Mm]\\s+[^;]*?\\b[Ww][Hh][Ee][Rr][Ee]\\b[^;]*\\s[Oo][Rr]\\s+[(\\s]*(1|[Tt][Rr][Uu][Ee]|(\\w+)\\s*=\\s*\\2|'(\\w*)'\\s*=\\s*'\\3'|\\\"(\\w*)\\\"\\s*=\\s*\\\"\\4\\\")(?![\\w=])",
-    "\\b(pkill|killall)(?![\\w-])",
-    "\\bkill\\s+(-9|-KILL|-SIGKILL|-s\\s+(9|KILL|SIGKILL))(?![\\w-])",
-  ],
+  escalateIf: REMOTE_ASK_RULES.flatMap((entry) => entry.patterns),
 };
 
 const V1_GROUP_OF = {

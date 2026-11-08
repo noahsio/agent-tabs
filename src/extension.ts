@@ -20,6 +20,7 @@ import {
   refreshProfile,
   refreshProtection,
   systemProtectionDeps,
+  setSandboxLayer,
   type VscodePaths,
 } from "./guard/protection";
 import { Freshness } from "./guard/freshness";
@@ -406,6 +407,10 @@ export function activate(context: vscode.ExtensionContext): void {
           status: () => protectionStatus(paths, vscodePaths()),
           enable: () => enableProtection(paths, protectionDeps()),
           disable: () => disableProtection(paths, protectionDeps()),
+          setLayer: async (layer, on) => {
+            await setSandboxLayer(paths, protectionDeps(), layer, on);
+            writeDenies = undefined;
+          },
           writeDenies: plannedDenies,
           installed: () => {
             const kit = installedKit(paths, guardSource);
