@@ -87,7 +87,7 @@ vi.mock("../src/panel/ChatPanel", () => ({
     // A created tab is a draft (as the real one is) until a test says it sent its first message.
     create: (host: unknown, opening: unknown, column: unknown) => {
       vscodeMock.host = host as import("../src/panel/ChatPanel").PanelHost;
-      const panel = { reveal: vi.fn(), isDraft: true };
+      const panel = { reveal: vi.fn(), isDraft: true, postDeferred: vi.fn() };
       vscodeMock.host.panels.add(panel as never);
       vscodeMock.created.push({ opening, column, panel });
       return panel;

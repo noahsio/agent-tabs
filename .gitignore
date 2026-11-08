@@ -1,6 +1,7 @@
 .superpowers/
 # Private working material: never published.
 private/
+.agent/
 docs/research/
 docs/superpowers/notes/
 docs/superpowers/plans/
