@@ -309,7 +309,7 @@ describe("decision service: hook socket", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect((await admin({ op: "pending" })).items).toHaveLength(1);
     clock.advance(2_000);
-    expect(await waiting).toEqual({ decision: "deny", reason: expect.stringContaining("180") });
+    expect(await waiting).toEqual({ decision: "deny", reason: expect.stringContaining(`отложена до решения человека (#${id})`) });
     expect(await admin({ op: "pending" })).toEqual({ items: [] });
   });
 
@@ -471,6 +471,77 @@ describe("decision service: admin socket", () => {
     clock.advance(181_000);
     expect(await until(() => sub.events.find((event) => event.event === "resolved"))).toMatchObject({ id, decision: "deny", by: "timeout" });
     sub.close();
+  });
+
+  describe("a request nobody answers is deferred, not lost (spec 2026-11-08)", () => {
+    async function deferredRequest(command = "rm -rf $U"): Promise<{ id: string; reason: string }> {
+      const { id, ticket } = await hook(evaluate(command));
+      const waiting = hook({ op: "wait", id, ticket });
+      clock.advance(181_000);
+      const verdict = await waiting;
+      expect(verdict.decision).toBe("deny");
+      return { id, reason: verdict.reason as string };
+    }
+
+    it("the_agent_is_told_it_is_deferred_and_not_to_work_around_it", async () => {
+      await boot({ decider: { mode: "ask-me" } });
+      const sub = await subscribe(paths.adminSock);
+      const { id, reason } = await deferredRequest();
+      expect(reason).toContain(`отложена до решения человека (#${id})`);
+      expect(reason).toContain("Не обходи её другими командами");
+      expect(await until(() => sub.events.find((event) => event.event === "resolved"))).toMatchObject({ id, decision: "deny", by: "timeout", deferred: true });
+      expect((await admin({ op: "deferred" })).items).toEqual([expect.objectContaining({ id, session: SESSION, command: "rm -rf $U", deferredAt: expect.any(String) })]);
+      sub.close();
+    });
+
+    it("allowed_later_it_runs_once_for_that_exact_command_within_a_day", async () => {
+      await boot({ decider: { mode: "ask-me" } });
+      const { id } = await deferredRequest();
+      expect(await admin({ op: "answer", id, decision: "allow-once", by: "agent-tabs" })).toEqual({ ok: true });
+      expect((await admin({ op: "deferred" })).items).toEqual([]);
+      expect((await hook(evaluate("rm -rf $V"))).decision).toBe("pending"); // another command still asks
+      clock.advance(3_600_000);
+      const retried = await hook(evaluate("rm -rf $U"));
+      expect(retried).toMatchObject({ decision: "allow" });
+      expect(retried.reason).toContain(`#${id}`);
+      expect((await hook(evaluate("rm -rf $U"))).decision).toBe("pending"); // once
+    });
+
+    it("an_allowance_not_used_within_a_day_lapses", async () => {
+      await boot({ decider: { mode: "ask-me" } });
+      const { id } = await deferredRequest();
+      await admin({ op: "answer", id, decision: "allow-once", by: "agent-tabs" });
+      clock.advance(24 * 3_600_000 + 1_000);
+      expect((await hook(evaluate("rm -rf $U"))).decision).toBe("pending");
+    });
+
+    it("denied_later_it_leaves_the_list_and_the_command_still_asks", async () => {
+      await boot({ decider: { mode: "ask-me" } });
+      const sub = await subscribe(paths.adminSock);
+      const { id } = await deferredRequest();
+      expect(await admin({ op: "answer", id, decision: "deny", by: "agent-tabs", message: "не трогай эту папку" })).toEqual({ ok: true });
+      expect((await admin({ op: "deferred" })).items).toEqual([]);
+      expect(await until(() => sub.events.find((event) => event.event === "resolved" && event.by === "agent-tabs"))).toMatchObject({ id, decision: "deny", message: "не трогай эту папку", deferred: true });
+      expect((await hook(evaluate("rm -rf $U"))).decision).toBe("pending");
+      sub.close();
+    });
+
+    it("the_deferred_list_and_allowances_survive_a_service_restart", async () => {
+      await boot({ decider: { mode: "ask-me" } });
+      const first = await deferredRequest();
+      const second = await deferredRequest("rm -rf $W");
+      await admin({ op: "answer", id: first.id, decision: "allow-once", by: "agent-tabs" });
+      await svc?.close();
+      svc = await start(agentDir, { now: clock.now, fetchFn: gateway.fetchFn });
+      expect((await admin({ op: "deferred" })).items.map((item: { id: string }) => item.id)).toEqual([second.id]);
+      expect((await hook(evaluate("rm -rf $U"))).decision).toBe("allow");
+    });
+
+    it("a_hard_deny_is_never_lifted_by_an_allowance", async () => {
+      await boot({ decider: { mode: "ask-me" } });
+      expect((await hook(evaluate("rm -rf /"))).decision).toBe("deny");
+      expect((await admin({ op: "deferred" })).items).toEqual([]);
+    });
   });
 
   it("pending_view_carries_no_key", async () => {

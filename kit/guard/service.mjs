@@ -81,6 +81,11 @@ const deny = (reason) => ({ decision: "deny", reason });
 const iso = (ms) => new Date(ms).toISOString();
 const capReason = (text) => (text.length > MAX_REASON ? `${text.slice(0, MAX_REASON - 1)}…` : text);
 const TOO_MANY = "[guard] слишком много ожидающих решений — дождитесь ответа на открытые запросы";
+/** How long a later «allow» of a deferred request stays usable for that exact call. */
+const ALLOWANCE_MS = 24 * 3_600_000;
+/** What the agent reads when nobody answered in time: deferred, not refused — and not to be worked around. */
+const deferredReason = (id) =>
+  `[guard] команда отложена до решения человека (#${id}): его сейчас нет. Не обходи её другими командами; делай остальную работу. Если без неё никак — доведи, что можешь, и опиши, что ждёт одобрения. Когда человек решит, ты получишь сообщение.`;
 
 function readText(file) {
   try {
@@ -97,6 +102,16 @@ function readJsonObject(file) {
   } catch {
     return {};
   }
+}
+
+/** Deferred requests and the allowances later allows left; anything malformed in the file is dropped, not trusted. */
+function loadDeferred(file) {
+  const raw = readJsonObject(file);
+  const items = Array.isArray(raw.items) ? raw.items.filter((item) => item && typeof item.id === "string" && typeof item.key === "string") : [];
+  const allowances = Array.isArray(raw.allowances)
+    ? raw.allowances.filter((entry) => entry && typeof entry.id === "string" && typeof entry.key === "string" && Number.isFinite(entry.expiresAt))
+    : [];
+  return { items, allowances };
 }
 
 /** Secret-named string fields of a JSON value, or the whole text when it is one bare token. */
@@ -315,6 +330,11 @@ export async function startService({
   const log = (line) => console.error(`[guard ${iso(now())}] ${line}`);
   // id -> { id, key, session, view, deadline, waitSeconds, answer, used, tickets: Map<ticket, {tool, waiting}>, waiters, telegramSent }
   const requests = new Map();
+  // Spec 2026-11-08: a request nobody answered in time is deferred, not lost. The person answers it later; an allow
+  // becomes a one-time allowance for exactly that call (its key: command, heredoc bodies and cwd) for ALLOWANCE_MS.
+  const deferredFile = path.join(paths.dir, "deferred.json");
+  const deferredState = loadDeferred(deferredFile);
+  const saveDeferred = () => writeJsonAtomic(deferredFile, deferredState);
   /** socket -> { protocol }: what each connected window can be asked. */
   const subscribers = new Map();
   const connections = new Set();
@@ -670,6 +690,8 @@ export async function startService({
       ...(Array.isArray(verdict.proposal) && verdict.proposal.length > 0 ? { proposal: verdict.proposal } : {}),
     };
 
+    const allowance = takeAllowance(verdict.key);
+    if (allowance) return allow(`[guard] разрешено человеком (отложенный запрос #${allowance.id})`);
     const reused = reuse(verdict.key, call.session, tool);
     if (reused) return reused;
     if (humanOnly || rules.decider.mode === "ask-me") return openRequest(rules, verdict.key, tool, view);
@@ -714,7 +736,7 @@ export async function startService({
       }
     }
     const record = typeof id === "string" ? requests.get(id) : undefined;
-    if (!record) return { ok: false, error: "запрос не найден" };
+    if (!record) return answerDeferred(id, decision, by, message);
     if (record.answer) return { ok: false, error: "запрос уже отвечен" };
     if (decision === "allow-always" && saveWhitelist(record) === null) return { ok: false, error: "нечего внести в вайтлист или правила не сохранить" };
     const words = message !== undefined ? redactor()(message.trim()) : undefined;
@@ -732,12 +754,39 @@ export async function startService({
     return { ok: true };
   }
 
+  /** A deferred request answered later: an allow leaves a one-time allowance for that exact call, a deny only a record. */
+  function answerDeferred(id, decision, by, message) {
+    const index = deferredState.items.findIndex((item) => item.id === id);
+    if (index < 0) return { ok: false, error: "запрос не найден" };
+    const [item] = deferredState.items.splice(index, 1);
+    const allowed = decision !== "deny";
+    if (allowed) deferredState.allowances.push({ id, key: item.key, expiresAt: now() + ALLOWANCE_MS });
+    saveDeferred();
+    const words = message !== undefined ? redactor()(message.trim()) : undefined;
+    broadcast({ event: "resolved", id, decision: allowed ? "allow" : "deny", by, session: item.session, deferred: true, ...(words !== undefined ? { message: words } : {}) });
+    return { ok: true };
+  }
+
+  /** The allowance a deferred-then-allowed request left for this exact call, spent on use; expired ones are dropped. */
+  function takeAllowance(key) {
+    const live = deferredState.allowances.filter((entry) => entry.expiresAt > now());
+    const index = live.findIndex((entry) => entry.key === key);
+    const taken = index < 0 ? undefined : live.splice(index, 1)[0];
+    if (taken !== undefined || live.length !== deferredState.allowances.length) {
+      deferredState.allowances = live;
+      saveDeferred();
+    }
+    return taken;
+  }
+
   function tick() {
     for (const record of [...requests.values()]) {
       if (!record.answer && now() >= record.deadline) {
         requests.delete(record.id);
-        release(record, () => deny(`[guard] человек не ответил за ${record.waitSeconds} с — команда не выполнена`));
-        broadcast({ event: "resolved", id: record.id, decision: "deny", by: "timeout", session: record.session });
+        deferredState.items.push({ ...record.view, key: record.key, deferredAt: iso(now()) });
+        saveDeferred();
+        release(record, () => deny(deferredReason(record.id)));
+        broadcast({ event: "resolved", id: record.id, decision: "deny", by: "timeout", session: record.session, deferred: true });
       } else if (record.answer && now() - record.answer.at > ANSWER_REUSE_MS) requests.delete(record.id);
     }
     pumpTelegram();
@@ -806,6 +855,8 @@ export async function startService({
     switch (message.op) {
       case "pending":
         return { items: openViews() };
+      case "deferred":
+        return { items: deferredState.items.map(({ key: _key, ...view }) => view) };
       case "answer":
         return answerRequest(message.id, message.decision, message.by, message.message);
       case "rules.get":

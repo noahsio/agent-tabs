@@ -211,7 +211,7 @@ describe("two windows, one decision service", () => {
     clock += 61_000;
     const waited = (await waiting) as { decision: string; reason: string };
     expect(waited.decision).toBe("deny");
-    expect(waited.reason).toContain("не ответил");
+    expect(waited.reason).toContain("отложена до решения человека");
     await until(() => window.outside.length === 0); // and the notice goes with it rather than lingering
   });
 });
