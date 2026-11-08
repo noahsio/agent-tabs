@@ -47,6 +47,8 @@ export type PendingView = {
   createdAt: string;
 };
 
+export type DeferredView = PendingView & { deferredAt: string };
+
 /** How this window answers «whose session is this»: it has the tab, it knows whose it is, or it has never heard of it. */
 export type ClaimVerdict = "own" | "knows" | "no";
 
@@ -71,6 +73,7 @@ export type GuardEvent =
       whitelist?: { scopes: string[] };
       /** A deny's words for the agent, as the person wrote them (redacted by the service). */
       message?: string;
+      deferred?: true;
     };
 
 export type RulesSetResult = { ok: true } | { ok: false; errors: FieldError[] };
@@ -165,6 +168,18 @@ export class GuardAdmin {
   async pending(): Promise<PendingView[]> {
     const items = (await this.call({ op: "pending" }))["items"];
     return Array.isArray(items) ? (items as PendingView[]) : [];
+  }
+
+  async deferred(): Promise<DeferredView[]> {
+    const items = (await this.call({ op: "deferred" }))["items"];
+    if (!Array.isArray(items)) return [];
+    return items.filter((item): item is DeferredView =>
+      isObject(item) && typeof item["id"] === "string" && typeof item["session"] === "string" &&
+      typeof item["cwd"] === "string" && typeof item["tool"] === "string" && typeof item["command"] === "string" &&
+      typeof item["createdAt"] === "string" && Number.isFinite(Date.parse(item["createdAt"])) &&
+      typeof item["deferredAt"] === "string" && Number.isFinite(Date.parse(item["deferredAt"])) &&
+      (item["code"] === undefined || typeof item["code"] === "string") &&
+      Array.isArray(item["reasons"]) && item["reasons"].every((reason: unknown) => typeof reason === "string"));
   }
 
   /** `message`: a deny's words for the agent (the hook's deny reason); free text, never logged. */

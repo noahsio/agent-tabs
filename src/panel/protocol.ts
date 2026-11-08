@@ -1,4 +1,6 @@
 import type { AgentStatus, Block, ChatState, ModelRef } from "../chat/model";
+import type { DeferredQuestion } from "../deferred/questions";
+export type { DeferredQuestion } from "../deferred/questions";
 import type { PendingView } from "../guard/admin";
 import type { RewindItem } from "../rewind/plan";
 import type { AnswerOutcome, CommandRow, DialogAnswer, NextMode, OutgoingImage, TabState, UnwedgeOutcome } from "../sessions/controller";
@@ -76,6 +78,65 @@ export type SessionItem = {
   archived: boolean;
   current: boolean;
 };
+
+export type DeferredApproval = { kind: "approval"; id: string; sessionTitle: string; createdAt: number; deferredAt: number; command: string };
+export type DeferredItem = DeferredQuestion | DeferredApproval;
+export type DeferredResult = { type: "deferredResult"; kind: DeferredItem["kind"]; id: string } & ({ ok: true } | { ok: false; reason: string });
+export type DeferredDelivery = { kind: "question" | "approval"; id: string; text: string; createdAt: number; reason: string };
+export type DeferredHostMessage = { type: "deferred"; items: DeferredItem[]; deliveries?: DeferredDelivery[]; error?: string } | DeferredResult;
+export type DeferredAction =
+  | { type: "answerDeferredQuestion"; id: string; answers: string[] }
+  | { type: "dismissDeferredQuestion"; id: string }
+  | { type: "answerDeferredApproval"; id: string; decision: "allow-once" | "deny"; message?: string };
+
+/** The inbox's host messages cross the same untrusted JSON boundary as its actions. */
+export function parseDeferredHostMessage(raw: unknown): DeferredHostMessage | undefined {
+  if (!isObject(raw)) return undefined;
+  if (raw["type"] === "deferredResult") {
+    const { id, kind, ok, reason } = raw;
+    if (!isBlockId(id) || (kind !== "question" && kind !== "approval")) return undefined;
+    if (ok === true) return { type: "deferredResult", id, kind, ok };
+    if (ok === false && typeof reason === "string") return { type: "deferredResult", id, kind, ok, reason };
+    return undefined;
+  }
+  if (raw["type"] !== "deferred" || !Array.isArray(raw["items"]) || (raw["error"] !== undefined && typeof raw["error"] !== "string")) return undefined;
+  const items: DeferredItem[] = [];
+  for (const item of raw["items"]) {
+    if (!isObject(item) || !isBlockId(item["id"]) || typeof item["sessionTitle"] !== "string" ||
+      typeof item["createdAt"] !== "number" || !Number.isFinite(new Date(item["createdAt"]).getTime()) ||
+      typeof item["deferredAt"] !== "number" || !Number.isFinite(new Date(item["deferredAt"]).getTime())) return undefined;
+    const common = { id: item["id"], sessionTitle: item["sessionTitle"], createdAt: item["createdAt"], deferredAt: item["deferredAt"] };
+    if (item["kind"] === "approval" && typeof item["command"] === "string") {
+      items.push({ ...common, kind: "approval", command: item["command"] });
+    } else if (item["kind"] === "question" && typeof item["sessionPath"] === "string" && Array.isArray(item["questions"]) &&
+      item["questions"].length > 0 && (item["decided"] === undefined || typeof item["decided"] === "string")) {
+      const questions: DeferredQuestion["questions"] = [];
+      for (const question of item["questions"]) {
+        if (!isObject(question) || typeof question["header"] !== "string" || typeof question["question"] !== "string" ||
+          typeof question["multiSelect"] !== "boolean" || !Array.isArray(question["options"])) return undefined;
+        const options: { label: string }[] = [];
+        for (const option of question["options"]) {
+          if (!isObject(option) || typeof option["label"] !== "string") return undefined;
+          options.push({ label: option["label"] });
+        }
+        questions.push({ header: question["header"], question: question["question"], multiSelect: question["multiSelect"], options });
+      }
+      items.push({ ...common, kind: "question", sessionPath: item["sessionPath"], questions,
+        ...(typeof item["decided"] === "string" ? { decided: item["decided"] } : {}) });
+    } else return undefined;
+  }
+  const deliveries: DeferredDelivery[] = [];
+  if (raw["deliveries"] !== undefined) {
+    if (!Array.isArray(raw["deliveries"])) return undefined;
+    for (const entry of raw["deliveries"]) {
+      if (!isObject(entry) || !isBlockId(entry["id"]) || (entry["kind"] !== "question" && entry["kind"] !== "approval") ||
+        typeof entry["text"] !== "string" || typeof entry["reason"] !== "string" || typeof entry["createdAt"] !== "number" || !Number.isFinite(new Date(entry["createdAt"]).getTime())) return undefined;
+      deliveries.push({ id: entry["id"], kind: entry["kind"], text: entry["text"], reason: entry["reason"], createdAt: entry["createdAt"] });
+    }
+  }
+  return { type: "deferred", items, ...(raw["deliveries"] !== undefined ? { deliveries } : {}),
+    ...(typeof raw["error"] === "string" ? { error: raw["error"] } : {}) };
+}
 
 /** What `omo.task.output` (mode full) tells about one task, as the agent details modal shows it. */
 export type AgentDetails = {
@@ -173,6 +234,7 @@ export type LadderMessage = { type: "ladder"; view: LadderView | null };
 /** Host → webview. "sent" answers every "send": on `ok: false` the webview gives the text back to the input. */
 export type HostMessage =
   | StateMessage
+  | DeferredHostMessage
   | StateDelta
   | { type: "sent"; id: string; ok: boolean }
   /** Every "answer" gets one: "failed" gives the dialog back to the person, "closed" means OmO had already settled it. */
@@ -214,6 +276,8 @@ export function isNextMode(value: unknown): value is NextMode {
 /** Webview → host. */
 export type WebviewMessage =
   | { type: "ready" }
+  | { type: "listDeferred" }
+  | DeferredAction
   /** `id` is the message's clientMessageId: its block in the feed has it from the moment it is sent. */
   | { type: "send"; id: string; text: string; mode: "auto" | "followUp"; images?: OutgoingImage[] }
   | { type: "stop" }
@@ -402,6 +466,23 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
       if (message === undefined) return { type: "guardAnswer", id, decision };
       const words = typeof message === "string" && decision === "deny" ? message.trim() : "";
       return words !== "" && words.length <= GUARD_MESSAGE_MAX ? { type: "guardAnswer", id, decision, message: words } : undefined;
+    }
+    case "listDeferred":
+      return { type: "listDeferred" };
+    case "dismissDeferredQuestion":
+      return isBlockId(raw["id"]) ? { type: "dismissDeferredQuestion", id: raw["id"] } : undefined;
+    case "answerDeferredQuestion": {
+      const { id, answers } = raw;
+      if (!isBlockId(id) || !Array.isArray(answers) || answers.length < 1 || answers.length > 3 ||
+        !answers.every((answer: unknown) => typeof answer === "string" && answer.trim() !== "" && answer.length <= 2000)) return undefined;
+      return { type: "answerDeferredQuestion", id, answers: answers.map((answer: string) => answer.trim()) };
+    }
+    case "answerDeferredApproval": {
+      const { id, decision, message } = raw;
+      if (!isBlockId(id) || (decision !== "allow-once" && decision !== "deny")) return undefined;
+      if (message === undefined) return { type: "answerDeferredApproval", id, decision };
+      if (decision !== "deny" || typeof message !== "string" || message.trim() === "" || message.length > GUARD_MESSAGE_MAX) return undefined;
+      return { type: "answerDeferredApproval", id, decision, message: message.trim() };
     }
     case "dequeue":
       return isBlockId(raw["blockId"]) ? { type: "dequeue", blockId: raw["blockId"] } : undefined;

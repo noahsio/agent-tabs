@@ -4,6 +4,8 @@ import type { PendingView } from "../src/guard/admin";
 import type {
   AgentDetailsMessage,
   DraftMessage,
+  DeferredHostMessage,
+  DeferredResult,
   GuardStep,
   HostMessage,
   LadderMessage,
@@ -23,6 +25,7 @@ import type { SettingsSection, SettingsState } from "../src/settings/protocol";
 import { ActionsMenu } from "./actionsMenu";
 import { AgentMap } from "./agentMap";
 import { Composer } from "./composer";
+import { DeferredPopover } from "./deferredPopover";
 import { deciderStep, Dock } from "./dock";
 import { TodoStrip } from "./todo";
 import { button, el, type Post } from "./dom";
@@ -53,6 +56,7 @@ export class ChatView {
   private readonly lightbox: Lightbox;
   private readonly popovers: Popovers;
   private readonly sessionsPopover: SessionsPopover;
+  private readonly deferredPopover: DeferredPopover;
   private readonly agentMap: AgentMap;
   private readonly modelPopover: ModelPopover;
   private readonly slashMenu: SlashMenu;
@@ -89,7 +93,12 @@ export class ChatView {
       close();
       this.composer.input.focus();
     };
-    this.sessionsPopover = new SessionsPopover(post, choose);
+    this.deferredPopover = new DeferredPopover(post, (count) => {
+      this.header.setDeferredCount(count);
+      this.sessionsPopover.setDeferredCount(count);
+    });
+    this.sessionsPopover = new SessionsPopover(post, choose, () =>
+      this.popovers.open(this.deferredPopover, { anchor: headerRoot, side: "below" }));
     this.agentMap = new AgentMap(post, choose);
     this.modelPopover = new ModelPopover(post, choose);
     this.rewindConfirm = new RewindConfirm(post);
@@ -102,6 +111,7 @@ export class ChatView {
     const headerRoot = el("header");
     this.header = new Header(headerRoot, post, {
       onOpenSessions: (anchor) => this.popovers.toggle(this.sessionsPopover, { anchor, side: "below" }),
+      onOpenDeferred: (anchor) => this.popovers.toggle(this.deferredPopover, { anchor, side: "below" }),
     });
     // A modal over the tab, opened from the «/» menu; Esc and ✕ close it like any popover.
     this.settingsModal = new SettingsModal(post, { show: () => this.popovers.open(this.settingsModal, { anchor: this.settingsModal.element, side: "center" }), hide: choose });
@@ -195,7 +205,7 @@ export class ChatView {
     root.replaceChildren(headerRoot, this.banner, feedRoot, composerRoot, this.composer.overlay, this.lightbox.element, this.rewindConfirm.element);
     // The composer floats over the feed's bottom (CSS); the feed keeps room for it as it grows with text and attachments.
     new ResizeObserver(() => this.feed.setBottomInset(composerRoot.offsetHeight)).observe(composerRoot);
-    for (const popover of [this.sessionsPopover, this.agentMap, this.modelPopover, this.slashMenu, this.actionsMenu, this.settingsModal, this.messageMenu, this.reconnectDetails])
+    for (const popover of [this.sessionsPopover, this.deferredPopover, this.agentMap, this.modelPopover, this.slashMenu, this.actionsMenu, this.settingsModal, this.messageMenu, this.reconnectDetails])
       this.popovers.register(popover);
   }
 
@@ -345,6 +355,14 @@ export class ChatView {
   /** The project's sessions (this tab's own pin comes with the state, not from here). */
   sessions(items: SessionItem[]): void {
     this.sessionsPopover.update(items);
+  }
+
+  deferred(message: Extract<DeferredHostMessage, { type: "deferred" }>): void {
+    this.deferredPopover.update(message);
+  }
+
+  deferredResult(message: DeferredResult): void {
+    this.deferredPopover.result(message);
   }
 
   // ---------- guard ----------

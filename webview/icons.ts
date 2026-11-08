@@ -8,6 +8,10 @@ const BOX: Shape[] = [
 ];
 
 const SHAPES = {
+  inbox: [
+    ["path", "M4 4.5h16v15H4z"],
+    ["path", "M4 13h5l1.5 3h3l1.5-3h5"],
+  ],
   // A bookmark as tall as the clock (y 3.5–20.5), about 0.72 of that wide with the stroke; the notch as deep as in Claude Code's (~0.19 of the height).
   pin: [["path", "M6.1 3.5h11.8v17L12 16.9l-5.9 3.6z"]],
   sessions: [

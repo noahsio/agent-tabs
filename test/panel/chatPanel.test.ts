@@ -147,6 +147,28 @@ afterEach(async () => {
 });
 
 describe("ChatPanel", () => {
+  it("routes_inbox_actions_without_opening_a_draft_and_posts_confirmations", async () => {
+    const { panel, receive, other } = fakePanel();
+    const deferred = { refresh: vi.fn().mockResolvedValue(undefined), answer: vi.fn().mockResolvedValue(undefined) };
+    const chat = ChatPanel.restore(host({ deferred }), panel, { kind: "new", cwd: "/work" });
+    receive({ type: "ready" });
+    receive({ type: "listDeferred" });
+    receive({ type: "answerDeferredQuestion", id: "q", answers: ["Да"] });
+    await settle(() => deferred.answer.mock.calls.length === 1);
+    expect(deferred.refresh).toHaveBeenCalledTimes(2);
+    expect(deferred.answer).toHaveBeenCalledWith({ type: "answerDeferredQuestion", id: "q", answers: ["Да"] });
+    expect(opens()).toEqual([]);
+    chat.postDeferred({ type: "deferredResult", kind: "question", id: "q", ok: true });
+    expect(other).toContainEqual({ type: "deferredResult", kind: "question", id: "q", ok: true });
+  });
+
+  it("sends_later_answers_through_the_attached_controller_with_the_stable_id", async () => {
+    const { panel } = fakePanel();
+    const chat = ChatPanel.restore(host(), panel, { kind: "attach", sessionPath: SESSION_FILE });
+    daemon.on("prompt", () => ({ data: { disposition: "started" } }));
+    expect(await chat.sendDeferred("Поздний ответ", "deferred-question-q")).toBe(true);
+    expect(daemon.requests).toContainEqual(expect.objectContaining({ type: "prompt", message: "Поздний ответ", clientMessageId: "deferred-question-q" }));
+  });
   it("reconnect_button_reopens_a_session_whose_reopen_failed_on_a_live_connection", async () => {
     const { panel, posted, receive } = fakePanel();
     ChatPanel.restore(host(), panel, { kind: "attach", sessionPath: SESSION_FILE, saved: { sessionPath: SESSION_FILE, modelMode: "auto" } });
