@@ -857,7 +857,9 @@ function onEntryAppended(s: ChatState, frame: Json): ChatState {
   if (!isObject(entry)) return s;
   const cursor = asString(entry["id"]) ?? s.cursor;
   const autoModel = profileAppliedModel(entry) ?? s.autoModel;
-  const leveled = entry["type"] === "thinking_level_change" ? onThinkingLevel(s, entry["thinkingLevel"]) : s;
+  const settled = settlementOf(entry);
+  const base = settled === undefined ? s : settleQuestions(s, [settled]);
+  const leveled = entry["type"] === "thinking_level_change" ? onThinkingLevel(base, entry["thinkingLevel"]) : base;
   return cursor === s.cursor && autoModel === s.autoModel ? leveled : { ...leveled, cursor, autoModel };
 }
 
@@ -881,7 +883,10 @@ function onUiRequest(s: ChatState, frame: Json): ChatState {
   }
   if (!id || typeof method !== "string" || !DIALOG_METHODS.has(method)) return s;
   if (s.dialogs.some((dialog) => dialog.id === id)) return s;
+  const requestIds = questionRequestIds(frame);
+  if (method === "question" && requestIds.some((requestId) => s.settledQuestions?.includes(requestId) === true)) return s;
   const dialog: Dialog = { id, method: method as Dialog["method"], title: dialogTitle(frame) };
+  if (method === "question" && requestIds.length > 0) dialog.requestIds = requestIds;
   // A `question` the agent did not wait on (`waitForAnswer: false`) is a standing invitation, not a turn to block on.
   if (method === "question" && frame["waitForAnswer"] === false) dialog.blocking = false;
   if (Array.isArray(frame["options"])) dialog.options = frame["options"].filter((option): option is string => typeof option === "string");
@@ -1094,13 +1099,38 @@ export function applyFrame(s: ChatState, frame: any, sink?: ImageSink, now: Cloc
     }
     case "question_resolved": {
       const id = asString(frame["id"]);
-      return id && s.dialogs.some((dialog) => dialog.id === id) ? resolveDialog(s, id) : s;
+      const settled = settleQuestions(s, questionRequestIds(frame));
+      return id && settled.dialogs.some((dialog) => dialog.id === id) ? resolveDialog(settled, id) : settled;
     }
     case "extension_event":
       return onExtensionEvent(s, frame);
     default:
       return s;
   }
+}
+
+/** A question frame's own ids — `requestId` and `toolCallId` — either of which OmO's settlement may name. */
+function questionRequestIds(frame: Json): string[] {
+  return [...new Set([asString(frame["requestId"]), asString(frame["toolCallId"])].filter((id): id is string => id !== undefined && id !== ""))];
+}
+
+const SETTLED_QUESTIONS_KEPT = 300;
+
+/** OmO settled these questions: their cards go, and no later listing of them brings one back. */
+function settleQuestions(s: ChatState, requestIds: string[]): ChatState {
+  if (requestIds.length === 0) return s;
+  const known = s.settledQuestions ?? [];
+  const added = requestIds.filter((id) => !known.includes(id));
+  const dialogs = s.dialogs.filter((dialog) => !dialog.requestIds?.some((id) => requestIds.includes(id)));
+  if (added.length === 0 && dialogs.length === s.dialogs.length) return s;
+  return { ...s, dialogs, settledQuestions: [...known, ...added].slice(-SETTLED_QUESTIONS_KEPT) };
+}
+
+/** The journal's record that OmO settled a question (answered, timed out, cancelled): its request id. */
+function settlementOf(entry: Json): string | undefined {
+  if (entry["customType"] !== "ask-user:settlement") return undefined;
+  const data = entry["data"];
+  return isObject(data) ? asString(data["requestId"]) : undefined;
 }
 
 export function resolveDialog(s: ChatState, id: string): ChatState {
@@ -1241,6 +1271,8 @@ export function applyEntries(s: ChatState, entries: any[], sink?: ImageSink): Ch
       next = { ...next, blocks };
     }
     if (entry["type"] === "thinking_level_change") next = onThinkingLevel(next, entry["thinkingLevel"]);
+    const settled = settlementOf(entry);
+    if (settled !== undefined) next = settleQuestions(next, [settled]);
     if (entry["type"] === "model_change") {
       const model = parseModelRef(entry["provider"], entry["modelId"]);
       if (model) next = { ...next, model };
