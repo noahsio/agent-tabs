@@ -2,7 +2,7 @@
   "name": "agent-tabs",
   "displayName": "Agent Tabs",
   "description": "Сессии агента в виде вкладок редактора",
-  "version": "0.4.71",
+  "version": "0.4.72",
   "publisher": "local",
   "icon": "media/icon.png",
   "private": true,
