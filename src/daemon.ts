@@ -54,7 +54,14 @@ export type ProcessOps = {
   cpuSeconds(pid: number): Promise<number | undefined>;
 };
 /** `beforeLaunch` runs before every host start (P7: the protection profile is regenerated there). */
-export type HostDeps = { spawn?: SpawnFn; processes?: ProcessOps; readyTimeoutMs?: number; beforeLaunch?: () => void };
+export type HostDeps = {
+  spawn?: SpawnFn;
+  processes?: ProcessOps;
+  readyTimeoutMs?: number;
+  beforeLaunch?: () => void;
+  /** A file the host appends to every system prompt (`--append-system-prompt`); the autonomy rule. */
+  systemPromptFile?: string;
+};
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
@@ -261,6 +268,7 @@ export class DaemonManager extends EventEmitter {
   private readonly processes: ProcessOps;
   private readonly readyTimeoutMs: number;
   private readonly beforeLaunch: () => void;
+  private readonly systemPromptFile: string | undefined;
 
   constructor(
     private readonly env: OmoEnv,
@@ -271,6 +279,7 @@ export class DaemonManager extends EventEmitter {
     this.processes = deps.processes ?? systemProcesses;
     this.readyTimeoutMs = deps.readyTimeoutMs ?? HOST_READY_TIMEOUT_MS;
     this.beforeLaunch = deps.beforeLaunch ?? (() => undefined);
+    this.systemPromptFile = deps.systemPromptFile;
   }
 
   /** Secret values to redact from anything shown to the person. */
@@ -463,7 +472,9 @@ export class DaemonManager extends EventEmitter {
    * own LSP daemon dir, so it never talks to an unsandboxed daemon (F5.3).
    */
   private hostCommand(location: HostLocation): { file: string; args: string[]; env: Record<string, string> } {
-    const hostArgs = ["--mode", "rpc", "--listen", `unix://${location.socket}`];
+    // The rule goes first: the `--mode rpc --listen unix://<socket>` tail must stay last, it is how our host is recognised.
+    const rule = this.systemPromptFile === undefined ? [] : ["--append-system-prompt", this.systemPromptFile];
+    const hostArgs = [...rule, "--mode", "rpc", "--listen", `unix://${location.socket}`];
     // SENPI_BIN tells omo's memory-reflection child which executable to re-exec; it reads it from its parent env, and
     // the bare `SENPI_` scrub (src/env.ts) drops any inherited one, so it is set here from the resolved omo path.
     const env = { ...this.env.env, SENPI_BIN: this.env.omoPath };
