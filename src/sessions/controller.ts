@@ -557,6 +557,35 @@ export class SessionController extends EventEmitter {
     else await this.drainQueueAfterStop();
   }
 
+  /** Called only after confirmation. Abort does not cancel extension work in OmO 5.1.59. */
+  async stopBackground(): Promise<void> {
+    const background = this.current.background;
+    if (this.current.running || this.turnStarting || background === undefined) return;
+    try {
+      const data = await this.taskRequest("omo.task.list", {});
+      this.throwOnTaskFailure(data);
+      this.commit(applyTaskList(this.current, data));
+      const tasks = this.current.agents.filter((agent) => agent.taskId !== undefined && (agent.status === "running" || agent.status === "waiting"));
+      for (const task of tasks) {
+        if (this.current.running || this.turnStarting) return;
+        if (task.taskId !== undefined) await this.cancelTask(task.taskId);
+      }
+      if (tasks.length > 0) this.note("info", `Отмена фоновых задач запрошена: ${tasks.length}`);
+      if (background.sources.includes("terminal-background-sessions")) {
+        if (this.current.running || this.turnStarting) return;
+        // No interrupt or child detachment: a new turn or remaining children must prevent the unload.
+        this.noteInterrupt("Выгружаю сессию: остановить фоновые команды — подтвердил человек");
+        const result = await this.unloadSession({ force: true });
+        this.note(result.outcome === "unloaded" ? "info" : "warn",
+          result.outcome === "unloaded" ? "Фоновые команды остановлены" : `Не удалось остановить фоновые команды: ${result.reason}`);
+      }
+      const unsupported = background.sources.filter((source) => source !== "senpi-task" && source !== "terminal-background-sessions");
+      if (unsupported.length > 0) this.note("warn", `Отмена этих фоновых задач через RPC недоступна: ${unsupported.join(", ")}`);
+    } catch (error) {
+      this.fail(error);
+    }
+  }
+
   /**
    * Delivers what was queued behind a turn the person stopped. Each still-queued message is first removed from OmO's
    * own queue (`dequeue_message`); only if that removal succeeds is it re-sent, so a message OmO delivered after all is
@@ -592,9 +621,13 @@ export class SessionController extends EventEmitter {
    */
   async unwedgeSession(why: string = "попросил человек"): Promise<UnwedgeOutcome> {
     this.noteInterrupt(`Выгружаю сессию: «Снять зависание» — ${why}`);
+    return this.unloadSession({ interrupt: true, force: true, children: "detach" });
+  }
+
+  private async unloadSession(fields: Frame): Promise<UnwedgeOutcome> {
     let data: Frame;
     try {
-      data = await this.request<Frame>("unload_session", { interrupt: true, force: true, children: "detach" });
+      data = await this.request<Frame>("unload_session", fields);
     } catch (error) {
       this.fail(error);
       return { outcome: "failed", reason: redact(errorText(error), this.dm.secrets) };
@@ -1283,7 +1316,7 @@ export class SessionController extends EventEmitter {
    * it was showing — is never carried over: after a reopen only the host's word counts.
    */
   private seedFromState(base: ChatState, sessionState: Frame): ChatState {
-    const { error: _cleared, activity: _verb, activityTool: _tool, ...rest } = base;
+    const { error: _cleared, activity: _verb, activityTool: _tool, background: _background, ...rest } = base;
     const lifecycle = sessionState["lifecycle"];
     const running = lifecycleRunning(lifecycle) ?? sessionState["isStreaming"] === true;
     const blocks = running

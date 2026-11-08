@@ -117,6 +117,51 @@ describe("chat reducer", () => {
       expect(state.blocks[0]).toMatchObject({ images: [{ id: "m1:0", mimeType: "image/png" }], delivery: { state: "sending" } });
     });
 
+    it.each([true, false])("merges an inline-image queue copy by ID first, then text (ID=%s)", (withId) => {
+      const images = [{ id: "m1:0", mimeType: "image/png", name: "image.png" }];
+      let state = addOutgoing(initialState(), { id: "m1", text: "когда модель ответит?", images });
+      const ordered = [{ text: "[картинка 1]когда модель ответит?", queuedId: "q1", ...(withId ? { clientMessageId: "m1" } : {}) }];
+      state = applyFrame(state, { type: "queue_update", ordered });
+      expect(state.blocks).toEqual([{
+        kind: "user", id: "m1", text: ordered[0]?.text, images, delivery: { state: "queued", queuedId: "q1" },
+      }]);
+      state = reviseQueued(state, "m1", "[картинка 1]а теперь?", 2);
+      state = applyFrame(state, { type: "queue_update", ordered: [{ ...ordered[0], text: "[картинка 1]а теперь?", revision: 2 }] });
+      expect(state.blocks).toHaveLength(1);
+      const sink = vi.fn();
+      state = applyFrame(state, userStart("m1", "", { content: [
+        { type: "text", text: "[картинка 1]а теперь?" }, { type: "image", data: "QUJD", mimeType: "image/png", name: "image.png" },
+      ] }), sink);
+      expect(state.blocks).toEqual([{ kind: "user", id: "m1", text: "[картинка 1]а теперь?", timestamp: 5, images }]);
+      expect(sink).toHaveBeenCalledWith(images[0], "QUJD");
+    });
+
+    it("merges an inline-image queue that arrived before the local bubble", () => {
+      const queued = applyFrame(initialState(), { type: "queue_update", ordered: [{ queuedId: "q1", text: "[картинка 1]проверь" }] });
+      const state = addOutgoing(queued, { id: "m1", text: "проверь", images: [{ id: "m1:0", mimeType: "image/png" }] });
+      expect(state.blocks).toEqual([{
+        kind: "user", id: "m1", text: "[картинка 1]проверь",
+        images: [{ id: "m1:0", mimeType: "image/png" }], delivery: { state: "queued", queuedId: "q1" },
+      }]);
+    });
+
+    it("never merges different client IDs or ambiguous repeated image messages", () => {
+      let state = addOutgoing(initialState(), { id: "m1", text: "проверь", images: [{ id: "m1:0", mimeType: "image/png" }] });
+      const different = applyFrame(state, { type: "queue_update", ordered: [{ clientMessageId: "m2", queuedId: "q1", text: "[картинка 1]проверь" }] });
+      expect(different.blocks.map((block) => block.id)).toEqual(["m1", "m2"]);
+      state = addOutgoing(state, { id: "m2", text: "проверь", images: [{ id: "m2:0", mimeType: "image/png" }] });
+      const ambiguous = applyFrame(state, { type: "queue_update", ordered: [{ queuedId: "q1", text: "[картинка 1]проверь" }] });
+      expect(ambiguous.blocks.map((block) => block.id)).toEqual(["m1", "m2", "queued:q1"]);
+    });
+
+    it("does not normalize a literal marker without its attached picture", () => {
+      const state = applyFrame(sending("m1", "проверь"), { type: "queue_update", ordered: [{ queuedId: "q1", text: "[картинка 1]проверь" }] });
+      expect(state.blocks.map((block) => block.id)).toEqual(["m1", "queued:q1"]);
+      const withImage = addOutgoing(initialState(), { id: "m1", text: "проверь", images: [{ id: "m1:0", mimeType: "image/png" }] });
+      const invalid = applyFrame(withImage, { type: "queue_update", ordered: [{ queuedId: "q1", text: "[картинка 2]проверь" }] });
+      expect(invalid.blocks).toHaveLength(2);
+    });
+
     it("turns_queued_in_place_and_follows_edits_from_queue_updates", () => {
       let state = applyFrame(sending("m1", "steer me"), { type: "assistant_placeholder" });
       state = applyFrame(state, { type: "queue_update", ordered: [{ text: "steer me", mode: "steer", queuedId: "q_3", revision: 1, clientMessageId: "m1" }] });
@@ -675,6 +720,25 @@ describe("chat reducer: redesigned-UI model", () => {
     expect(state).toMatchObject({ running: false, activity: "idle" });
   });
 
+  it.each(["waiting_background", "waiting_children"])("ends the turn at %s while retaining background work", (state) => {
+    // OmO 5.1.59 live scratch capture: no runActive field on the wire, no activity, isStreaming=false.
+    const waitingOn = {
+      children: 2,
+      background: [{ source: "terminal-background-sessions", activeCount: 3, items: [{ id: "bash_1", label: "sleep 90" }], omittedItems: 2 }],
+      human: [],
+    };
+    let chat = applyFrame(initialState(), { type: "agent_start" });
+    chat = applyFrame(chat, { type: "agent_end", messages: [] });
+    chat = applyFrame(chat, { type: "session_lifecycle", lifecycle: { state, seq: 3, runId: "active", waitingOn } });
+    expect(chat).toMatchObject({ running: false, activity: "idle", background: { count: 5 } });
+    const same = applyFrame(chat, { type: "session_lifecycle", lifecycle: { state, seq: 3, runId: "active", waitingOn } });
+    expect(same).toBe(chat);
+    chat = applyFrame(chat, { type: "session_lifecycle", lifecycle: { state: "running", waitingOn, activity: { kind: "model" } } });
+    expect(chat).toMatchObject({ running: true, activity: "thinking", background: { count: 5 } });
+    chat = applyFrame(chat, { type: "session_lifecycle", lifecycle: { state: "done", waitingOn: { children: 0, background: [], human: [] } } });
+    expect(chat.background).toBeUndefined();
+  });
+
   it("a_run_the_host_already_stopped_is_not_running", () => {
     const life = (lifecycle: object) => ({ type: "session_lifecycle", lifecycle });
     // a turn whose model request errored out: turn_end and agent_end arrive, agent_settled never does, and the
@@ -688,7 +752,7 @@ describe("chat reducer: redesigned-UI model", () => {
     state = applyFrame(state, life({ state: "running", runId: "r2", lastStop: { runId: "r1", cause: "error" } }));
     expect(state.running).toBe(true);
     // a state the lifecycle has no word on leaves the turn as it was
-    expect(applyFrame(state, life({ state: "waiting_background", runId: "r2" })).running).toBe(true);
+    expect(applyFrame(state, life({ state: "paused", runId: "r2" })).running).toBe(true);
   });
 
   it("thinking_level_tracked", () => {

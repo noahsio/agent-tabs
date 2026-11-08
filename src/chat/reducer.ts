@@ -518,6 +518,17 @@ function onMessageStart(s: ChatState, frame: Json, sink: ImageSink | undefined):
 /** Ids of queued messages known only from a queue frame (another client's, sent without a clientMessageId). */
 const FOREIGN_QUEUED = "queued:";
 
+/** Like the feed's chips: only the first marker for an attached picture is an image, all others are literal text. */
+function withoutImageMarkers(text: string, imageCount: number): string {
+  const used = new Set<number>();
+  return text.replace(/\[картинка (\d+)\]/g, (marker: string, digits: string): string => {
+    const index = Number(digits);
+    if (index < 1 || index > imageCount || used.has(index)) return marker;
+    used.add(index);
+    return "";
+  }).trim();
+}
+
 function removeQueuedByText(blocks: Block[], text: string): Block[] {
   const index = blocks.findIndex((block) => block.kind === "user" && block.id.startsWith(FOREIGN_QUEUED) && block.text === text);
   return index < 0 ? blocks : [...blocks.slice(0, index), ...blocks.slice(index + 1)];
@@ -684,7 +695,18 @@ function onQueueUpdate(s: ChatState, frame: Json): ChatState {
   for (const item of ordered) {
     if (!isObject(item) || typeof item["text"] !== "string") continue;
     const queuedId = asString(item["queuedId"]);
-    const id = asString(item["clientMessageId"]) ?? `${FOREIGN_QUEUED}${queuedId ?? listed.size}`;
+    const clientMessageId = asString(item["clientMessageId"]);
+    let id = clientMessageId ?? `${FOREIGN_QUEUED}${queuedId ?? listed.size}`;
+    if (clientMessageId === undefined) {
+      // Never let text override an explicit ID, or guess between two identical messages.
+      const matches = s.blocks.filter((block): block is UserBlock =>
+        block.kind === "user" && block.delivery !== undefined && !block.id.startsWith(FOREIGN_QUEUED) &&
+        !listed.has(block.id) && (block.images?.length ?? 0) > 0 &&
+        ((queuedId !== undefined && block.delivery.state === "queued" && block.delivery.queuedId === queuedId) ||
+          withoutImageMarkers(block.text, block.images?.length ?? 0) === withoutImageMarkers(item["text"], block.images?.length ?? 0)),
+      );
+      if (matches.length === 1) id = (matches[0] as UserBlock).id;
+    }
     if (superseded.has(id)) continue;
     const revision = typeof item["revision"] === "number" ? { revision: item["revision"] } : {};
     const answer = answerFromText(s.blocks, item["text"]); // an answer waiting in the queue is already a card, never its protocol text
@@ -718,9 +740,18 @@ export function addOutgoing(s: ChatState, message: { id: string; text: string; i
   const block: UserBlock = { kind: "user", id: message.id, text: message.text, delivery: { state: "sending" } };
   if (message.images !== undefined && message.images.length > 0) block.images = message.images;
   if (message.supersedes !== undefined) block.supersedes = message.supersedes;
+  const matches = (message.images?.length ?? 0) === 0 ? [] : s.blocks.filter((other): other is UserBlock =>
+    other.kind === "user" && other.id.startsWith(FOREIGN_QUEUED) && other.delivery?.state === "queued" &&
+    withoutImageMarkers(other.text, message.images?.length ?? 0) === withoutImageMarkers(message.text, message.images?.length ?? 0),
+  );
+  const queued = matches.length === 1 ? matches[0] : undefined;
+  if (queued?.delivery?.state === "queued") {
+    block.text = queued.text;
+    block.delivery = queued.delivery;
+  }
   const superseded = (other: Block): boolean =>
     message.supersedes !== undefined && other.kind === "user" && other.id === message.supersedes && other.delivery !== undefined;
-  return { ...s, blocks: [...s.blocks.filter((other) => other !== existing && !superseded(other)), block] };
+  return { ...s, blocks: [...s.blocks.filter((other) => other !== existing && other !== queued && !superseded(other)), block] };
 }
 
 /** Takes back a message that never reached the conversation (refused, handled by a command, or dequeued). */
@@ -764,10 +795,12 @@ function onAgentSettled(s: ChatState): ChatState {
  * this very run, the turn is over however `state` still reads. OmO leaves exactly that behind twice — a turn whose
  * model request errored out gets `turn_end`/`agent_end` and no `agent_settled`, and a session reopened after a park
  * reports the state its last turn was left in — so without this the tab would wait for an end frame that never comes.
- * Undefined means the lifecycle says nothing either way (`waiting_background`, `waiting_children`, no lifecycle).
+ * Undefined means the lifecycle says nothing either way (an unknown state or no lifecycle).
  */
 export function lifecycleRunning(lifecycle: unknown): boolean | undefined {
   if (!isObject(lifecycle)) return undefined;
+  // 5.1.59 emits these only after the turn ends; runActive is not part of its wire snapshot.
+  if (lifecycle["state"] === "waiting_background" || lifecycle["state"] === "waiting_children") return false;
   const runId = lifecycle["runId"];
   const stopped = isObject(lifecycle["lastStop"]) ? lifecycle["lastStop"]["runId"] : undefined;
   if (lifecycle["state"] === "done" || (typeof runId === "string" && runId === stopped)) return false;
@@ -825,6 +858,15 @@ export function goalCardNotice(frame: unknown): boolean {
 
 /** The lifecycle's own word on the turn, applied to a state: the verb it names, or the turn's end. */
 export function applyLifecycle(s: ChatState, lifecycle: unknown): ChatState {
+  if (isObject(lifecycle) && isObject(lifecycle["waitingOn"])) {
+    const waitingOn = lifecycle["waitingOn"];
+    const sources = (Array.isArray(waitingOn["background"]) ? waitingOn["background"] : [])
+      .filter((source): source is Json => isObject(source) && source["source"] !== "ask-user" && typeof source["activeCount"] === "number" && source["activeCount"] > 0);
+    const count = (typeof waitingOn["children"] === "number" ? waitingOn["children"] : 0) +
+      sources.reduce((total, source) => total + source["activeCount"], 0);
+    const background = count > 0 ? { count, sources: sources.map((source) => String(source["source"])) } : undefined;
+    if (JSON.stringify(background) !== JSON.stringify(s.background)) s = { ...s, background };
+  }
   const running = lifecycleRunning(lifecycle);
   if (running === false) return withActivity(s, false, "idle", undefined);
   if (running === undefined || !isObject(lifecycle)) return s;

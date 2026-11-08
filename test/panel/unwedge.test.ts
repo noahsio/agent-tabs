@@ -139,6 +139,65 @@ afterEach(async () => {
 });
 
 describe("unwedgeSession", () => {
+  it.each([false, true])("asks before stopping background tasks (confirm=%s)", async (confirm) => {
+    const { posted, receive } = await wedgedTab();
+    daemon.on("extension_request", (request) => ({
+      data: request["name"] === "omo.task.list"
+        ? { tasks: [{ task_id: "t1", status: "running" }, { task_id: "t2", status: "running" }] }
+        : { kind: "cancelled", status: "cancelled" },
+    }));
+    daemon.push({ sessionId: "rpc-1", type: "session_lifecycle", lifecycle: {
+      state: "waiting_background", waitingOn: { children: 0, background: [{ source: "senpi-task", activeCount: 2 }], human: [] },
+    } });
+    await settle(() => posted.at(-1)?.state.background?.count === 2);
+    vi.mocked(vscode.window.showWarningMessage).mockResolvedValueOnce(confirm ? { title: "Остановить" } : undefined);
+    receive({ type: "stop" });
+    await settle(() => vi.mocked(vscode.window.showWarningMessage).mock.calls.length > 0);
+    expect(vscode.window.showWarningMessage).toHaveBeenCalledWith("Остановить фоновые задачи?", { modal: true }, { title: "Остановить" });
+    if (confirm) {
+      await settle(() => notices(posted).some((text) => text.includes("Отмена фоновых задач запрошена: 2")));
+      expect(requests("extension_request").filter((request) => request["name"] === "omo.task.cancel").map((request) => request["data"]))
+        .toEqual([{ task_id: "t1", parent_session_id: "durable-1" }, { task_id: "t2", parent_session_id: "durable-1" }]);
+    } else {
+      expect(requests("extension_request").filter((request) => request["name"] === "omo.task.cancel")).toEqual([]);
+    }
+    expect(requests("abort")).toEqual([]);
+    expect(requests("unload_session")).toEqual([]);
+  });
+
+  it("stops background bash only after confirmation and refuses a late automatic restart", async () => {
+    const { posted, other, receive } = await wedgedTab();
+    daemon.on("extension_request", () => ({ data: { tasks: [] } }));
+    daemon.push({ sessionId: "rpc-1", type: "session_lifecycle", lifecycle: {
+      state: "waiting_background", waitingOn: { children: 0, background: [{ source: "terminal-background-sessions", activeCount: 1 }], human: [] },
+    } });
+    await settle(() => posted.at(-1)?.state.background?.count === 1);
+    daemon.on("unload_session", () => ({ data: { outcome: "unloaded", sessionPath: SESSION_FILE } }));
+    daemon.on("open_session", () => ({ data: openData("rpc-2", false) }));
+    vi.mocked(vscode.window.showWarningMessage).mockResolvedValueOnce({ title: "Остановить" });
+    receive({ type: "stop" });
+    await settle(() => requests("open_session").length === 2);
+    expect(requests("unload_session")).toEqual([expect.objectContaining({ force: true })]);
+    expect(requests("unload_session")[0]).not.toHaveProperty("interrupt");
+    await settle(() => posted.at(-1)?.state.background === undefined);
+    receive({ type: "unwedge", auto: true });
+    await settle(() => other.some((message) => message["type"] === "unwedged"));
+    expect(other.at(-1)).toMatchObject({ outcome: "refused", reason: "Ход уже завершён" });
+    expect(requests("unload_session")).toHaveLength(1);
+  });
+
+  it("refuses an automatic restart while only children remain", async () => {
+    const { posted, other, receive } = await wedgedTab();
+    daemon.push({ sessionId: "rpc-1", type: "session_lifecycle", lifecycle: {
+      state: "waiting_children", waitingOn: { children: 2, background: [], human: [] },
+    } });
+    await settle(() => posted.at(-1)?.state.background?.count === 2);
+    receive({ type: "unwedge", auto: true });
+    await settle(() => other.some((message) => message["type"] === "unwedged"));
+    expect(other.at(-1)).toMatchObject({ outcome: "refused", reason: "Ход уже завершён" });
+    expect(requests("unload_session")).toEqual([]);
+  });
+
   it("unloads_the_stuck_session_and_opens_it_again_in_the_same_tab", async () => {
     const { posted, other, receive } = await wedgedTab();
     daemon.on("unload_session", (request) => ({
@@ -211,6 +270,8 @@ describe("unwedgeSession", () => {
     expect(requests("unload_session").length).toBe(1);
 
     // The same session asking again within the cooldown is told so, and nothing is unloaded a second time.
+    daemon.push({ sessionId: "rpc-2", type: "agent_start" });
+    await settle(() => posted.at(-1)?.state.running === true);
     receive({ type: "unwedge", auto: true });
     await settle(() => other.filter((message) => message["type"] === "unwedged").length === 2);
     expect(other.at(-1)).toEqual({ type: "unwedged", auto: true, outcome: "cooldown" });
@@ -223,7 +284,7 @@ describe("unwedgeSession", () => {
   });
 
   it("a_persons_stop_releases_the_ration_so_the_next_bounded_restart_is_not_declined", async () => {
-    const { other, receive } = await wedgedTab();
+    const { posted, other, receive } = await wedgedTab();
     daemon.on("abort", () => ({}));
     daemon.on("unload_session", (request) => ({
       data: { outcome: "unloaded", sessionPath: SESSION_FILE },
@@ -236,6 +297,8 @@ describe("unwedgeSession", () => {
     await settle(() => other.some((message) => message["type"] === "unwedged"));
     expect(requests("unload_session").length).toBe(1);
 
+    daemon.push({ sessionId: "rpc-2", type: "agent_start" });
+    await settle(() => posted.at(-1)?.state.running === true);
     // The person presses «Стоп»; abort does not end the turn, so the composer falls back to the bounded restart. Because
     // Stop released the ration, that restart runs instead of being declined — Stop frees the tab every time.
     receive({ type: "stop" });

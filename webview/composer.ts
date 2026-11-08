@@ -204,6 +204,7 @@ export class Composer {
   private readonly modelLevel: HTMLElement;
   private readonly send: HTMLButtonElement;
   private readonly stop: HTMLButtonElement;
+  private readonly backgroundLine = el("div", { class: "wedge", "data-role": "background-status", role: "status" });
   /** The quiet line under the box that offers «Снять зависание», and what it says. */
   private readonly wedge: HTMLElement;
   private readonly wedgeText: HTMLElement;
@@ -382,7 +383,8 @@ export class Composer {
       this.picker,
     );
     root.classList.add("composer");
-    root.replaceChildren(this.box, this.ladderLine, this.wedge);
+    this.backgroundLine.hidden = true;
+    root.replaceChildren(this.box, this.backgroundLine, this.ladderLine, this.wedge);
     this.renderAttachments();
   }
 
@@ -391,7 +393,11 @@ export class Composer {
     this.field.placeholder = state.running ? RUNNING_PLACEHOLDER : IDLE_PLACEHOLDER;
     this.updateHistory(state.blocks);
     this.running = state.running;
-    this.stop.hidden = !state.running;
+    const background = !state.running && (state.background?.count ?? 0) > 0;
+    this.stop.hidden = !state.running && !background;
+    this.stop.title = background ? "Остановить фоновые задачи" : "Остановить агента";
+    this.backgroundLine.hidden = !background;
+    this.backgroundLine.textContent = background ? `Ход завершён · фоновых задач: ${state.background?.count}` : "";
 
     const models = message.models ?? [];
     const auto = tab.modelMode === "auto";
@@ -458,6 +464,7 @@ export class Composer {
    * question the person is parked on, not only from a turn whose composer was on screen.
    */
   noteStop(): void {
+    if (!this.running) return;
     this.stoppedAt = Date.now();
     this.armWedge();
   }
