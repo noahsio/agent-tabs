@@ -886,6 +886,48 @@ describe("a goal OmO stopped is not a turn waiting for an answer", () => {
     expect(applyFrame(initialState(), life(lifecycle))).toMatchObject({ running: true, activity: "waiting_human" });
   });
 
+  /**
+   * Seen live (2026-11-08): a non-blocking question was answered at 12:37 — the journal holds its `ask-user:settlement`
+   * — yet every one of 25 reopens that followed put its card back, from OmO's `pendingQuestions`. The card could not be
+   * closed for good: an answer came back «already resolved» and the next reopen showed it again.
+   */
+  describe("a question OmO already settled never comes back", () => {
+    const REQUEST = "call_c3d6|fc_0caa";
+    const asked = (id = "q1") => ({
+      type: "extension_ui_request",
+      method: "question",
+      id,
+      requestId: REQUEST,
+      toolCallId: REQUEST,
+      waitForAnswer: false,
+      questions: [{ id: "a", header: "Перевод ZEC", question: "Пересобрали?" }],
+    });
+    const settlement = { type: "custom", customType: "ask-user:settlement", id: "e1", data: { requestId: REQUEST, status: "answered" } };
+
+    it("the_journals_settlement_removes_the_card_the_open_state_listed", () => {
+      const opened = applyFrame(initialState(), asked()); // `pendingQuestions` of open_session, applied first
+      expect(opened.dialogs).toHaveLength(1);
+      expect(applyEntries(opened, [settlement]).dialogs).toEqual([]);
+    });
+
+    it("once_settled_a_later_listing_of_it_is_ignored", () => {
+      const settled = applyEntries(initialState(), [settlement]); // the journal of an earlier open
+      expect(applyFrame(settled, asked("q-again")).dialogs).toEqual([]); // a reopen's stale `pendingQuestions`
+      const resolved = applyFrame(applyFrame(initialState(), asked()), { type: "question_resolved", id: "q1", requestId: REQUEST, outcome: "answered" });
+      expect(applyFrame(resolved, asked("q-again")).dialogs).toEqual([]);
+    });
+
+    it("a_settlement_appended_live_removes_the_card_too", () => {
+      const opened = applyFrame(initialState(), asked());
+      expect(applyFrame(opened, { type: "entry_appended", entry: settlement }).dialogs).toEqual([]);
+    });
+
+    it("another_question_is_not_touched", () => {
+      const opened = applyFrame(initialState(), { ...asked("q2"), requestId: "other", toolCallId: "other" });
+      expect(applyEntries(opened, [settlement]).dialogs).toHaveLength(1);
+    });
+  });
+
   it("a_question_frame_is_tagged_blocking_by_its_waitForAnswer", () => {
     const frame = (waitForAnswer: unknown) => ({
       type: "extension_ui_request",

@@ -116,6 +116,8 @@ export type Dialog = {
   prefill?: string;
   /** When OmO settles the dialog by itself (its `timeout`): it is gone after that, answered or not. Epoch ms. */
   deadlineAt?: number;
+  /** A question's own request id (and tool call id): what OmO's settlement of it names. */
+  requestIds?: string[];
 };
 
 export type AgentStatus = "running" | "done" | "error" | "waiting";
@@ -145,6 +147,11 @@ export type ModelRef = { provider: string; id: string };
 export type ChatState = {
   blocks: Block[];
   dialogs: Dialog[];
+  /**
+   * Request ids of questions OmO already settled (its journal's `ask-user:settlement`, a `question_resolved`): a reopen's
+   * `pendingQuestions` can still list one, and its card must not come back. The newest few hundred are kept.
+   */
+  settledQuestions?: string[];
   agents: AgentRow[];
   running: boolean;
   activity?: SessionActivity;
