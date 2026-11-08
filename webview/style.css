@@ -3810,6 +3810,11 @@ button.pill.mode-chip {
   font-size: 12px;
 }
 
+.settings input.st-narrow {
+  width: 6ch;
+  flex: none;
+}
+
 /* ---------- settings · «Модели и роли» (the grid role → model → power after the mockup's roles table) ---------- */
 
 .st-roles {

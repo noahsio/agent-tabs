@@ -94,8 +94,18 @@ describe("EnvironmentHost", () => {
       omoVersion: "5.1.59",
       restartNeeded: false,
       restartHint: RESTART_HINT,
+      questionTimeoutMinutes: 30, // nothing in settings.json yet: OmO's own default is what it waits
     });
     expect(RESTART_HINT).toBe("Перезапустить OmO — нужно после смены папок");
+  });
+
+  it("the_question_timeout_is_set_in_the_environments_settings_and_checked", async () => {
+    await host.perform(parsed({ kind: "questionTimeout.set", minutes: 7 }));
+    expect((await host.view()).questionTimeoutMinutes).toBe(7);
+    expect(JSON.parse(fs.readFileSync(path.join(paths.agentDir, "settings.json"), "utf8"))).toEqual({ askUser: { timeoutMinutes: 7 } });
+    expect(host.parse({ kind: "questionTimeout.set", minutes: "7" })).toBeUndefined();
+    await expect(host.perform({ kind: "questionTimeout.set", minutes: 0 })).rejects.toThrow(FieldErrors);
+    expect((await host.view()).questionTimeoutMinutes).toBe(7);
   });
 
   it("folder_change_updates_the_vscode_setting_and_asks_for_restart", async () => {

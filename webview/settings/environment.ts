@@ -18,6 +18,7 @@ export class EnvironmentSection implements SectionView {
   private readonly inputs = new Map<Folder, HTMLInputElement>();
   private readonly version: HTMLElement;
   private readonly hint: HTMLElement;
+  private readonly timeout: HTMLInputElement;
   private last: EnvironmentView | undefined;
 
   constructor(private readonly context: SectionContext) {
@@ -33,6 +34,22 @@ export class EnvironmentSection implements SectionView {
       this.inputs.set(folder, input);
       fields.append(el("div", { class: "st-field" }, el("label", {}, label), input));
     }
+    this.timeout = el("input", { class: "st-mono st-narrow", type: "number", min: "1", max: "120", step: "1", "data-field": "questionTimeout", "aria-label": "Ответ на вопрос агента, мин" });
+    this.timeout.addEventListener("change", () => {
+      const minutes = Number(this.timeout.value);
+      if (this.timeout.value.trim() !== "" && minutes !== this.last?.questionTimeoutMinutes) this.context.act({ kind: "questionTimeout.set", minutes });
+    });
+    this.timeout.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") this.timeout.blur();
+    });
+    fields.append(
+      el(
+        "div",
+        { class: "st-field" },
+        el("label", {}, "Ждать ответа на вопрос"),
+        el("div", { class: "st-row" }, this.timeout, el("span", { class: "st-s" }, "мин — потом агент продолжает сам (1–120)")),
+      ),
+    );
     this.version = el("span", { class: "st-mono", "data-role": "omo-version" });
     this.hint = el("span", { class: "st-s", "data-role": "restart-hint" });
     fields.append(
@@ -60,6 +77,7 @@ export class EnvironmentSection implements SectionView {
 
   private render(view: EnvironmentView): void {
     for (const [folder, input] of this.inputs) if (document.activeElement !== input) input.value = view.folders[folder];
+    if (document.activeElement !== this.timeout) this.timeout.value = String(view.questionTimeoutMinutes);
     this.version.textContent = view.omoVersion ?? view.omoUnavailable ?? "";
     this.version.classList.toggle("st-muted", view.omoVersion === undefined);
     // the mockup's «нужно после смены папок» beside the button; the whole hint once the folders really changed

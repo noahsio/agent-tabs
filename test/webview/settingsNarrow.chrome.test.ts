@@ -68,6 +68,7 @@ const STATE = {
     omoVersion: "5.1.59",
     restartNeeded: false,
     restartHint: "Перезапустить OmO — нужно после смены папок",
+    questionTimeoutMinutes: 5,
   },
 };
 
