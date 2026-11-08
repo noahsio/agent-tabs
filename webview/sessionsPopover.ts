@@ -22,6 +22,7 @@ export class SessionsPopover implements PopoverContent {
   readonly element: HTMLElement;
   private readonly search: HTMLInputElement;
   private readonly list: HTMLElement;
+  private readonly deferred: HTMLButtonElement;
   private items: SessionItem[] = [];
   /** Index into the filtered rows. */
   private selected = 0;
@@ -37,7 +38,9 @@ export class SessionsPopover implements PopoverContent {
   constructor(
     private readonly post: Post,
     private readonly close: () => void,
+    openDeferred?: (anchor: HTMLElement) => void,
   ) {
+    this.deferred = button("Отложенные", { class: "mrow", "data-role": "sessions-deferred" }, () => openDeferred?.(this.deferred));
     this.search = el("input", { type: "text", class: "search-field", "data-role": "sessions-search", placeholder: "Поиск по сессиям…", "aria-label": "Поиск по сессиям" });
     this.search.addEventListener("input", () => {
       this.selected = 0;
@@ -48,9 +51,14 @@ export class SessionsPopover implements PopoverContent {
     this.element = el(
       "div",
       { class: "pop pop-sessions", "data-popover": "sessions", role: "dialog", "aria-label": "Сессии проекта" },
+      this.deferred,
       el("label", { class: "search" }, icon("search"), this.search),
       this.list,
     );
+  }
+
+  setDeferredCount(count: number): void {
+    this.deferred.textContent = count > 0 ? `Отложенные (${count})` : "Отложенные";
   }
 
   opened(): void {

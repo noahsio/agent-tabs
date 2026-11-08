@@ -3,7 +3,7 @@ import net from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { GuardAdmin, GuardRulesInvalid, type GuardEvent } from "../../src/guard/admin";
-import { evaluate, makeSvcDir, removeSvcDirs, send, start, until } from "../kit/serviceHelpers";
+import { evaluate, makeClock, makeSvcDir, removeSvcDirs, send, start, until } from "../kit/serviceHelpers";
 // @ts-expect-error plain ESM without types
 import { servicePaths } from "../../kit/guard/service.mjs";
 
@@ -33,6 +33,26 @@ afterEach(async () => {
 });
 
 describe("GuardAdmin", () => {
+  it("lists_deferred_requests_and_answers_them_through_the_existing_operation", async () => {
+    const agentDir = makeSvcDir({ decider: { mode: "ask-me" } });
+    const clock = makeClock();
+    const service = await start(agentDir, { now: clock.now });
+    services.push(service);
+    const admin = await connect(agentDir);
+    const { id } = await send(servicePaths(agentDir).hookSock as string, evaluate("rm -rf $U"));
+    const resolved = new Promise<void>((resolve) => admin.subscribe((event) => {
+      if (event.event === "resolved" && event.id === id && event.deferred) resolve();
+    }));
+    // The subscription must be registered before the clock passes the deadline.
+    await new Promise<void>((resolve) => admin.subscribe(() => undefined, undefined, resolve));
+    clock.advance(301_000);
+    await resolved;
+    const deferred = (await admin.deferred()).find((item) => item.id === id);
+    expect(deferred).toMatchObject({ id, command: "rm -rf $U", deferredAt: expect.any(String) });
+    await admin.answer(id, "allow-once");
+    expect(await admin.deferred()).toEqual([]);
+    expect((await send(servicePaths(agentDir).hookSock as string, evaluate("rm -rf $U"))).decision).toBe("allow");
+  });
   it("connect_fails_when_the_service_is_not_running", async () => {
     await expect(GuardAdmin.connect(makeSvcDir())).rejects.toThrow();
   });

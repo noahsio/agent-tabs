@@ -33,6 +33,8 @@ export type GuardApprovalsDeps = {
   log: (text: string) => void;
   /** Waits between failed connects (a starting service); after the last one the window gives up. */
   retryDelaysMs: readonly number[];
+  /** Inbox refresh only: an event from another window must never create a delivery. */
+  changed?: () => void;
 };
 
 function errorText(error: unknown): string {
@@ -268,6 +270,7 @@ export class GuardApprovals {
       this.subscription?.claim(event.id, verdict, owner);
       return;
     }
+    this.deps.changed?.();
     if (event.event === "pending") {
       const request = event.item;
       if (this.open.has(request.id)) return; // a resubscription replays what is open

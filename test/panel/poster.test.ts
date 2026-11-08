@@ -19,6 +19,17 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("StatePoster", () => {
+  it("preserves_deferred_routing_fields_and_redacts_free_text", () => {
+    const posted: string[] = [];
+    const poster = new StatePoster((json) => posted.push(json), ["question", "approval", SECRET]);
+    poster.send({ type: "deferred", items: [{ kind: "question", id: SECRET, sessionPath: `/sessions/${SECRET}.jsonl`, sessionTitle: SECRET,
+      createdAt: 1, deferredAt: 2, questions: [{ header: SECRET, question: SECRET, options: [{ label: SECRET }], multiSelect: false }], decided: SECRET }],
+      deliveries: [{ kind: "approval", id: SECRET, text: SECRET, createdAt: 1, reason: SECRET }] });
+    const parsed = JSON.parse(posted[0] ?? "");
+    expect(parsed.items[0]).toMatchObject({ kind: "question", id: SECRET, sessionPath: `/sessions/${SECRET}.jsonl`, sessionTitle: "‹redacted›", decided: "‹redacted›",
+      questions: [{ header: "‹redacted›", question: "‹redacted›", options: [{ label: "‹redacted›" }], multiSelect: false }] });
+    expect(parsed.deliveries[0]).toMatchObject({ kind: "approval", id: SECRET, text: "‹redacted›", reason: "‹redacted›" });
+  });
   it("state_message_is_redacted_before_post", () => {
     const posted: string[] = [];
     const poster = new StatePoster((json) => posted.push(json), [SECRET, 'quo"te-secret']);

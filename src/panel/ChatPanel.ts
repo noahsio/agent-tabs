@@ -5,6 +5,7 @@ import * as vscode from "vscode";
 import type { ModelRef } from "../chat/model";
 import { initialState } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
+import type { DeferredInbox } from "../deferred/inbox";
 import { redact } from "../env";
 import type { ApprovalPanel, GuardApprovals } from "../guard/approvals";
 import type { Checkpointer } from "../rewind/checkpointer";
@@ -25,6 +26,7 @@ import { StatePoster } from "./poster";
 import {
   type AgentDetailsMessage,
   type GuardHostMessage,
+  type DeferredHostMessage,
   isExternalLink,
   parseWebviewMessage,
   rejectedSendId,
@@ -95,6 +97,7 @@ export type PanelHost = {
   ladder?: () => Ladder;
   /** The window's approval cards (one guard subscription for every tab); absent while the environment is incomplete. */
   guard?: Pick<GuardApprovals, "answer" | "replay" | "panelsChanged">;
+  deferred?: Pick<DeferredInbox, "refresh" | "answer">;
   /** Snapshots and the checkpoint log; absent when the environment is incomplete. */
   checkpointer?: Checkpointer;
   /** Opens a forked session in a new tab whose composer starts with `draft`; the tab names the session `name` once it is open. */
@@ -267,6 +270,16 @@ export class ChatPanel implements ApprovalPanel {
     else if (message.type === "guardResolved" || message.type === "guardClosed") this.awaitingGuard.delete(message.id);
     this.poster.send(message);
     if (this.awaitingGuard.size !== before && this.titleName !== undefined) this.setTitle(this.titleName);
+  }
+
+  postDeferred(message: DeferredHostMessage): void {
+    this.poster.send(message);
+  }
+
+  /** A later answer uses the tab's existing controller and OmO's durable admission ID. */
+  async sendDeferred(text: string, clientMessageId: string): Promise<boolean> {
+    await this.starting;
+    return this.controller?.send(text, "auto", [], clientMessageId) ?? false;
   }
 
   /** The editor tab's title, marked while the tab waits for the person (an OmO dialog, or an approval of its own session). */
@@ -539,6 +552,10 @@ export class ChatPanel implements ApprovalPanel {
       message.type === "restartHost" ||
       message.type === "settingsGet" ||
       message.type === "settingsAction" ||
+      message.type === "listDeferred" ||
+      message.type === "answerDeferredQuestion" ||
+      message.type === "dismissDeferredQuestion" ||
+      message.type === "answerDeferredApproval" ||
       message.type === "guardAnswer";
     if (message.type === "send" && this.isDraft) this.open(); // the first message creates the draft's session
     if (message.type !== "ready" && message.type !== "reconnect" && !popover) await this.starting;
@@ -550,6 +567,8 @@ export class ChatPanel implements ApprovalPanel {
         this.publish();
         this.postRetry(); // a reloaded webview is told again that a retry is running
         this.host.guard?.replay(this);
+        if (this.host.deferred !== undefined) void this.host.deferred.refresh();
+        else this.postDeferred({ type: "deferred", items: [] });
         void this.offerFirstRun();
         if (this.forkDraft !== undefined) {
           this.poster.send({ type: "draft", ...this.forkDraft });
@@ -675,6 +694,17 @@ export class ChatPanel implements ApprovalPanel {
       }
       case "listSessions":
         await this.postSessions();
+        return;
+      case "listDeferred":
+        if (this.host.deferred !== undefined) await this.host.deferred.refresh();
+        else this.postDeferred({ type: "deferred", items: [] });
+        return;
+      case "answerDeferredQuestion":
+      case "dismissDeferredQuestion":
+      case "answerDeferredApproval":
+        if (this.host.deferred !== undefined) await this.host.deferred.answer(message);
+        else this.postDeferred({ type: "deferredResult", id: message.id, kind: message.type === "answerDeferredApproval" ? "approval" : "question",
+          ok: false, reason: "Среда не подключена" });
         return;
       case "openSession":
         await this.host.openSession(message.sessionPath, this.panel.viewColumn); // in the group of the tab it was asked from

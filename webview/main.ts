@@ -1,4 +1,5 @@
 import type { HostMessage, PersistedState, WebviewMessage } from "../src/panel/protocol";
+import { parseDeferredHostMessage } from "../src/panel/protocol";
 import { ChatView } from "./render";
 import "./style.css";
 
@@ -25,6 +26,13 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     message = JSON.parse(event.data) as HostMessage;
   } catch {
     return; // one bad message must not stop the tab from updating
+  }
+  if (message === null || typeof message !== "object") return;
+  if (message.type === "deferred" || message.type === "deferredResult") {
+    const parsed = parseDeferredHostMessage(message);
+    if (parsed?.type === "deferred") view.deferred(parsed);
+    else if (parsed?.type === "deferredResult") view.deferredResult(parsed);
+    return;
   }
   switch (message.type) {
     case "answerResult":

@@ -44,7 +44,7 @@ export function encodeCwd(cwd: string): string {
   return "--" + cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-") + "--";
 }
 
-function textOf(content: unknown): string {
+export function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
@@ -53,7 +53,7 @@ function textOf(content: unknown): string {
 }
 
 /** A record's time: the message's own epoch-ms stamp, else the journal entry's ISO one. */
-function stampOf(entry: { timestamp?: unknown; message?: { timestamp?: unknown } }): number | undefined {
+export function stampOf(entry: { timestamp?: unknown; message?: { timestamp?: unknown } }): number | undefined {
   const own = entry.message?.timestamp;
   if (typeof own === "number" && Number.isFinite(own)) return own;
   const iso = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
@@ -96,7 +96,12 @@ async function readSession(file: string): Promise<{ id: string | undefined; titl
       if (text) firstUser = text.slice(0, TITLE_MAX);
     }
   }
-  return { id, title: name ?? firstUser ?? FALLBACK_TITLE, used, updatedAt: lastMessageAt ?? created };
+  return { id, title: sessionTitle(name, firstUser), used, updatedAt: lastMessageAt ?? created };
+}
+
+/** The journal's latest explicit name, else its first user text. */
+export function sessionTitle(name: string | undefined, firstUser: string | undefined): string {
+  return name ?? firstUser?.slice(0, TITLE_MAX) ?? FALLBACK_TITLE;
 }
 
 async function safeRealpath(path: string): Promise<string> {

@@ -1,7 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { DEFER_QUESTION_COMMENT, isExternalLink, parseWebviewMessage, rejectedSendId } from "../../src/panel/protocol";
+import { DEFER_QUESTION_COMMENT, isExternalLink, parseDeferredHostMessage, parseWebviewMessage, rejectedSendId } from "../../src/panel/protocol";
 
 describe("parseWebviewMessage", () => {
+  it("parses_deferred_actions_without_trusting_paths_or_blank_answers", () => {
+    expect(parseWebviewMessage({ type: "listDeferred" })).toEqual({ type: "listDeferred" });
+    expect(parseWebviewMessage({ type: "answerDeferredQuestion", id: "q", answers: ["  Файл  ", "Да"], sessionPath: "/untrusted" }))
+      .toEqual({ type: "answerDeferredQuestion", id: "q", answers: ["Файл", "Да"] });
+    expect(parseWebviewMessage({ type: "dismissDeferredQuestion", id: "q" })).toEqual({ type: "dismissDeferredQuestion", id: "q" });
+    expect(parseWebviewMessage({ type: "answerDeferredApproval", id: "g", decision: "deny", message: "  Позже  " }))
+      .toEqual({ type: "answerDeferredApproval", id: "g", decision: "deny", message: "Позже" });
+    for (const answers of [[], [""], [" "], [1], ["x".repeat(2001)], Array(4).fill("a")]) {
+      expect(parseWebviewMessage({ type: "answerDeferredQuestion", id: "q", answers })).toBeUndefined();
+    }
+    for (const id of ["", 1, "x".repeat(201)]) expect(parseWebviewMessage({ type: "dismissDeferredQuestion", id })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "answerDeferredApproval", id: "g", decision: "allow-always" })).toBeUndefined();
+    expect(parseWebviewMessage({ type: "answerDeferredApproval", id: "g", decision: "allow-once", message: "Нет" })).toBeUndefined();
+  });
+  it("validates_deferred_host_lists_and_confirmations_before_rendering", () => {
+    const item = { kind: "question", id: "q", sessionPath: "/agent/sessions/q.jsonl", sessionTitle: "Сессия", createdAt: 1, deferredAt: 2,
+      questions: [{ header: "Вопрос", question: "Где?", options: [{ label: "Здесь" }], multiSelect: false }], decided: "Здесь" };
+    expect(parseDeferredHostMessage({ type: "deferred", items: [item] })).toEqual({ type: "deferred", items: [item] });
+    expect(parseDeferredHostMessage({ type: "deferredResult", kind: "question", id: "q", ok: true })).toEqual({ type: "deferredResult", kind: "question", id: "q", ok: true });
+    expect(parseDeferredHostMessage({ type: "deferredResult", kind: "approval", id: "g", ok: false, reason: "Нет связи" })).toMatchObject({ reason: "Нет связи" });
+    for (const bad of [null, { type: "deferred", items: {} }, { type: "deferred", items: [{ ...item, questions: [null] }] },
+      { type: "deferred", items: [{ ...item, createdAt: "now" }] }, { type: "deferred", items: [{ ...item, createdAt: 1e100 }] },
+      { type: "deferred", items: [{ ...item, questions: [{ ...item.questions[0], options: [null] }] }] },
+      { type: "deferredResult", id: "q", kind: "other", ok: true }, { type: "deferredResult", id: "q", kind: "question", ok: false },
+      { type: "deferred", items: [], deliveries: [{ id: "g", kind: "approval", createdAt: 1, text: 2, reason: "Нет" }] }]) {
+      expect(parseDeferredHostMessage(bad)).toBeUndefined();
+    }
+  });
   it("accepts_well_formed_messages", () => {
     expect(parseWebviewMessage({ type: "send", id: "1", text: "hi", mode: "followUp" })).toEqual({ type: "send", id: "1", text: "hi", mode: "followUp" });
     expect(parseWebviewMessage({ type: "setModel", model: { provider: "p", id: "m", extra: 1 } })).toEqual({ type: "setModel", model: { provider: "p", id: "m" } });

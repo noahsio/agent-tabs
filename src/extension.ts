@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
 import { activeHostSocketPath, DaemonManager, RECONNECT_DELAYS_MS, systemProcesses } from "./daemon";
+import { DeferredInbox } from "./deferred/inbox";
 import { buildOmoEnv, redact, type EnvVar } from "./env";
 import { serviceMayRun } from "../kit/guard/sockets.mjs";
 import { guardFilesDir } from "../kit/guard/lifecycle.mjs";
@@ -34,6 +35,7 @@ import { Checkpointer } from "./rewind/checkpointer";
 import { pruneCheckpoints } from "./rewind/prune";
 import { CheckpointStore } from "./rewind/store";
 import { listPastSessions, type PastSession, type SummaryCache } from "./sessions/history";
+import { SessionController } from "./sessions/controller";
 import { HostReaper } from "./sessions/reapHost";
 import { readRememberedLevels, rememberedLevel } from "./sessions/rememberedLevels";
 import { RpcClient } from "./rpc/client";
@@ -312,6 +314,28 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   };
   const reaper = new HostReaper({ processes: systemProcesses });
+  if (built.ok) {
+    const inbox = new DeferredInbox(built.value.agentDir, {
+      protectionOn: async () => paths !== undefined && vscodeDirs !== undefined && (await protectionStatus(paths, vscodeDirs)).state !== "off",
+      connect: () => GuardAdmin.connect(built.value.agentDir),
+      open: (sessionPath) => {
+        const panel = host.registry.get(sessionPath);
+        return panel === undefined ? undefined : { send: (text, _mode, _images, clientMessageId) => {
+          if (clientMessageId === undefined) throw new Error("Не задан идентификатор отложенного ответа");
+          return panel.sendDeferred(text, clientMessageId);
+        } };
+      },
+      attach: async (sessionPath) => {
+        const manager = host.daemon();
+        if (!manager.ok) throw new Error(manager.error);
+        return SessionController.attach(manager.value, sessionPath, undefined, undefined, host.checkpointer, log);
+      },
+      publish: (message) => { for (const panel of panels) panel.postDeferred(message); },
+      log,
+    });
+    host.deferred = inbox;
+    void inbox.refresh(); // Resume persisted deliveries even when no chat tab has been restored yet.
+  }
   if (checkpointStore !== undefined) {
     pruneCheckpoints(checkpointStore, Date.now()).catch((error: unknown) => log(`Не удалось убрать старые снимки: ${String(error)}`));
   }
@@ -483,6 +507,7 @@ export function activate(context: vscode.ExtensionContext): void {
         outside: (request, owner) => chats.raise(request, owner),
         log,
         retryDelaysMs: RECONNECT_DELAYS_MS,
+        changed: () => void host.deferred?.refresh(),
       });
       host.guard = approvals;
       settings.on("changed", () => void approvals.sync());

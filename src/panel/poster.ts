@@ -127,8 +127,9 @@ export class StatePoster {
 /** The objects the host itself builds; anything reachable only through other objects is free-form. */
 function structuralObjects(message: HostMessage): Set<object> {
   const objects = new Set<object>([message]);
-  if (message.type === "sessions") {
+  if (message.type === "sessions" || message.type === "deferred") {
     for (const item of message.items) objects.add(item);
+    if (message.type === "deferred") for (const entry of message.deliveries ?? []) objects.add(entry);
     return objects;
   }
   if (message.type === "guardRequest") {

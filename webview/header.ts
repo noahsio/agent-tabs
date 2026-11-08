@@ -4,6 +4,7 @@ import { icon } from "./icons";
 export type HeaderOptions = {
   /** Opens the sessions popover under the given icon. */
   onOpenSessions?: (anchor: HTMLElement) => void;
+  onOpenDeferred?: (anchor: HTMLElement) => void;
 };
 
 const RENAME_HINT = "Нажми, чтобы переименовать";
@@ -16,6 +17,8 @@ export class Header {
   private readonly editor: HTMLElement;
   private readonly field: HTMLInputElement;
   private readonly pin: HTMLButtonElement;
+  private readonly deferredCount = el("span", { class: "deferred-count", "data-role": "deferred-count" });
+  private readonly deferred: HTMLButtonElement;
   /** The tab's word on whether its session is pinned. */
   private pinned = false;
   /** A pin toggled here, shown until the tab agrees or PIN_WAIT_MS pass. */
@@ -46,10 +49,19 @@ export class Header {
 
     this.pin = button(icon("pin"), { class: "icon-btn", "data-role": "pin", title: "Закрепить сессию", "aria-pressed": "false" }, () => this.togglePin());
     const sessions = button(icon("sessions"), { class: "icon-btn", "data-role": "sessions", title: "Сессии проекта" }, () => this.options.onOpenSessions?.(sessions));
+    this.deferred = button(icon("inbox"), { class: "icon-btn deferred-button", "data-role": "deferred", title: "Отложенные", "aria-label": "Отложенные" }, () => this.options.onOpenDeferred?.(this.deferred));
+    this.deferredCount.hidden = true;
+    this.deferred.append(this.deferredCount);
     const create = button(icon("newSession"), { class: "icon-btn", "data-role": "new", title: "Новая сессия" }, () => this.post({ type: "newSession" }));
 
     root.classList.add("header");
-    root.replaceChildren(el("div", { class: "title-wrap" }, this.title, this.editor), el("div", { class: "icons" }, this.pin, sessions, create));
+    root.replaceChildren(el("div", { class: "title-wrap" }, this.title, this.editor), el("div", { class: "icons" }, this.pin, this.deferred, sessions, create));
+  }
+
+  setDeferredCount(count: number): void {
+    this.deferredCount.textContent = String(count);
+    this.deferredCount.hidden = count === 0;
+    this.deferred.setAttribute("aria-label", count > 0 ? `Отложенные: ${count}` : "Отложенные");
   }
 
   /** `pinned` is the tab's flag from the host, the one source of truth for this session's pin. */

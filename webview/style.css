@@ -2527,6 +2527,141 @@ button.uimg.att {
   width: 420px;
 }
 
+/* Layout: the existing popover owns vertical scrolling; controls wrap, commands and words never scroll sideways. */
+.pop-deferred {
+  width: 480px;
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) var(--pop-bg);
+}
+
+.deferred-toolbar,
+.deferred-meta,
+.deferred-actions,
+.deferred-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.deferred-toolbar,
+.deferred-meta {
+  justify-content: space-between;
+}
+
+.deferred-toolbar h2 {
+  margin: 4px 0;
+  font-size: 16px;
+}
+
+.deferred-row {
+  padding: 16px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.deferred-row:last-child {
+  border-bottom: none;
+}
+
+.deferred-meta,
+.deferred-decided {
+  color: var(--muted);
+}
+
+.deferred-meta time,
+.deferred-count {
+  font-variant-numeric: tabular-nums;
+}
+
+.deferred-row fieldset {
+  min-width: 0;
+  padding: 0;
+  margin: 16px 0 12px;
+  border: none;
+}
+
+.deferred-row legend {
+  font-weight: 600;
+}
+
+.deferred-row p {
+  margin: 8px 0;
+  white-space: pre-wrap;
+}
+
+.deferred-row textarea {
+  display: block;
+  width: 100%;
+  min-height: 56px;
+  resize: vertical;
+  margin: 10px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  font: inherit;
+  color: var(--fg-strong);
+  background: var(--surface);
+  caret-color: var(--fg-strong);
+}
+
+.deferred-label {
+  display: block;
+  margin-top: 10px;
+}
+
+.deferred-row textarea::placeholder {
+  color: var(--vscode-input-placeholderForeground, var(--muted));
+}
+
+.pop-deferred button,
+.deferred-row summary {
+  min-height: 28px;
+}
+
+.deferred-options button[aria-pressed="true"] {
+  color: var(--sel-fg);
+  background: var(--sel);
+}
+
+.pop-deferred button:disabled,
+.pop-deferred textarea:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.deferred-command,
+.deferred-row code {
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.deferred-row summary {
+  cursor: pointer;
+}
+
+.deferred-error {
+  color: var(--err);
+}
+
+.deferred-button {
+  position: relative;
+}
+
+.deferred-count {
+  position: absolute;
+  right: -3px;
+  top: -4px;
+  min-width: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  font-size: 10px;
+  color: var(--vscode-badge-foreground, var(--sel-fg));
+  background: var(--vscode-badge-background, var(--sel));
+}
+
 .pop-model {
   width: 380px;
 }
