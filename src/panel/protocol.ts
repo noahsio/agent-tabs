@@ -353,7 +353,7 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
       return typeof raw["url"] === "string" ? { type: "openLink", url: raw["url"] } : undefined;
     case "openFile": {
       const { path, line } = raw;
-      if (typeof path !== "string" || !isAbsolutePath(path)) return undefined;
+      if (typeof path !== "string" || !isLocalPath(path)) return undefined;
       if (line === undefined) return { type: "openFile", path };
       return typeof line === "number" && Number.isInteger(line) && line > 0 ? { type: "openFile", path, line } : undefined;
     }
@@ -427,6 +427,15 @@ export function rejectedSendId(raw: unknown): string | undefined {
 /** Only web links leave the webview, and only through the host. */
 export function isExternalLink(url: string): boolean {
   return /^https?:\/\//i.test(url);
+}
+
+/**
+ * A local path, absolute or relative to the session's folder (a tool's own `path` argument often is), never a URI:
+ * `command:`, `file:` and every other scheme cannot pass; a Windows drive (`C:\`) is a path, not a scheme.
+ */
+export function isLocalPath(path: string): boolean {
+  if (path === "" || path.includes("\0")) return false;
+  return isAbsolutePath(path) || !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(path);
 }
 
 /** A local absolute path (POSIX or a Windows drive), never a URI: `command:` and other schemes cannot pass. */
