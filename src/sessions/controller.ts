@@ -23,7 +23,7 @@ export type NextMode = "ulw" | "mass ulw";
 
 export type TabState = { sessionPath?: string; modelMode: "auto" | "manual"; title?: string; durableId?: string; stickyMode?: NextMode };
 
-export type DialogAnswer = { value?: string; confirmed?: boolean; answers?: unknown; cancelled?: boolean };
+export type DialogAnswer = { value?: string; confirmed?: boolean; answers?: unknown; cancelled?: boolean; comment?: string };
 /** How an answer ended: taken, refused because OmO had already settled the dialog (timeout, another client), or failed. */
 export type AnswerOutcome = "applied" | "closed" | "failed";
 
@@ -834,7 +834,7 @@ export class SessionController extends EventEmitter {
     const dialog = this.current.dialogs.find((candidate) => candidate.id === dialogId);
     const fields: Frame = { uiRequestId: dialogId };
     if (answer.cancelled === true) fields["cancelled"] = true;
-    else if (dialog?.method === "question") Object.assign(fields, { answers: answer.answers, comment: "" });
+    else if (dialog?.method === "question") Object.assign(fields, { answers: answer.answers, comment: answer.comment ?? "" });
     else if (answer.confirmed !== undefined) fields["confirmed"] = answer.confirmed;
     else fields["value"] = answer.value;
     try {

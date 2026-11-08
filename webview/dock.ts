@@ -1,6 +1,6 @@
 import type { Dialog } from "../src/chat/model";
 import type { PendingView } from "../src/guard/admin";
-import { GUARD_MESSAGE_MAX, type GuardStep, type WebviewMessage } from "../src/panel/protocol";
+import { DEFER_QUESTION_COMMENT, GUARD_MESSAGE_MAX, type GuardStep, type WebviewMessage } from "../src/panel/protocol";
 import { button, el, type Post } from "./dom";
 import { clock, toolLabel } from "./feed";
 import { icon } from "./icons";
@@ -146,6 +146,8 @@ export class Dock {
   private readonly results = new Map<string, { result: Result; after: string | undefined }>();
   /** «Стоп» in the header while a turn runs: the hidden composer's button, still at hand. */
   private readonly stop: HTMLButtonElement;
+  /** Ticks the shown question's time left once a second (only its line is redrawn: typing and focus stay). */
+  private deadlineTicker: ReturnType<typeof setInterval> | undefined;
 
   constructor(private readonly options: DockOptions) {
     this.element = el("div", { class: "ask-slot", "data-role": "dock" });
@@ -582,6 +584,21 @@ export class Dock {
     else this.drawDialog(panel, item);
     this.element.replaceChildren(panel);
     if (hadFocus) this.focus();
+    this.tickDeadline();
+  }
+
+  /** The shown question's own deadline, counted down; no ticker while nothing shown has one. */
+  private tickDeadline(): void {
+    const line = this.element.querySelector<HTMLElement>('[data-role="ask-deadline"]');
+    const item = this.current;
+    const deadline = item?.kind === "dialog" ? item.dialog.deadlineAt : undefined;
+    if (line === null || deadline === undefined) {
+      if (this.deadlineTicker !== undefined) clearInterval(this.deadlineTicker);
+      this.deadlineTicker = undefined;
+      return;
+    }
+    line.textContent = deadlineText(deadline - Date.now());
+    this.deadlineTicker ??= setInterval(() => this.tickDeadline(), 1_000);
   }
 
   private head(title: string, chip: string | undefined, who: string | undefined): HTMLElement {
@@ -724,14 +741,21 @@ export class Dock {
     } else panel.append(this.head("Вопрос агента", question.header, MAIN_AGENT));
     const text = el("p", { class: "question-text" }, question.text);
     if (question.multi) text.append(el("span", { class: "plural" }, "можно несколько"));
-    panel.append(el("div", { class: "ask-body" }, text));
+    const body = el("div", { class: "ask-body" }, text);
+    if (item.dialog.deadlineAt !== undefined) body.append(el("p", { class: "ask-deadline", "data-role": "ask-deadline" }));
+    panel.append(body);
     const given = item.given.get(question.id) ?? { selected: [] };
     const rows: Row[] = question.options.map((option) => ({ label: option.label, ...(option.description !== undefined ? { desc: option.description } : {}), checked: given.selected.includes(option.label) }));
     const other = given.text !== undefined && !item.editing ? `${OTHER}: ${given.text}` : OTHER;
     rows.push({ label: other, more: given.text === undefined, checked: given.text !== undefined, field: { label: OTHER, placeholder: "Свой ответ" } });
     panel.append(this.rows(item, rows, question.multi));
     const last = item.active + 1 === item.questions.length;
-    const buttons: HTMLElement[] = [];
+    const buttons: HTMLElement[] = [
+      // the whole set at once: the agent carries on with its recommended options, the person answers later
+      button("Отложить", { class: "secondary", tabindex: "-1", title: "Агент продолжит с рекомендованным вариантом; ответить можно позже" }, () =>
+        this.answerDialog(item, { answers: {}, comment: DEFER_QUESTION_COMMENT }),
+      ),
+    ];
     if (set) {
       if (item.active > 0) buttons.push(button("Назад", { class: "secondary", tabindex: "-1" }, () => this.goTo(item, item.active - 1)));
       buttons.push(button(last ? "Ответить" : "Далее", { class: "primary", tabindex: "-1" }, () => this.advance(item)));
@@ -753,6 +777,13 @@ export class Dock {
           : [["Enter", "— ответить"], [`↑↓`, `или 1–${rows.length} выбрать`], ["Esc", "отменить"], ...this.switchHint(false)];
     panel.append(this.foot(hints, ...buttons));
   }
+}
+
+/** How long a question still waits for the person, or that the wait is over (OmO then lets the agent go on). */
+function deadlineText(left: number): string {
+  if (left <= 0) return "время на ответ вышло — агент продолжает сам";
+  const seconds = Math.ceil(left / 1_000);
+  return `ждёт ответа ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}, потом агент продолжит сам`;
 }
 
 /** The guarded call: an eval's extracted commands (with its code apart), a long command collapsed. */

@@ -1344,6 +1344,12 @@ button.copy-btn .icon {
   margin-left: 6px;
 }
 
+.ask-deadline {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
 /* The guarded call: the warning colour's rule down its left edge. */
 .ask .cmd {
   margin: 0;

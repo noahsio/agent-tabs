@@ -282,6 +282,14 @@ function isObject(value: unknown): value is Json {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * «Отложить» on a question: answered by this comment alone, so OmO settles it `comment-submitted` and the model reads an
+ * instruction rather than silence (spec 2026-11-08 §5; measured live: both models carried on with the recommended option).
+ */
+export const DEFER_QUESTION_COMMENT =
+  "Человек отложил вопрос: продолжай с рекомендованным вариантом и запиши допущение; необратимое по допущению не делай. Ответ придёт позже сообщением.";
+const MAX_ANSWER_COMMENT = 2_000;
+
 function parseAnswer(value: unknown): DialogAnswer | undefined {
   if (!isObject(value)) return undefined;
   const answer: DialogAnswer = {};
@@ -289,6 +297,10 @@ function parseAnswer(value: unknown): DialogAnswer | undefined {
   if (typeof value["confirmed"] === "boolean") answer.confirmed = value["confirmed"];
   if (value["cancelled"] === true) answer.cancelled = true;
   if (isObject(value["answers"])) answer.answers = value["answers"];
+  if (typeof value["comment"] === "string") {
+    if (value["comment"].length > MAX_ANSWER_COMMENT) return undefined;
+    answer.comment = value["comment"];
+  }
   return answer;
 }
 
