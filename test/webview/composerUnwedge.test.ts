@@ -64,6 +64,41 @@ afterEach(() => {
 });
 
 describe("the wedge line under the composer", () => {
+  it("shows background work with an idle composer and never auto-unwedges Stop", () => {
+    show({ running: false, background: { count: 2, sources: ["senpi-task"] } });
+    expect(role("background-status").textContent).toBe("Ход завершён · фоновых задач: 2");
+    expect(role("background-status").hidden).toBe(false);
+    expect(knob("stop").hidden).toBe(false);
+    type("следующий вопрос");
+    role("send").click();
+    expect(posted.at(-1)).toMatchObject({ type: "send", mode: "auto" });
+    role("stop").click();
+    expect(posted.at(-1)).toEqual({ type: "stop" });
+    vi.advanceTimersByTime(SILENT_MS * 3);
+    expect(autos()).toEqual([]);
+    expect(line()).toBeUndefined();
+    show();
+    expect(role("background-status").hidden).toBe(true);
+    expect(knob("stop").hidden).toBe(true);
+  });
+
+  it("does not carry an idle Stop into the next executing turn", () => {
+    show({ background: { count: 1, sources: ["terminal-background-sessions"] } });
+    composer.noteStop();
+    show({ running: true });
+    vi.advanceTimersByTime(STOP_WAIT_MS);
+    expect(autos()).toEqual([]);
+  });
+
+  it("clears a pending restart when the turn ends with background work", () => {
+    show({ running: true });
+    composer.noteStop();
+    show({ background: { count: 2, sources: ["senpi-task"] } });
+    vi.advanceTimersByTime(SILENT_MS * 3);
+    expect(autos()).toEqual([]);
+    expect(line()).toBeUndefined();
+  });
+
   it("silence_alone_is_only_ever_offered_never_acted_on", () => {
     show({ running: true });
     expect(line()).toBeUndefined();

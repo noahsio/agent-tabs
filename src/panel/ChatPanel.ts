@@ -598,6 +598,13 @@ export class ChatPanel implements ApprovalPanel {
         return;
       }
       case "stop": {
+        if (controller !== undefined && !controller.state.running) {
+          if (controller.state.background !== undefined) {
+            const answer = await vscode.window.showWarningMessage("Остановить фоновые задачи?", { modal: true }, { title: "Остановить" });
+            if (answer?.title === "Остановить") await controller.stopBackground();
+          }
+          return;
+        }
         // A person's «Стоп» is an explicit way out: clear the auto-restart ration so the bounded restart the composer
         // falls back to (when abort does not end the turn) is never declined because an earlier automatic one spent it.
         const durableId = controller?.sessionUuid;
@@ -796,6 +803,10 @@ export class ChatPanel implements ApprovalPanel {
     const durableId = controller?.sessionUuid;
     if (controller === undefined || durableId === undefined) {
       this.poster.send({ type: "unwedged", auto: true, outcome: "failed", reason: NOT_OPEN });
+      return;
+    }
+    if (!controller.state.running) {
+      this.poster.send({ type: "unwedged", auto: true, outcome: "refused", reason: "Ход уже завершён" });
       return;
     }
     if (!claimAutoUnwedge(durableId)) {

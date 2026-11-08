@@ -87,6 +87,37 @@ function frame(extra: Frame): Frame {
 }
 
 describe("SessionController", () => {
+  it.each(["waiting_background", "waiting_children"])("starts a fresh prompt after %s", async (state) => {
+    controller = await SessionController.create(manager, "/tmp");
+    await controller.send("start background work", "auto");
+    daemon.push(frame({ type: "agent_start" }));
+    daemon.push(frame({ type: "agent_end", messages: [] }));
+    daemon.push(frame({ type: "session_lifecycle", lifecycle: {
+      state, seq: 3, runId: "previous",
+      waitingOn: { children: 2, background: [], human: [] },
+    } }));
+    await settle(() => controller?.state.background?.count === 2);
+    expect(controller.state.running).toBe(false);
+    await controller.send("answer now", "auto", [], "new-message");
+    expect(ofType("prompt").at(-1)).toMatchObject({ message: "answer now", clientMessageId: "new-message" });
+    expect(ofType("steer")).toHaveLength(0);
+    expect(ofType("follow_up")).toHaveLength(0);
+  });
+
+  it("restores background-only sessions as idle before sending", async () => {
+    daemon.on("open_session", () => ({ data: openData("rpc-1", {
+      isStreaming: false,
+      lifecycle: { state: "waiting_background", waitingOn: {
+        children: 0, background: [{ source: "terminal-background-sessions", activeCount: 1 }], human: [],
+      } },
+    }) }));
+    controller = await SessionController.attach(manager, SESSION_FILE);
+    expect(controller.state).toMatchObject({ running: false, background: { count: 1 } });
+    await controller.send("answer now", "auto");
+    expect(ofType("prompt")).toHaveLength(1);
+    expect(ofType("steer")).toHaveLength(0);
+  });
+
   it("create_opens_session_without_model", async () => {
     controller = await SessionController.create(manager, "/tmp");
     const open = ofType("open_session")[0] as Frame;

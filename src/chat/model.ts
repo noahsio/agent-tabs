@@ -154,6 +154,8 @@ export type ChatState = {
   settledQuestions?: string[];
   agents: AgentRow[];
   running: boolean;
+  /** Authoritative lifecycle counts; item lists may be truncated. Questions are not background work. */
+  background?: { count: number; sources: string[] };
   activity?: SessionActivity;
   activityTool?: string;
   thinkingLevel?: string;
