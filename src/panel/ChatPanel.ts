@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import path from "node:path";
 import { tabTitle } from "./tabTitle";
 import * as vscode from "vscode";
 import type { ModelRef } from "../chat/model";
@@ -628,8 +629,17 @@ export class ChatPanel implements ApprovalPanel {
         if (isExternalLink(message.url)) await vscode.env.openExternal(vscode.Uri.parse(message.url));
         return;
       case "openFile": {
+        // A tool's relative path is relative to the session's folder; with no folder known there is nothing to resolve it against.
+        const folder = controller?.cwd ?? (this.opening.kind === "new" ? this.opening.cwd : undefined);
+        const file = path.isAbsolute(message.path) ? message.path : folder === undefined ? undefined : path.resolve(folder, message.path);
+        if (file === undefined) return;
         const at = message.line === undefined ? undefined : new vscode.Range(message.line - 1, 0, message.line - 1, 0);
-        await vscode.window.showTextDocument(vscode.Uri.file(message.path), { preview: true, ...(at !== undefined ? { selection: at } : {}) });
+        // `vscode.open` picks the editor that fits the file (text, image preview, …); `showTextDocument` opens text only.
+        try {
+          await vscode.commands.executeCommand("vscode.open", vscode.Uri.file(file), { preview: true, ...(at !== undefined ? { selection: at } : {}) });
+        } catch (error) {
+          void vscode.window.showWarningMessage(`Не удалось открыть ${file}: ${errorText(error)}`);
+        }
         return;
       }
       case "setThinking":

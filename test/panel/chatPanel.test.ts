@@ -695,16 +695,48 @@ describe("ChatPanel", () => {
     expect(created.mock.calls.map((call) => call[2])).toEqual([4, 4, 4, 2]);
   });
 
-  it("open_file_shows_the_file_at_its_line_in_the_editor", async () => {
-    const show = vi.mocked(vscode.window.showTextDocument);
-    show.mockClear();
+  /**
+   * `vscode.open`, not `showTextDocument`: the latter opens text only, so a click on a png the agent read did nothing.
+   * `vscode.open` picks the editor for the file (text, image preview, …).
+   */
+  it("open_file_opens_the_file_at_its_line_in_the_editor_that_fits_it", async () => {
+    const run = vi.mocked(vscode.commands.executeCommand);
+    run.mockClear();
     const { receive } = await openAttached();
     receive({ type: "openFile", path: "/repo/a.ts", line: 12 });
-    receive({ type: "openFile", path: "/repo/b.ts" });
+    receive({ type: "openFile", path: "/repo/shots/b.png" });
     receive({ type: "openFile", path: "command:workbench.action.reloadWindow" }); // dropped at the boundary
-    await settle(() => show.mock.calls.length === 2);
-    expect(show.mock.calls[0]).toEqual([{ fsPath: "/repo/a.ts" }, { preview: true, selection: { startLine: 11, startCharacter: 0, endLine: 11, endCharacter: 0 } }]);
-    expect(show.mock.calls[1]).toEqual([{ fsPath: "/repo/b.ts" }, { preview: true }]);
+    const opens = () => run.mock.calls.filter((call) => call[0] === "vscode.open");
+    await settle(() => opens().length === 2);
+    expect(opens()[0]).toEqual(["vscode.open", { fsPath: "/repo/a.ts" }, { preview: true, selection: { startLine: 11, startCharacter: 0, endLine: 11, endCharacter: 0 } }]);
+    expect(opens()[1]).toEqual(["vscode.open", { fsPath: "/repo/shots/b.png" }, { preview: true }]);
+  });
+
+  it("a_relative_path_opens_from_the_session_folder", async () => {
+    const run = vi.mocked(vscode.commands.executeCommand);
+    run.mockClear();
+    const fake = fakePanel();
+    ChatPanel.restore(host(), fake.panel, { kind: "new", cwd: "/repo" }); // a new tab: no session until its first message
+    fake.receive({ type: "openFile", path: "shots/b.png" });
+    const opens = () => run.mock.calls.filter((call) => call[0] === "vscode.open");
+    await settle(() => opens().length === 1);
+    expect(opens()[0]?.[1]).toEqual({ fsPath: "/repo/shots/b.png" });
+  });
+
+  it("a_file_that_cannot_be_opened_says_so", async () => {
+    const run = vi.mocked(vscode.commands.executeCommand);
+    const warn = vi.mocked(vscode.window.showWarningMessage);
+    run.mockClear();
+    warn.mockClear();
+    run.mockImplementation(async (command: string) => {
+      if (command === "vscode.open") throw new Error("File not found");
+      return undefined;
+    });
+    const { receive } = await openAttached();
+    receive({ type: "openFile", path: "/repo/gone.png" });
+    await settle(() => warn.mock.calls.length === 1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("/repo/gone.png");
+    run.mockReset();
   });
 
   it("restart_host_goes_to_the_host_and_its_confirmation", async () => {

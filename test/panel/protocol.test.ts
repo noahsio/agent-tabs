@@ -43,11 +43,13 @@ describe("parseWebviewMessage", () => {
     expect(isExternalLink("file:///etc/passwd")).toBe(false);
   });
 
-  it("open_file_takes_only_an_absolute_path_and_a_positive_line", () => {
+  it("open_file_takes_a_local_path_and_a_positive_line_never_a_uri", () => {
     expect(parseWebviewMessage({ type: "openFile", path: "/repo/src/a.ts", line: 12 })).toEqual({ type: "openFile", path: "/repo/src/a.ts", line: 12 });
     expect(parseWebviewMessage({ type: "openFile", path: "/repo/src/a.ts" })).toEqual({ type: "openFile", path: "/repo/src/a.ts" });
     expect(parseWebviewMessage({ type: "openFile", path: "C:\\repo\\a.ts" })).toEqual({ type: "openFile", path: "C:\\repo\\a.ts" });
-    for (const path of ["src/a.ts", "command:workbench.action.reloadWindow", "file:///etc/passwd", "https://x.y/a", "/a\0b", "", 7]) {
+    // a tool's own relative path: the host resolves it against the session's cwd
+    expect(parseWebviewMessage({ type: "openFile", path: "shots/1180x820-dark-normal.png" })).toEqual({ type: "openFile", path: "shots/1180x820-dark-normal.png" });
+    for (const path of ["command:workbench.action.reloadWindow", "file:///etc/passwd", "https://x.y/a", "/a\0b", "", 7]) {
       expect(parseWebviewMessage({ type: "openFile", path })).toBeUndefined();
     }
     for (const line of [0, -1, 1.5, "3"]) expect(parseWebviewMessage({ type: "openFile", path: "/a.ts", line })).toBeUndefined();
