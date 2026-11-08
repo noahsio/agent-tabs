@@ -46,6 +46,7 @@ import { RolesHost } from "./settings/roles";
 import { SecurityHost } from "./settings/security";
 import { migrateGwApiKey } from "./settings/migrateKey";
 import { ensureQuestionTimeout, QUESTION_TIMEOUT_DEFAULT } from "./settings/questionTimeout";
+import { writeAutonomyRule } from "./sessions/autonomyRule";
 import { envName, envPaths } from "./settings/paths";
 import { FieldErrors, SettingsService } from "./settings/service";
 import { readHiddenCommands, ToolsHost } from "./settings/tools";
@@ -136,7 +137,13 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   if (paths !== undefined) for (const key of keyFileSecrets(paths)) addSecret(key);
   const log = (text: string): void => channel.appendLine(redact(text, secrets));
+  let autonomyRuleFile: string | undefined;
   if (paths !== undefined) {
+    try {
+      autonomyRuleFile = writeAutonomyRule(paths);
+    } catch (error) {
+      log(`Правило автономной работы не записано, хост запустится без него: ${error instanceof Error ? error.message : String(error)}`);
+    }
     try {
       if (ensureQuestionTimeout(paths) === "written")
         log(`Вопрос агента ждёт ответа ${QUESTION_TIMEOUT_DEFAULT} мин, потом агент продолжает сам («Настройки → Среда»)`);
@@ -242,7 +249,7 @@ export function activate(context: vscode.ExtensionContext): void {
     daemon: () => {
       if (!built.ok) return { ok: false, error: envError as string };
       if (daemon === undefined) {
-        const manager = new DaemonManager(built.value, { beforeLaunch: refreshSandbox });
+        const manager = new DaemonManager(built.value, { beforeLaunch: refreshSandbox, ...(autonomyRuleFile !== undefined ? { systemPromptFile: autonomyRuleFile } : {}) });
         manager.setMaxListeners(0); // every tab's controller listens for "connected"
         manager.on("connected", () => broadcast("connected"));
         manager.on("warning", (text: string) => log(text)); // log() redacts

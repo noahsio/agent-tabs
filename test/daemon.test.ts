@@ -197,6 +197,15 @@ describe("DaemonManager", () => {
     expect(await readFile(hostPidPath(daemon.agentDir), "utf8")).toBe(String(FAKE_PID));
   });
 
+  it("a_rule_file_is_appended_to_the_system_prompt_ahead_of_the_listen_tail", async () => {
+    const spawnFn = fakeSpawn(() => linkSocket());
+    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn, systemPromptFile: "/agent/agent-tabs/autonomy-rule.md" });
+    await manager.client();
+    const [, args] = spawnFn.mock.calls[0] as Parameters<SpawnFn>;
+    // the tail stays last: it is how the extension recognises its own host (hostPids, the protected-host check)
+    expect(args).toEqual(["--append-system-prompt", "/agent/agent-tabs/autonomy-rule.md", "--mode", "rpc", "--listen", `unix://${join(daemon.agentDir, "rpc", "agent-tabs.sock")}`]);
+  });
+
   it("waits_for_the_host_to_publish_its_socket", async () => {
     const spawnFn = fakeSpawn(async () => {
       await new Promise((resolve) => setTimeout(resolve, 400));
