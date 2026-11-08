@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { profilePath } from "../../kit/sandbox/profile.mjs";
 import { GuardRulesInvalid, type GuardRulesAdmin, type RulesV2 } from "../../src/guard/admin";
 import { launchAgentPath, serviceLabel } from "../../src/guard/launchAgent";
-import type { ProtectionStatus } from "../../src/guard/protection";
+import { setSandboxLayer, type ProtectionDeps, type ProtectionStatus } from "../../src/guard/protection";
 import { envPaths, type EnvPaths } from "../../src/settings/paths";
 import type { SettingsResult } from "../../src/settings/protocol";
 import type { RolesView } from "../../src/settings/roles";
@@ -116,6 +116,7 @@ beforeEach(() => {
           disableCalls += 1;
           status = { state: "off" };
         },
+        setLayer: (layer, on) => setSandboxLayer(paths, {} as ProtectionDeps, layer, on),
         writeDenies: async () => ["/opt/homebrew", "/Users/me/.codegraph"],
         installed: () => installed,
       },
@@ -141,6 +142,32 @@ afterEach(() => {
 });
 
 describe("SecurityHost · protection", () => {
+  it("shows saved layers and validates their actions without changing guard groups", async () => {
+    const before = fileRules();
+    expect((await view()).layers).toEqual({ launch: true, agentCode: true, localServices: true });
+    expect(await perform({ kind: "layer.set", layer: "launch", on: false })).toEqual({ ok: true });
+    expect((await view()).layers.launch).toBe(false);
+    expect(fileRules()).toEqual(before);
+    expect(await perform({ kind: "layer.set", layer: "core", on: false })).toMatchObject({ ok: false });
+    expect(await perform({ kind: "layer.set", layer: "agentCode", on: "false" })).toMatchObject({ ok: false });
+    expect(await perform({ kind: "layer.set", layer: "localServices" })).toMatchObject({ ok: false });
+    expect((await view()).layers).toEqual({ launch: false, agentCode: true, localServices: true });
+  });
+
+  it("shows only active escalation labels and remote destructive checks", async () => {
+    const shown = await view();
+    expect(shown).not.toHaveProperty("groups");
+    expect(shown.asks).toContain("rm -rf: путь из переменной");
+    expect(shown.asks).toContain("find -delete по домашней папке");
+    expect(shown.asks).toContain("На удалённой машине: удаление контейнеров и образов Docker");
+    expect(shown.asks).not.toContain("sudo");
+    expect(shown.asks).not.toContain("git push");
+    status = { state: "on" };
+    adminRules.builtinEscalate = [{ id: "rm-rf-variable", label: "Моё правило", patterns: ["danger"] }];
+    expect((await view()).asks).toContain("Моё правило");
+    expect((await view()).asks).not.toContain("rm -rf: путь из переменной");
+  });
+
   it("turning_on_asks_for_consent_first", async () => {
     expect(await perform({ kind: "protection.set", on: true, confirmed: false })).toMatchObject({ ok: false });
     expect(enableCalls).toBe(0);

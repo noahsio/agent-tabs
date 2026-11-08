@@ -75,6 +75,8 @@ declare module "*/kit/lib/tools.mjs" {
 }
 
 declare module "*/kit/sandbox/profile.mjs" {
+  export type SandboxLayers = { launch: boolean; agentCode: boolean; localServices: boolean };
+  export type SandboxLayer = keyof SandboxLayers;
   /** A VS Code install: the .app bundle (when known), user-data dir, the profile's settings.json, extensions dir. */
   export type VscodeInstall = { appRoot?: string; userDataDir: string; userSettings?: string; extensionsDir: string };
   export function profilePath(agentDir: string): string;
@@ -94,6 +96,8 @@ declare module "*/kit/sandbox/profile.mjs" {
     envs?: { agentDir: string; claudeDir: string }[];
     vscodes?: VscodeInstall[];
     writableDirs?: string[];
+    layers?: SandboxLayers;
+    tempDirs?: string[];
   }): string;
 }
 
@@ -132,6 +136,8 @@ declare module "*/kit/guard/sockets.mjs" {
 }
 
 declare module "*/kit/guard/rules.mjs" {
+  export function escalationRules(rules: import("../../src/guard/admin").RulesV2): Array<{ id: string; label: string; patterns: string[] }>;
+  export const REMOTE_ASK_RULES: Array<{ label: string; patterns: string[] }>;
   export const GROUP_IDS: string[];
   export const DECIDER_MODES: string[];
   export const WAIT_SECONDS: number[];

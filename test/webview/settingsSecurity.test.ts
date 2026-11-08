@@ -26,7 +26,8 @@ const security: SecurityView = {
     askCustom: "docker volume prune*\nkubectl delete *\nDROP TABLE",
     ipWhitelist: "203.0.113.10 # дев-сервер\n203.0.113.20\n10.20.0.0/16 # офис",
   },
-  groups: { "git-push": true, history: true, secrets: true, "external-ip": true, "global-install": false },
+  layers: { launch: true, agentCode: true, localServices: false },
+  asks: ["rm -rf: путь из переменной", "На удалённой машине: удаление контейнеров и образов Docker"],
   decider: { mode: "decider-then-me", model: "gw-anthropic/claude-haiku-5-5", timeoutMs: 20000 },
   human: { waitSeconds: 300, card: true, telegram: false },
   telegram: { chat: "", legacy: false, ready: false },
@@ -99,13 +100,29 @@ describe("«Безопасность»", () => {
     expect(counter("ipWhitelist")).toBe("3 записи");
     expect(body().textContent).toContain("локальная сеть (192.168.*, 10.*, localhost) разрешена всегда");
     expect(body().textContent).toContain("Модель-решатель: Claude Haiku 5.5");
-    expect(q('[data-group="global-install"]').textContent).toContain("Глобальная установка пакетов");
-    expect(q('[data-group="global-install"]').textContent).toContain("npm -g, pip install");
-    expect(q('[data-toggle="group:global-install"]').getAttribute("aria-checked")).toBe("false");
+    expect(body().querySelector("[data-group]")).toBeNull();
+    expect(q('[data-toggle="layer:localServices"]').getAttribute("aria-checked")).toBe("false");
     // the counter follows what is typed
     area("askCustom").value = "a\n\nb";
     area("askCustom").dispatchEvent(new Event("input", { bubbles: true }));
     expect(counter("askCustom")).toBe("2 правила");
+  });
+
+  it("shows core and layers, posts a switch, and renders the read-only ask list", () => {
+    show({ state: "on" });
+    expect(body().querySelectorAll("[data-layer]")).toHaveLength(3);
+    expect(q('[data-role="sandbox-core"]').textContent).toContain("всегда, пока включена защита");
+    expect(q('[data-role="layer-restart"]').textContent).toContain("OmO");
+    expect(q('[data-role="layer-restart"]').textContent).toContain("перезапустится");
+    const asks = q('[data-role="guard-asks"]');
+    expect([...asks.querySelectorAll("li")].map((item) => item.textContent)).toEqual(security.asks);
+    expect(asks.querySelector("button, input")).toBeNull();
+    q<HTMLButtonElement>('[data-toggle="layer:launch"]').click();
+    expect(actions()).toEqual([{ kind: "layer.set", layer: "launch", on: false }]);
+    expect(q<HTMLButtonElement>('[data-toggle="layer:agentCode"]').disabled).toBe(true);
+    result({ ok: true });
+    show({ layers: { ...security.layers, launch: false } });
+    expect(q('[data-toggle="layer:launch"]').getAttribute("aria-checked")).toBe("false");
   });
 
   it("an_error_line_is_marked", () => {
@@ -268,7 +285,7 @@ describe("«Безопасность»", () => {
     expect(q('[data-role="protection-reason"]').hidden).toBe(true);
   });
 
-  it("decider_human_groups_and_import_post_their_actions", () => {
+  it("decider_human_layers_and_import_post_their_actions", () => {
     show({ telegram: { tokenHint: "••••••3456", chat: "42", legacy: false, ready: true } });
     [...body().querySelectorAll<HTMLButtonElement>('[data-seg="mode"] button')][1]!.click();
     const model = q<HTMLSelectElement>('select[data-field="decider-model"]');
@@ -278,7 +295,7 @@ describe("«Безопасность»", () => {
     [...body().querySelectorAll<HTMLButtonElement>('[data-seg="wait"] button')][0]!.click();
     q<HTMLButtonElement>('[data-toggle="telegram"]').click();
     q<HTMLButtonElement>('[data-toggle="card"]').click();
-    q<HTMLButtonElement>('[data-toggle="group:git-push"]').click();
+    q<HTMLButtonElement>('[data-toggle="layer:launch"]').click();
     q<HTMLButtonElement>('[data-action="importClaude"]').click();
     expect(actions()).toEqual([
       { kind: "decider.set", mode: "ask-me" },
@@ -286,7 +303,7 @@ describe("«Безопасность»", () => {
       { kind: "human.set", waitSeconds: 60 },
       { kind: "human.set", telegram: true },
       { kind: "human.set", card: false },
-      { kind: "group.set", group: "git-push", on: false },
+      { kind: "layer.set", layer: "launch", on: false },
       { kind: "importClaude" },
     ]);
   });

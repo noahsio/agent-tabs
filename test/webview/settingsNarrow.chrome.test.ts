@@ -37,7 +37,8 @@ const STATE = {
       writeDenies: ["/opt/homebrew", "/Users/someone/.codegraph", "/Users/someone/dev/repo/bin/tool"],
     },
     text: { hardDeny: "rm -rf /\nsudo rm *", askCustom: "docker volume prune*", ipWhitelist: "203.0.113.10 # дев-сервер\n10.20.0.0/16 # офис" },
-    groups: { "git-push": true, history: true, secrets: true, "external-ip": true, "global-install": false },
+    layers: { launch: true, agentCode: true, localServices: true },
+    asks: ["rm -rf: путь из переменной", "find -delete по домашней папке", "На удалённой машине: рекурсивное удаление путей с переменными, шаблонами или выходом из папки", "На удалённой машине: удаление контейнеров и образов Docker", "На удалённой машине: удаление и очистка ресурсов Docker", "На удалённой машине: удаление объектов и очистка таблиц SQL", "На удалённой машине: массовое или принудительное завершение процессов"],
     decider: { mode: "decider-then-me", model: "gw-x/m1", timeoutMs: 20000 },
     human: { waitSeconds: 300, card: true, telegram: false },
     telegram: { chat: "", legacy: false, ready: false },
@@ -138,6 +139,30 @@ const AUDIT = `(() => {
 })()`;
 
 describe.skipIf(!hasChrome)("the settings modal in a narrow panel (headless Chrome)", () => {
+  it.skipIf(process.env["SETTINGS_SHOTS"] === undefined)("sandbox layer screenshots in both themes", async () => {
+    const dir = process.env["SETTINGS_SHOTS"] as string;
+    mkdirSync(dir, { recursive: true });
+    for (const width of [900, 360]) {
+      const page = await openSettings(width, true);
+      try {
+        await show(page, { name: "security", section: "security", setup: "" });
+        for (const theme of ["dark", "light"]) {
+          await page.evaluate(`(() => {
+            document.body.className = "vscode-${theme}";
+            document.documentElement.style.cssText = ${JSON.stringify(theme === "light"
+              ? "--vscode-editor-background:#fff;--vscode-editor-foreground:#24292f;--vscode-foreground:#24292f;--vscode-descriptionForeground:#57606a;--vscode-input-background:#f6f8fa;--vscode-input-foreground:#24292f;--vscode-widget-border:#d0d7de;--vscode-input-border:#d0d7de;--vscode-editorWidget-background:#fff;--vscode-panel-background:#fff;--vscode-quickInput-background:#fff;--vscode-toolbar-hoverBackground:#eee;--vscode-list-hoverBackground:#eee;--vscode-button-secondaryForeground:#24292f;--vscode-button-secondaryBackground:#e5e5e5;"
+              : "")};
+          })()`);
+          expect(await page.evaluate<string[]>(AUDIT)).toEqual([]);
+          expect(await page.evaluate<number>('document.querySelectorAll("[data-layer]").length')).toBe(3);
+          await page.screenshot(join(dir, `sandbox-layers-${theme}-${width}.png`));
+        }
+      } finally {
+        await page.close();
+      }
+    }
+  }, 60_000);
+
   it("at_400px_no_settings_text_column_is_squeezed_under_200px_and_nothing_scrolls_sideways", async () => {
     const page = await openSettings(400, false);
     try {
