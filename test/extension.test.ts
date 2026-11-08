@@ -284,6 +284,7 @@ describe("PanelHost sessions", () => {
         omoUnavailable: "нет связи с OmO",
         restartNeeded: false,
         restartHint: "Перезапустить OmO — нужно после смены папок",
+        questionTimeoutMinutes: 5, // a fresh environment gets the default when the window starts
       },
       // «Лесенка моделей»: the spec's default table; with no model list to read, nothing is called missing
       ladder: {

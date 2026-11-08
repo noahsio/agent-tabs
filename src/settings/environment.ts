@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { EnvVar } from "../env";
 import type { EnvPaths } from "./paths";
+import { readQuestionTimeout, writeQuestionTimeout } from "./questionTimeout";
 import { FieldErrors, type SettingsSectionHost } from "./service";
 
 export type Folder = "agentDir" | "memoryHome" | "claudeDir";
@@ -14,9 +15,17 @@ export type EnvironmentView = {
   /** The setting names other folders than the running OmO uses. */
   restartNeeded: boolean;
   restartHint: string;
+  /** Minutes OmO waits on an unanswered question before the agent goes on by itself (`askUser.timeoutMinutes`). */
+  questionTimeoutMinutes: number;
 };
 
-export type EnvironmentAction = { kind: "folder.set"; which: Folder; path: string } | { kind: "restart" };
+export type EnvironmentAction =
+  | { kind: "folder.set"; which: Folder; path: string }
+  | { kind: "restart" }
+  | { kind: "questionTimeout.set"; minutes: number };
+
+/** What OmO waits when settings.json says nothing. */
+const OMO_QUESTION_TIMEOUT = 30;
 
 export interface EnvironmentDeps {
   /** The window's folders: what the running OmO was started with. */
@@ -70,6 +79,7 @@ export class EnvironmentHost implements SettingsSectionHost<EnvironmentAction> {
 
   parse(raw: Record<string, unknown>): EnvironmentAction | undefined {
     if (raw["kind"] === "restart") return { kind: "restart" };
+    if (raw["kind"] === "questionTimeout.set") return typeof raw["minutes"] === "number" ? { kind: "questionTimeout.set", minutes: raw["minutes"] } : undefined;
     if (raw["kind"] !== "folder.set") return undefined;
     const { which, path: value } = raw;
     if (!(FOLDERS as unknown[]).includes(which) || typeof value !== "string" || value.trim() === "") return undefined;
@@ -87,12 +97,22 @@ export class EnvironmentHost implements SettingsSectionHost<EnvironmentAction> {
       ...(version !== undefined ? { omoVersion: version } : { omoUnavailable: OMO_UNAVAILABLE }),
       restartNeeded,
       restartHint: RESTART_HINT,
+      questionTimeoutMinutes: readQuestionTimeout(this.deps.paths) ?? OMO_QUESTION_TIMEOUT,
     };
   }
 
   async perform(action: EnvironmentAction): Promise<void> {
     if (action.kind === "restart") {
       this.deps.restartHost();
+      return;
+    }
+    if (action.kind === "questionTimeout.set") {
+      try {
+        writeQuestionTimeout(this.deps.paths, action.minutes);
+      } catch (error) {
+        const message = errorText(error);
+        throw new FieldErrors(message, [{ field: "questionTimeout", message }]);
+      }
       return;
     }
     if (!path.isAbsolute(action.path) && action.path !== "~" && !action.path.startsWith("~/")) {

@@ -49,6 +49,7 @@ const environment: EnvironmentView = {
   omoVersion: "5.1.59",
   restartNeeded: false,
   restartHint: "Перезапустить OmO — нужно после смены папок",
+  questionTimeoutMinutes: 5,
 };
 
 function body(section: "tools" | "environment"): HTMLElement {
@@ -299,6 +300,15 @@ describe("«Среда»", () => {
       { kind: "folder.set", which: "memoryHome", path: "/data/memory", section: "environment" },
       { kind: "restart", section: "environment" },
     ]);
+  });
+
+  it("the_question_timeout_shows_and_a_change_is_sent_as_whole_minutes", () => {
+    show({});
+    const field = q<HTMLInputElement>("environment", '[data-field="questionTimeout"]');
+    expect(field.value).toBe("5");
+    change(field, "5"); // unchanged: nothing to send
+    change(field, "12");
+    expect(actions()).toEqual([{ kind: "questionTimeout.set", minutes: 12, section: "environment" }]);
   });
 
   it("a_changed_folder_highlights_the_restart", () => {

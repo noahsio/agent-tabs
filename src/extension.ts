@@ -45,6 +45,7 @@ import { LadderHost, readLadder } from "./settings/ladder";
 import { RolesHost } from "./settings/roles";
 import { SecurityHost } from "./settings/security";
 import { migrateGwApiKey } from "./settings/migrateKey";
+import { ensureQuestionTimeout, QUESTION_TIMEOUT_DEFAULT } from "./settings/questionTimeout";
 import { envName, envPaths } from "./settings/paths";
 import { FieldErrors, SettingsService } from "./settings/service";
 import { readHiddenCommands, ToolsHost } from "./settings/tools";
@@ -135,6 +136,14 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   if (paths !== undefined) for (const key of keyFileSecrets(paths)) addSecret(key);
   const log = (text: string): void => channel.appendLine(redact(text, secrets));
+  if (paths !== undefined) {
+    try {
+      if (ensureQuestionTimeout(paths) === "written")
+        log(`Вопрос агента ждёт ответа ${QUESTION_TIMEOUT_DEFAULT} мин, потом агент продолжает сам («Настройки → Среда»)`);
+    } catch (error) {
+      log(`Время ожидания вопроса не задано: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const envError = built.ok
     ? undefined
     : `Не заданы переменные: ${built.missing.join(", ")}. Задайте их в agentTabs.environmentVariables и перезагрузите окно; ` +
