@@ -321,7 +321,7 @@ describe("one request, many windows", () => {
     clock += 61_000;
     const waited = (await waiting) as any;
     expect(waited.decision).toBe("deny");
-    expect(waited.reason).toContain("не ответил");
+    expect(waited.reason).toContain("отложена до решения человека");
     await until(() => window.events.some((event) => event.event === "resolved" && event.by === "timeout"));
   });
 });
