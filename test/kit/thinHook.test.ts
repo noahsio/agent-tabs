@@ -3,7 +3,6 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-// @ts-expect-error plain ESM without types
 import { runThinHook } from "../../kit/guard/thinHook.mjs";
 // @ts-expect-error plain ESM without types
 import { installGuardFiles } from "../../kit/guard/install.mjs";
@@ -87,8 +86,18 @@ describe("thin hook", () => {
   it("a_safe_call_is_allowed_without_the_service", async () => {
     expect(await runThinHook(bash("git status"), opts)).toEqual({});
     expect(await runThinHook(call("grep", { pattern: "rm -rf $U" }), opts)).toEqual({});
-    expect(await runThinHook(call("write", { path: "/work/proj/a.txt", content: "x" }), opts)).toEqual({});
     expect(svc.connections).toBe(0);
+  });
+
+  it("file_writes_and_whole_copy_actions_reach_the_service_for_coordination", async () => {
+    svc.answer = { decision: "deny", reason: "[guard] файл занят" };
+    for (const input of [
+      call("write", { path: "/work/proj/a.txt", content: "x" }),
+      bash("printf x > a.txt"),
+      bash('printf x > "$OUTPUT"'),
+      bash("git checkout feature"),
+    ]) expect(decision(await runThinHook(input, opts)).permissionDecision).toBe("deny");
+    expect(svc.connections).toBe(4);
   });
 
   it("session_start_gets_the_nested_sandbox_note_without_the_service", async () => {
