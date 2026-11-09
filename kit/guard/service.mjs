@@ -365,6 +365,19 @@ export async function startService({
   }
   function escalateCoordination() {
     coordination.prune();
+    // A closed session or a late reply ends the human question too; persisted cards cannot outlive their proposal.
+    for (const record of requests.values()) {
+      if (!record.view.coordinationId || record.answer || coordination.requests.get(record.view.coordinationId)?.state === "deferred") continue;
+      requests.delete(record.id);
+      release(record, () => deny("[guard] согласование завершено; повторите команду"));
+      broadcast({ event: "resolved", id: record.id, decision: "deny", by: "timeout", session: record.session });
+    }
+    const obsolete = deferredState.items.filter((item) => item.coordinationId && coordination.requests.get(item.coordinationId)?.state !== "deferred");
+    if (obsolete.length > 0) {
+      deferredState.items = deferredState.items.filter((item) => !obsolete.includes(item));
+      saveDeferred();
+      for (const item of obsolete) broadcast({ event: "resolved", id: item.id, decision: "deny", by: "timeout", session: item.session, deferred: true });
+    }
     if (!rulesState.ok) return;
     for (const proposal of coordination.requests.values()) {
       if (proposal.kind !== "proposal" || proposal.state !== "deferred" || proposal.humanId) continue;

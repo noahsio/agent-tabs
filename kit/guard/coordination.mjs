@@ -55,9 +55,16 @@ export class Coordination {
 
   prune() {
     const now = this.now();
+    const expired = new Set();
     for (const [root, sessions] of this.sessions) {
-      for (const [session, at] of sessions) if (now - at >= LIVE_MS) sessions.delete(session);
+      for (const [session, at] of sessions) if (now - at >= LIVE_MS) {
+        sessions.delete(session);
+        expired.add(session);
+      }
       if (sessions.size === 0) this.sessions.delete(root);
+    }
+    for (const session of expired) {
+      if (![...this.sessions.values()].some((sessions) => sessions.has(session))) this.close(session, "не проявляла активности десять минут");
     }
     for (const [file, lease] of this.leases) {
       if (lease.until <= now || !this.sessions.get(lease.root)?.has(lease.session)) this.leases.delete(file);
@@ -88,19 +95,22 @@ export class Coordination {
     return title ? `${title} (${session.slice(0, 8)})` : session.slice(0, 8);
   }
 
-  close(session) {
+  close(session, reason = "закрыта") {
     for (const sessions of this.sessions.values()) sessions.delete(session);
     for (const [file, lease] of this.leases) if (lease.session === session) this.leases.delete(file);
     for (const request of this.requests.values()) {
       if (["done", "rejected", "unanswered", "cancelled"].includes(request.state)) continue;
+      if (request.session !== session && !request.participants.includes(session)) continue;
+      for (const [id, message] of this.outbox) if (message.request === request.id) this.outbox.delete(id);
       if (request.session === session) request.state = "cancelled";
       else if (request.participants.includes(session)) {
         request.state = request.kind === "handoff" ? "unanswered" : "cancelled";
-        request.reason = `Сессия ${this.label(session)} закрыта; повторите согласование`;
+        request.reason = `Сессия ${this.label(session)} ${reason}; повторите согласование`;
         this.notify(request, request.session, "closed", request.reason);
       }
     }
     for (const [id, message] of this.outbox) if (message.session === session) this.outbox.delete(id);
+    this.activity.delete(session);
   }
 
   view(request) {

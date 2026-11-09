@@ -110,7 +110,10 @@ it("re-proposes after the requested wait and bounds the wait to thirty minutes",
 it("times out a handoff after fifteen minutes without asking the person", async () => {
   await write("owner");
   const request = await coordinate("requester", { action: "handoff", file: "coordination-owned.txt", what: "Update validation" });
-  clock.advance(899_999);
+  clock.advance(540_000);
+  await coordinate("owner", { action: "hello" });
+  await coordinate("requester", { action: "hello" });
+  clock.advance(359_999);
   expect((await coordinate("requester", { action: "status", id: request["id"] }))["state"]).toBe("waiting");
   clock.advance(1);
   expect((await coordinate("requester", { action: "status", id: request["id"] }))["state"]).toBe("unanswered");
@@ -163,5 +166,31 @@ it("releases on real shutdown, keeps leases on reload, and uses titles in confli
   await coordinate("owner", { action: "close", reason: "reload" });
   expect((await write("requester"))["decision"]).toBe("deny");
   await coordinate("owner", { action: "close", reason: "quit" });
+  expect((await write("requester"))["decision"]).toBe("allow");
+});
+
+it.each(["quit", "expired"])("removes pending human proposals when the owner is %s", async (end) => {
+  clock.t = new Date(2026, 10, 4, 23, 0, 0).getTime();
+  await write("owner");
+  const proposal = await checkout();
+  const state = proposal["coordination"];
+  if (typeof state !== "object" || state === null || !("id" in state)) throw new Error("Expected proposal");
+  clock.advance(120_000);
+  expect((await send(service.paths.adminSock, { op: "deferred" })).items).toHaveLength(1);
+  await coordinate("requester", { action: "hello" });
+  if (end === "quit") await coordinate("owner", { action: "close", reason: "quit" });
+  else clock.advance(480_000);
+  expect((await coordinate("requester", { action: "status", id: state.id }))["state"]).toBe("cancelled");
+  expect((await send(service.paths.adminSock, { op: "deferred" })).items).toEqual([]);
+  expect((await write("requester"))["decision"]).toBe("allow");
+});
+
+it("ends a handoff when its owner loses liveness before the response deadline", async () => {
+  await write("owner");
+  const request = await coordinate("requester", { action: "handoff", file: "coordination-owned.txt", what: "Update validation" });
+  clock.advance(599_999);
+  expect((await coordinate("requester", { action: "status", id: request["id"] }))["state"]).toBe("waiting");
+  clock.advance(1);
+  expect((await coordinate("requester", { action: "status", id: request["id"] }))["state"]).toBe("unanswered");
   expect((await write("requester"))["decision"]).toBe("allow");
 });
