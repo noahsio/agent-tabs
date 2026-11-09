@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
 import { mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyEntries, initialState } from "../../src/chat/reducer";
 import { DaemonManager, hostSocketPath } from "../../src/daemon";
 import type { OmoEnv } from "../../src/env";
@@ -337,6 +337,28 @@ describe("SessionController", () => {
       daemon.push(userStart("m-1", "hello"));
       await settle(() => controller?.state.blocks[0]?.kind === "user" && controller.state.blocks[0].delivery === undefined);
       expect(controller.state.blocks).toHaveLength(1);
+    });
+
+    // Measured live (OmO 5.1.59, 2026-11-09): a prompt sent while a turn was ending was answered 40+ s later, admitted
+    // and run; the 30 s request timeout had already shown it «Не отправлено». A slow answer is not a refusal.
+    it("a_message_omo_answers_after_the_rpc_default_timeout_is_still_sending_then_sent", async () => {
+      let admit: (() => void) | undefined;
+      daemon.on("prompt", () => new Promise((resolve) => { admit = () => resolve({ data: { disposition: "started" } }); }));
+      controller = await SessionController.create(manager, "/tmp");
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const sent = controller.send("hello", "auto", [], "m-1");
+        await vi.advanceTimersByTimeAsync(0);
+        for (let tick = 0; tick < 50 && admit === undefined; tick++) await new Promise((resolve) => setImmediate(resolve));
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+        expect(controller.state.error).toBeUndefined();
+        expect(controller.state.blocks).toEqual([{ kind: "user", id: "m-1", text: "hello", delivery: { state: "sending" } }]);
+        admit?.();
+        expect(await sent).toBe(true);
+        expect(ofType("prompt")).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("an_outgoing_image_shows_at_once_under_the_id_the_real_message_uses", async () => {

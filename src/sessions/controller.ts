@@ -18,6 +18,13 @@ import { ModelLadder, type LadderView } from "./ladder";
 import { instantDeadTurn, openWorkText, systemAbortStall, type OpenWork } from "./liveness";
 import type { ModelLevel } from "./rememberedLevels";
 
+/**
+ * How long a message waits for OmO to admit it. Measured (OmO 5.1.59): a prompt meeting a turn that is ending is answered
+ * when that turn ends — 40+ s later — and then runs, so the client's 30 s default turned a delivered message into
+ * «Не отправлено». A lost connection still fails at once (the client rejects every pending request on close).
+ */
+const ADMISSION_TIMEOUT_MS = 30 * 60_000;
+
 /** A mode keyword that prefixes every prose message while it is on (the actions menu's toggles). */
 export type NextMode = "ulw" | "mass ulw";
 
@@ -434,7 +441,7 @@ export class SessionController extends EventEmitter {
       const barrier = type === "prompt" ? await this.barrierPoint() : undefined;
       const toolBarrier = barrier ? { toolBarrier: { id: barrier.pointId, deadlineMs: BARRIER_DEADLINE_MS } } : {};
       const armedAt = Date.now();
-      const sent = this.request<Frame>(type, { ...fields, ...toolBarrier });
+      const sent = this.request<Frame>(type, { ...fields, ...toolBarrier }, ADMISSION_TIMEOUT_MS);
       const answer =
         type !== "prompt"
           ? sent.then((data) => ({ data, steered: false, queued: false }))
@@ -442,12 +449,12 @@ export class SessionController extends EventEmitter {
               (data) => ({ data, steered: false, queued: false }),
               async (error: unknown) => {
                 if (error instanceof RpcError && error.code === "streaming") {
-                  return { data: await this.request<Frame>("steer", fields), steered: true, queued: false };
+                  return { data: await this.request<Frame>("steer", fields, ADMISSION_TIMEOUT_MS), steered: true, queued: false };
                 }
                 // A prompt that lost the race to a compaction OmO had just begun (its `compacting` flag had not
                 // reached us when `type` was chosen): re-route to the queue rather than surface OmO's refusal.
                 if (error instanceof RpcError && isCompactionReject(error)) {
-                  return { data: await this.request<Frame>("follow_up", fields), steered: false, queued: true };
+                  return { data: await this.request<Frame>("follow_up", fields, ADMISSION_TIMEOUT_MS), steered: false, queued: true };
                 }
                 throw error;
               },
@@ -1188,9 +1195,9 @@ export class SessionController extends EventEmitter {
   }
 
   /** Session request; while a re-attach is in flight it waits for the new handle, never using the old one. */
-  private async request<T = unknown>(type: string, fields: Frame = {}): Promise<T> {
+  private async request<T = unknown>(type: string, fields: Frame = {}, timeoutMs?: number): Promise<T> {
     if (this.ready !== undefined) await this.ready;
-    return this.sessionRequest<T>(type, fields);
+    return this.sessionRequest<T>(type, fields, timeoutMs);
   }
 
   private taskRequest(name: string, data: Frame): Promise<Frame> {
