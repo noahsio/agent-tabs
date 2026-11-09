@@ -31,7 +31,7 @@ export default function coordinateExtension(pi) {
     async execute(_toolCallId, input, _signal, _onUpdate, ctx) {
       try {
         const result = await call(ctx, input);
-        return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+        return { content: [{ type: "text", text: JSON.stringify(result, (key, value) => key === "session" ? undefined : value) }], details: result };
       } catch (error) {
         return { content: [{ type: "text", text: `Служба координации недоступна: ${error.message}. Согласие не получено; продолжайте независимую работу.` }], details: { ok: false } };
       }

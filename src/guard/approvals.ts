@@ -1,5 +1,5 @@
 import type { GuardHostMessage } from "../panel/protocol";
-import type { ClaimVerdict, GuardAdmin, GuardEvent, GuardSubscription, PendingView } from "./admin";
+import type { ClaimVerdict, CoordinationView, GuardAdmin, GuardEvent, GuardSubscription, PendingView } from "./admin";
 
 /** What the window needs of the service's admin socket (GuardAdmin; a fake in tests). */
 export type GuardAdminPort = Pick<GuardAdmin, "rulesGet" | "subscribe" | "pending" | "answer" | "close">;
@@ -62,6 +62,8 @@ export class GuardApprovals {
   private syncing: Promise<void> = Promise.resolve();
   /** Requests waiting for a human, as the service published them. */
   private readonly open = new Map<string, PendingView>();
+  private coordination: CoordinationView[] = [];
+  private readonly coordinationShown = new WeakSet<ApprovalPanel>();
   /** The tabs each open request's card was posted to: the only tabs whose answer counts. */
   private readonly shownTo = new Map<string, Set<ApprovalPanel>>();
   /** Answers in flight: a second click, or a click in another tab, sends nothing. */
@@ -79,6 +81,7 @@ export class GuardApprovals {
 
   /** The cards a (re)loaded webview should show; one raised outside the chats is not a card of any tab. */
   replay(panel: ApprovalPanel): void {
+    this.postCoordination(panel);
     if (this.card !== true) return;
     for (const [id, request] of this.open) if (!this.raised.has(id)) this.postRequest(request, [panel]);
   }
@@ -179,6 +182,7 @@ export class GuardApprovals {
       (event) => this.onEvent(event),
       () => this.gaveUp(),
       () => void this.reconcile(admin),
+      true,
     );
     if (this.silent) {
       this.silent = false;
@@ -188,6 +192,8 @@ export class GuardApprovals {
 
   /** Ends the subscription; every request a tab still shows is closed there (nobody can answer it through us now). */
   private stop(): void {
+    this.coordination = [];
+    for (const panel of this.deps.panels()) this.postCoordination(panel);
     for (const [id, panels] of this.shownTo) for (const panel of panels) panel.postGuard({ type: "guardClosed", id });
     clearTimeout(this.retryTimer);
     this.retryTimer = undefined;
@@ -265,6 +271,12 @@ export class GuardApprovals {
   }
 
   private onEvent(event: GuardEvent): void {
+    if (event.event === "coordination") {
+      this.coordination = event.items;
+      for (const panel of this.deps.panels()) this.postCoordination(panel);
+      this.deps.changed?.();
+      return;
+    }
     if (event.event === "claim") {
       const { verdict, owner } = this.claimFor(event.session);
       this.subscription?.claim(event.id, verdict, owner);
@@ -309,6 +321,25 @@ export class GuardApprovals {
     const owner = this.owner(session);
     if (owner === undefined) return { verdict: "no" };
     return all.some((panel) => panel.durableId === owner) ? { verdict: "own" } : { verdict: "knows", owner };
+  }
+
+  private postCoordination(panel: ApprovalPanel): void {
+    const belongs = (session: string): boolean => panel.runsChild(session) ||
+      (panel.durableId !== undefined && (panel.durableId === session || panel.durableId === this.owner(session)));
+    const lines = this.coordination
+      .filter((item) => ["waiting", "postponed", "deferred", "waiting-owner"].includes(item.state) &&
+        (belongs(item.session) || item.participants.some((participant) => belongs(participant.session))))
+      .map((item) => {
+        const who = belongs(item.session) ? item.participants.map((participant) => participant.label).join(", ") : item.label;
+        const state = item.state === "deferred" ? "Нужен человек · Отложенные"
+          : item.state === "postponed" ? "Сосед попросил подождать"
+            : item.kind === "handoff" ? "Передача задачи" : "Согласование";
+        return `${state} · ${who}: ${item.subject}`;
+      });
+    if (lines.length === 0 && !this.coordinationShown.has(panel)) return;
+    if (lines.length > 0) this.coordinationShown.add(panel);
+    else this.coordinationShown.delete(panel);
+    panel.postGuard({ type: "coordination", lines });
   }
 
   /**

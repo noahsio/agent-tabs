@@ -385,6 +385,7 @@ export async function startService({
         session: proposal.session, cwd: proposal.cwd, tool: proposal.tool, command: proposal.subject,
         reasons: [`Соседи не ответили за две минуты: ${proposal.participants.map((session) => coordination.label(session)).join(", ")}. Молчание не означает согласие.`],
         coordinationId: proposal.id,
+        sessionLabel: coordination.label(proposal.session),
       };
       const hour = new Date(now()).getHours();
       const key = `coordination:${proposal.id}`;

@@ -2601,6 +2601,19 @@ button.uimg.att {
   font-variant-numeric: tabular-nums;
 }
 
+.coordination-line {
+  width: min(860px, calc(100% - 2 * clamp(28px, 6.55%, 60px)));
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 auto 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 5.5em;
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
 .deferred-row fieldset {
   min-width: 0;
   padding: 0;

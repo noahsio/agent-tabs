@@ -83,6 +83,9 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     case "guardStep":
       view.guardStep(message);
       return;
+    case "coordination":
+      view.coordination(message.lines);
+      return;
     case "guardSilent":
       view.guardSilent(message.silent);
       return;

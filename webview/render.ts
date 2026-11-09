@@ -52,6 +52,7 @@ export class ChatView {
   private readonly feed: Feed;
   /** The current plan over the composer while a turn runs. */
   private readonly todoStrip = new TodoStrip();
+  private readonly coordinationLine = el("div", { class: "coordination-line", "data-role": "coordination", role: "status", "aria-live": "polite" });
   private readonly composer: Composer;
   private readonly lightbox: Lightbox;
   private readonly popovers: Popovers;
@@ -173,6 +174,8 @@ export class ChatView {
     });
 
     composerRoot.insertBefore(this.reconnectLine.element, this.composer.box); // directly over the input, like the wedge under it
+    this.coordinationLine.hidden = true;
+    composerRoot.insertBefore(this.coordinationLine, this.reconnectLine.element);
     composerRoot.prepend(this.todoStrip.element); // inside the floating footer: the feed's inset grows with it
     this.dock = new Dock({
       post,
@@ -366,6 +369,11 @@ export class ChatView {
   }
 
   // ---------- guard ----------
+
+  coordination(lines: string[]): void {
+    this.coordinationLine.textContent = lines.join("\n");
+    this.coordinationLine.hidden = lines.length === 0;
+  }
 
   /** An open request: a panel in the composer's place (once, however often the host sends it). */
   guardRequest(request: PendingView, elsewhere: boolean, owner?: string): void {

@@ -6,7 +6,7 @@ import { makeSvcDir, removeSvcDirs, send, start } from "./serviceHelpers";
 const { default: extension } = await import(pathToFileURL(path.resolve(import.meta.dirname, "../../kit/guard/coordinate-extension.mjs")).href);
 type Context = { cwd: string; isIdle(): boolean; sessionManager: { getSessionId(): string; getSessionName(): string } };
 type EventHandler = (event: Record<string, unknown>, ctx: Context) => Promise<void>;
-type Tool = { name: string; parameters: { properties: Record<string, unknown> }; execute(id: string, input: Record<string, unknown>, signal: undefined, update: undefined, ctx: Context): Promise<{ details: Record<string, unknown> }> };
+type Tool = { name: string; parameters: { properties: Record<string, unknown> }; execute(id: string, input: Record<string, unknown>, signal: undefined, update: undefined, ctx: Context): Promise<{ content: { type: string; text: string }[]; details: Record<string, unknown> }> };
 let service: Awaited<ReturnType<typeof start>>;
 let registered: Tool;
 let handlers: Map<string, EventHandler>;
@@ -42,4 +42,12 @@ it("reports the session title and releases only on a real session shutdown", asy
   expect((await attempt())["decision"]).toBe("deny");
   await handlers.get("session_shutdown")?.({ reason: "quit" }, context("owner"));
   expect((await attempt())["decision"]).toBe("allow");
+});
+
+it("shows titles and short identifiers without exposing durable UUIDs to the agent", async () => {
+  const owner = "12345678-1234-4234-8234-123456789abc";
+  await handlers.get("session_start")?.({}, context(owner));
+  const result = await registered.execute("call", { action: "who" }, undefined, undefined, context("requester"));
+  expect(result.content[0]?.text).toContain("File owner (12345678)");
+  expect(result.content[0]?.text).not.toContain(owner);
 });

@@ -36,6 +36,8 @@ export type RulesV2 = {
 export type PendingView = {
   id: string;
   session: string;
+  coordinationId?: string;
+  sessionLabel?: string;
   cwd: string;
   tool: string;
   command: string;
@@ -49,10 +51,21 @@ export type PendingView = {
 
 export type DeferredView = PendingView & { deferredAt: string };
 
+export type CoordinationView = {
+  id: string;
+  session: string;
+  label: string;
+  kind: string;
+  state: string;
+  subject: string;
+  participants: Array<{ session: string; label: string }>;
+};
+
 /** How this window answers «whose session is this»: it has the tab, it knows whose it is, or it has never heard of it. */
 export type ClaimVerdict = "own" | "knows" | "no";
 
 export type GuardEvent =
+  | { event: "coordination"; items: CoordinationView[] }
   /**
    * A request the service placed with this window. `only`: this window claimed the session, and no other window was
    * given it. `outside`: nobody has the session open, so this window is the one to raise it outside the chats. Neither:
@@ -103,6 +116,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isEvent(value: unknown): value is GuardEvent {
+  if (isObject(value) && value["event"] === "coordination") {
+    return Array.isArray(value["items"]) && value["items"].every((item: unknown) =>
+      isObject(item) && ["id", "session", "label", "kind", "state", "subject"].every((key) => typeof item[key] === "string") &&
+      Array.isArray(item["participants"]) && item["participants"].every((participant: unknown) =>
+        isObject(participant) && typeof participant["session"] === "string" && typeof participant["label"] === "string"));
+  }
   return isObject(value) && (value["event"] === "pending" || value["event"] === "resolved" || value["event"] === "claim");
 }
 
@@ -192,7 +211,7 @@ export class GuardAdmin {
    * Events from now on (the open requests first); the returned function ends the subscription. `onSubscribed` runs
    * each time the service confirms, the first time and after every resubscription (before that one's replay).
    */
-  subscribe(listener: (event: GuardEvent) => void, onGiveUp?: () => void, onSubscribed?: () => void): GuardSubscription {
+  subscribe(listener: (event: GuardEvent) => void, onGiveUp?: () => void, onSubscribed?: () => void, coordination = false): GuardSubscription {
     let current: net.Socket | undefined;
     let timer: NodeJS.Timeout | undefined;
     let stopped = false;
@@ -213,7 +232,7 @@ export class GuardAdmin {
       const socket = net.createConnection(this.socket);
       current = socket;
       confirmedAt = undefined;
-      socket.on("connect", () => writeLine(socket, { op: "subscribe", protocol: ADMIN_PROTOCOL }));
+      socket.on("connect", () => writeLine(socket, { op: "subscribe", protocol: ADMIN_PROTOCOL, coordination }));
       readLines(socket, (message) => {
         if (stopped) return;
         if (confirmedAt === undefined) {
