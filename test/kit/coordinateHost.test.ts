@@ -14,7 +14,7 @@ beforeEach(async () => {
   daemon.on("list_sessions", () => ({ data: { sessions: [
     { sessionId: "rpc-owner", durableSessionId: "durable-owner", sessionPath: "/sessions/owner.jsonl", status: "idle", attachments: 0 },
   ] } }));
-  daemon.on("open_session", () => ({ data: { sessionId: "rpc-owner", durableSessionId: "durable-owner" } }));
+  daemon.on("open_session", () => ({ data: { sessionId: "rpc-owner", state: { sessionId: "durable-owner" } } }));
   daemon.on("get_state", () => ({ data: { isStreaming: false } }));
   daemon.on("release_attachment", () => ({}));
 });
@@ -47,7 +47,7 @@ it("uses steer during background work and preserves the admission id on retry", 
 });
 
 it("does not send to a different durable session after a host replacement", async () => {
-  daemon.on("open_session", () => ({ data: { sessionId: "rpc-owner", durableSessionId: "someone-else" } }));
+  daemon.on("open_session", () => ({ data: { sessionId: "rpc-owner", state: { sessionId: "someone-else" } } }));
   await expect(deliverCoordination(daemon.agentDir, message)).rejects.toThrow(/identity/);
   expect(daemon.requests.some((frame) => frame["type"] === "steer")).toBe(false);
 });

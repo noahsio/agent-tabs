@@ -49,7 +49,7 @@ export async function deliverCoordination(agentDir, message) {
     if (!target || typeof target.sessionPath !== "string") throw new Error("Addressed session is not available on the host");
     const opened = await request("open_session", { sessionPath: target.sessionPath, retain_on_disconnect: true });
     attached = opened?.sessionId;
-    if (!attached || opened.durableSessionId !== message.session) throw new Error("Attached session identity changed");
+    if (!attached || opened.state?.sessionId !== message.session) throw new Error("Attached session identity changed");
     // The host chooses idle/start vs running/queue atomically; a get_state -> prompt choice would race.
     const admitted = await request("steer", { sessionId: attached, message: message.text, clientMessageId: message.id, whenIdle: "start" });
     if (!["started", "queued"].includes(admitted?.disposition)) throw new Error("Host did not admit the coordination message");
