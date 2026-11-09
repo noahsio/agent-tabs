@@ -29,13 +29,14 @@
 //   code? (an eval's code when commands were extracted, redacted, <= 4096), reasons, decider?: {model, decision, reason, ms}, createdAt}
 // Everything the sandbox can reach is bounded: open requests per session and in total, concurrent decider calls (identical
 // calls share one), Telegram sends, idle hook connections, hook connections, line length.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets, isReadTool } from "./classify.mjs";
+import { Coordination } from "./coordination.mjs";
 import { askDecider, catReferencePath, DEFAULT_OMO_PATH, readCache, resolveDeciderTransport, writeCache, writeJsonAtomic } from "./decider.mjs";
 import { commandText, guardStateReason, protectedTarget } from "./protect.mjs";
 import { loadDefaultRules, makeWhitelistEntry, parseRules, validateRules } from "./rules.mjs";
@@ -330,6 +331,7 @@ export async function startService({
   const log = (line) => console.error(`[guard ${iso(now())}] ${line}`);
   // id -> { id, key, session, view, deadline, waitSeconds, answer, used, tickets: Map<ticket, {tool, waiting}>, waiters, telegramSent }
   const requests = new Map();
+  const coordination = new Coordination(now);
   // Spec 2026-11-08: a request nobody answered in time is deferred, not lost. The person answers it later; an allow
   // becomes a one-time allowance for exactly that call (its key: command, heredoc bodies and cwd) for ALLOWANCE_MS.
   const deferredFile = path.join(paths.dir, "deferred.json");
@@ -643,7 +645,44 @@ export async function startService({
     return call;
   }
 
+  async function prepareCoordination(call) {
+    try {
+      return await coordination.prepare(call);
+    } catch (error) {
+      // C1: coordination is guaranteed only while its service can answer. Ordinary rule checks still run.
+      log(`coordination-failed session=${call.session || "-"} reason=${capReason(error.message)}`);
+      return null;
+    }
+  }
+
+  async function authorizeWrites(call, result, plan, consent) {
+    if (result.decision !== "allow") return result;
+    const current = plan && !plan.whole ? plan : await prepareCoordination(call);
+    if (!current) return result;
+    const approved = consent ?? plan?.neighbours;
+    if (approved && current.neighbours.some((session) => !approved.includes(session))) {
+      return deny("[guard] состав соседей изменился после запроса — повторите команду для согласования с актуальным списком");
+    }
+    const conflict = coordination.reserve(call, current);
+    return conflict ? deny(conflict) : result;
+  }
+
   async function evaluate(call) {
+    if (!isCall(call)) return deny("[guard] некорректный вызов");
+    const plan = await prepareCoordination(call);
+    const conflict = plan && coordination.conflict(call.session, plan);
+    if (conflict) return deny(conflict);
+    const result = await decide(call, plan);
+    if (result.decision === "pending") {
+      const ticket = requests.get(result.id).tickets.get(result.ticket);
+      ticket.call = call;
+      ticket.neighbours = plan?.neighbours;
+      return result;
+    }
+    return authorizeWrites(call, result, plan);
+  }
+
+  async function decide(call, plan) {
     if (!isCall(call)) return deny("[guard] некорректный вызов");
     if (!rulesState.ok) return deny("[guard] правила защиты невалидны — исправьте их в настройках");
     const rules = rulesState.rules;
@@ -664,7 +703,9 @@ export async function startService({
     const guardState = guardStateReason(text, where, isReadTool(tool));
     // A whitelist entry is consulted inside classify, after the deny set — so a guard-state touch still overrides it here
     // (guardState keeps the call for the person however `allow` it looked): a whitelist can never bypass guard-state.
-    if (verdict.tier === "allow" && !guardState) {
+    const shared = plan?.neighbours.length > 0;
+    if (shared) verdict.key = createHash("sha256").update(`${verdict.key}\0${plan.neighbours.join("\0")}`).digest("hex").slice(0, 32);
+    if (verdict.tier === "allow" && !guardState && !shared) {
       return Array.isArray(verdict.whitelisted) && verdict.whitelisted.length > 0 ? allowedByWhitelist(call, verdict) : allow("[guard] разрешено");
     }
 
@@ -672,8 +713,9 @@ export async function startService({
     const shown = (reason) => capReason(redact(reason));
     if (verdict.tier === "deny") return deny(`[guard] жёсткий запрет: ${verdict.reasons.map(shown).join("; ")}`);
     // P38: a container mounting home, /, ~/.omo, LaunchAgents or the agent dir runs outside the sandbox — the person decides
-    const humanOnly = Boolean(guardState) || verdict.reasons.some((reason) => reason.startsWith("docker-mount"));
+    const humanOnly = shared || Boolean(guardState) || verdict.reasons.some((reason) => reason.startsWith("docker-mount"));
     const reasons = (guardState ? [...verdict.reasons, `guard-state: ${guardState} — решает только человек`] : verdict.reasons).map(shown);
+    if (shared) reasons.push(...plan.neighbours.map((session) => `Общая рабочая копия: активна сессия «${redact(session)}». Действие затронет её работу; решает человек.`));
     // B2: an eval shows the shell commands it runs; its code goes apart (the key and guard-state above use the whole code)
     const extracted = tool === "eval" ? commandsOf(tool, call.input) : undefined;
     const commands = Array.isArray(extracted) && extracted.length > 0 ? extracted.join("\n") : text;
@@ -687,7 +729,7 @@ export async function startService({
       reasons,
       // The legible «always allow» shapes the card offers; written to the whitelist on an «allow-always» answer. Program
       // and flags only (operands hidden as `*`), so there is nothing secret to redact.
-      ...(Array.isArray(verdict.proposal) && verdict.proposal.length > 0 ? { proposal: verdict.proposal } : {}),
+      ...(!shared && Array.isArray(verdict.proposal) && verdict.proposal.length > 0 ? { proposal: verdict.proposal } : {}),
     };
 
     const allowance = takeAllowance(verdict.key);
@@ -813,12 +855,17 @@ export async function startService({
     if (!record) return reply(deny("[guard] запрос не найден или уже закрыт — повторите команду"));
     const entry = typeof message.ticket === "string" ? record.tickets.get(message.ticket) : undefined;
     if (!entry || entry.waiting) return reply({ error: "unknown ticket" });
+    // The lease may have changed while a human or the decider was answering. A ticket never bypasses acquisition.
+    const answer = (result) => {
+      if (!entry.call || result.decision !== "allow") return reply(result);
+      void authorizeWrites(entry.call, result, undefined, entry.neighbours).then(reply);
+    };
     if (record.answer) {
       record.tickets.delete(message.ticket);
-      return reply(settle(record, entry.tool));
+      return answer(settle(record, entry.tool));
     }
     entry.waiting = true;
-    const waiter = { reply, tool: entry.tool, ticket: message.ticket };
+    const waiter = { reply: answer, tool: entry.tool, ticket: message.ticket };
     record.waiters.add(waiter);
     socket.on("close", () => {
       if (record.waiters.delete(waiter)) entry.waiting = false;

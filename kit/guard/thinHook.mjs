@@ -10,7 +10,7 @@
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets, isReadTool } from "./classify.mjs";
+import { classify, commandsOf, coordinationOf, FILE_WRITE_TOOLS, fileWriteTargets, isReadTool } from "./classify.mjs";
 import { commandText, guardStateReason, protectedTarget } from "./protect.mjs";
 import { loadDefaultRules, loadRules } from "./rules.mjs";
 import { readLines, servicePaths, writeLine } from "./sockets.mjs";
@@ -143,7 +143,8 @@ export async function runThinHook(rawInput, { agentDir, connectTimeoutMs = 1500,
 
   const paths = servicePaths(agentDir);
   const rules = readRulesOrNull(paths.rules);
-  if (rules && allowedLocally(call, rules, { cwd: call.cwd, agentDir, home })) return {};
+  if (rules && allowedLocally(call, rules, { cwd: call.cwd, agentDir, home }) &&
+    !coordinationOf({ tool_name: call.tool, tool_input: call.input, cwd: call.cwd, home }).needed) return {};
 
   const remaining = () => Math.max(0, budgetMs - (Date.now() - started));
   const ask = (message) => exchange(paths.hookSock, message, { connectTimeoutMs, replyTimeoutMs: remaining() });

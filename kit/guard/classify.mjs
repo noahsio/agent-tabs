@@ -870,6 +870,8 @@ function analyzeSegment(rawSegment, depth, ctx) {
       texts: unique([normalized.join(" "), normalized.slice(head).join(" "), ...targetTexts]),
       matchTexts: unique([matchWords.join(" "), matchWords.slice(head).join(" "), ...targetTexts]),
       raw: words.map(shellQuote).join(" "),
+      words,
+      cwd: ctx.cd ?? ctx.cwd,
       // The legible «always allow» glob the card can offer for this leaf (null when the program is interpolated).
       shape: commandShape(normalized, head),
       helpOnly: words.includes("--help"),
@@ -1914,4 +1916,67 @@ export function fileWriteTargets(input) {
   }
   const target = toolInput?.path ?? toolInput?.file_path;
   return typeof target === "string" && target ? [target] : [];
+}
+
+/**
+ * Coordination uses the same shell expansion as classification. Only literal local paths are claimed; opaque code
+ * retains P43/P44 behaviour. This is intent extraction, not a replacement for the normal deny/escalation rules.
+ */
+export function coordinationOf(input) {
+  const cwd = input.cwd || process.cwd();
+  const known = (value) => typeof value === "string" && value !== "" && !/[$`*?[\]\u0001-\u0004]/.test(value);
+  const resolve = (value, dir) => known(value) && known(dir) ? path.resolve(dir, value) : null;
+  // File-tool paths are already data, not shell words; '$', brackets and '*' are legal filename characters.
+  const writes = fileWriteTargets(input).map((file) => path.resolve(cwd, file));
+  const whole = [];
+  let needed = FILE_WRITE_TOOLS.has(String(input.tool_name ?? "").toLowerCase());
+  const calls = extractCalls(String(input.tool_name ?? "").toLowerCase(), input.tool_input);
+  if (typeof calls !== "string") {
+    const leaves = calls.commands.flatMap((command) => expand(command, 0, { ...newContext({ cwd, home: input.home ?? os.homedir() }), cd: cwd }));
+    for (const leaf of leaves) {
+      if (leaf.script || leaf.remote || leaf.helpOnly) continue;
+      const words = leaf.words;
+      const head = headIndex(words);
+      const command = basename(words[head]);
+      const args = withoutRedirects(words.slice(head + 1));
+      const targets = writeRedirectTargets(words);
+      if (command === "tee" || command === "mv" || command === "rm") targets.push(...args.filter((word) => !word.startsWith("-")));
+      if (command === "cp") {
+        const flag = args.findIndex((word) => word === "-t" || word === "--target-directory");
+        const destination = flag >= 0 ? args[flag + 1] : args.find((word) => word.startsWith("--target-directory="))?.split("=").slice(1).join("=") ?? args.at(-1);
+        if (destination) targets.push(destination);
+      }
+      if (command === "dd") targets.push(...args.filter((word) => word.startsWith("of=")).map((word) => word.slice(3)));
+      if ((command === "sed" || command === "perl") && args.some((word) => /^-[^-]*i/.test(word) || word.startsWith("--in-place"))) {
+        let script = false;
+        for (let at = 0; at < args.length; at += 1) {
+          const word = args[at];
+          if (word === "-e" || word === "-f") { script = true; at += 1; }
+          else if (word.startsWith("-")) {
+            if (word === "-i" && args[at + 1] === "") at += 1;
+          } else if (!script) script = true;
+          else targets.push(word);
+        }
+      }
+      needed ||= targets.length > 0;
+      writes.push(...targets.map((file) => resolve(file, leaf.cwd)).filter(Boolean));
+      if (command !== "git") continue;
+      let directory = leaf.cwd;
+      let index = head + 1;
+      while (words[index]?.startsWith("-")) {
+        if (words[index] === "-C") directory = resolve(words[index + 1], directory);
+        else if (words[index].startsWith("-C")) directory = resolve(words[index].slice(2), directory);
+        index += GIT_OPTIONS_WITH_VALUE.has(words[index]) ? 2 : 1;
+      }
+      const [action, ...rest] = words.slice(index);
+      const checkout = action === "checkout" && (
+        !rest.includes("--") || rest.slice(rest.indexOf("--") + 1).some((word) => word === "." || word === ":/" || word === ":")
+      );
+      if (directory && (checkout || action === "switch" || action === "stash" || action === "rebase" || action === "clean" ||
+        (action === "reset" && rest.includes("--hard")) || (action === "worktree" && rest[0] === "remove"))) whole.push(directory);
+      // A path checkout also writes files, even though it is not an action on the whole copy.
+      if (action === "checkout" && !checkout && rest.includes("--")) writes.push(...rest.slice(rest.indexOf("--") + 1).map((file) => resolve(file, directory)).filter(Boolean));
+    }
+  }
+  return { writes: [...new Set(writes)], whole: [...new Set(whole)], needed: needed || writes.length > 0 || whole.length > 0 };
 }
