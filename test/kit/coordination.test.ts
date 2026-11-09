@@ -38,7 +38,7 @@ describe("shared working copy decisions through the real hook socket", () => {
     expect((await write("coordination-scratch.txt"))["decision"]).toBe("allow");
     const conflict = await write("coordination-scratch.txt", neighbour);
     expect(conflict["decision"]).toBe("deny");
-    expect(conflict["reason"]).toMatch(/файл правит сессия «11111111-owner» до \d\d:\d\d/);
+    expect(conflict["reason"]).toMatch(/файл правит сессия «11111111» до \d\d:\d\d/);
   });
 
   it("recognizes the same root and file from a nested cwd", async () => {
@@ -93,7 +93,7 @@ describe("shared working copy decisions through the real hook socket", () => {
   ])("protects recognized shell writes: %s", async (command) => {
     await write("occupied.txt");
     expect((await evaluate("bash", { command }, neighbour))["decision"]).toBe("deny");
-    expect((await evaluate("bash", { command }, neighbour))["reason"]).toContain("11111111-owner");
+    expect((await evaluate("bash", { command }, neighbour))["reason"]).toContain("11111111");
   });
 
   it.each([
@@ -106,15 +106,16 @@ describe("shared working copy decisions through the real hook socket", () => {
     "git clean -fd",
     "git worktree remove ../other",
     "git -C kit switch feature",
-  ])("asks the person, rather than the decider, for %s", async (command) => {
+  ])("requires the affected neighbour's consent before %s", async (command) => {
     await write("occupied.txt");
     const result = await evaluate("bash", { command }, neighbour);
-    expect(result["decision"]).toBe("pending");
+    expect(result["decision"]).toBe("deny");
+    const proposal = result["coordination"] as { id: string; state: string };
+    expect(proposal.state).toBe("waiting");
     const { items } = await send(service.paths.adminSock, { op: "pending" });
-    expect(items[0].reasons.join(" ")).toContain(owner);
-    expect(items[0].proposal).toBeUndefined();
-    await send(service.paths.adminSock, { op: "answer", id: result["id"], decision: "deny", by: "agent-tabs" });
-    expect((await send(service.paths.hookSock, { op: "wait", id: result["id"], ticket: result["ticket"] })).decision).toBe("deny");
+    expect(items).toEqual([]);
+    await send(service.paths.hookSock, { op: "coordinate", call: call("coordinate", { action: "object", id: proposal.id, reason: "Uncommitted work" }) });
+    expect((await evaluate("bash", { command }, neighbour))["decision"]).toBe("deny");
   });
 
   it("does not turn a lone session's locally safe checkout into an ask", async () => {
@@ -199,12 +200,15 @@ describe("shared working copy decisions through the real hook socket", () => {
   it("defers a shared-copy action when the person is away", async () => {
     await write("occupied.txt");
     const pending = await evaluate("bash", { command: "git checkout feature" }, neighbour);
-    expect(pending["decision"]).toBe("pending");
+    expect(pending["decision"]).toBe("deny");
+    clock.advance(120_000);
+    const human = await send(service.paths.adminSock, { op: "pending" });
+    expect(human.items).toHaveLength(1);
     clock.advance(181_000);
-    const result = await send(service.paths.hookSock, { op: "wait", id: pending["id"], ticket: pending["ticket"] });
-    expect(result.reason).toContain("отложена до решения человека");
+    // An incoming request runs the same fake-clock maintenance as the periodic service tick.
+    await evaluate("bash", { command: "git checkout feature" }, neighbour);
     const { items } = await send(service.paths.adminSock, { op: "deferred" });
-    expect(items[0].reasons.join(" ")).toContain(owner);
+    expect(items[0].reasons.join(" ")).toContain("11111111");
   });
 
   it("does not let a whitelist or a previous neighbour set bypass shared-copy consent", async () => {
@@ -213,16 +217,15 @@ describe("shared working copy decisions through the real hook socket", () => {
     expect((await send(service.paths.adminSock, { op: "rules.set", rules })).ok).toBe(true);
     await write("occupied.txt");
     const pending = await evaluate("bash", { command: "git checkout feature" }, neighbour);
-    expect(pending["decision"]).toBe("pending");
-    expect((await send(service.paths.adminSock, { op: "answer", id: pending["id"], decision: "allow-always", by: "agent-tabs" })).ok).toBe(false);
-    await send(service.paths.adminSock, { op: "answer", id: pending["id"], decision: "allow-once", by: "agent-tabs" });
+    expect(pending["decision"]).toBe("deny");
+    const proposal = pending["coordination"] as { id: string };
+    await send(service.paths.hookSock, { op: "coordinate", call: call("coordinate", { action: "agree", id: proposal.id }) });
     await write("third.txt", "third-session");
     const changed = await evaluate("bash", { command: "git checkout feature" }, neighbour);
-    expect(changed["decision"]).toBe("pending");
-    expect(changed["id"]).not.toBe(pending["id"]);
-    const stale = await send(service.paths.hookSock, { op: "wait", id: pending["id"], ticket: pending["ticket"] });
-    expect(stale.decision).toBe("deny");
-    expect(stale.reason).toContain("состав соседей изменился");
+    expect(changed["decision"]).toBe("deny");
+    expect((changed["coordination"] as { id: string }).id).not.toBe(proposal.id);
+    const stale = await send(service.paths.hookSock, { op: "coordinate", call: call("coordinate", { action: "status", id: proposal.id }, neighbour) });
+    expect(stale.state).toBe("cancelled");
   });
 
   it("measures the added hook latency per write against a local read", async () => {
