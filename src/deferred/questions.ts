@@ -10,6 +10,8 @@ export type DeferredQuestion = {
   id: string;
   sessionPath: string;
   sessionTitle: string;
+  /** The session's folder (its journal header): a window shows its own projects first. */
+  cwd?: string;
   createdAt: number;
   deferredAt: number;
   questions: DeferredPrompt[];
@@ -17,7 +19,7 @@ export type DeferredQuestion = {
 };
 export type DeferredPrompt = { header: string; question: string; options: { label: string }[]; multiSelect: boolean };
 type Question = { id: string; createdAt: number; questions: DeferredPrompt[]; deferredAt?: number; deferred?: boolean; decided?: string };
-type Journal = { size: number; tail: string; decoder: StringDecoder; name?: string; firstUser?: string; questions: Map<string, Question> };
+type Journal = { size: number; tail: string; decoder: StringDecoder; cwd?: string; name?: string; firstUser?: string; questions: Map<string, Question> };
 const WEEK = 7 * 86400_000;
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -92,6 +94,7 @@ export class DeferredQuestions {
       for (const question of journal.questions.values()) {
         if (!question.deferred || question.deferredAt === undefined || Object.hasOwn(answered, question.id)) continue;
         items.push({ kind: "question", id: question.id, sessionPath: file, sessionTitle: sessionTitle(journal.name, journal.firstUser),
+          ...(journal.cwd !== undefined ? { cwd: journal.cwd } : {}),
           createdAt: question.createdAt, deferredAt: question.deferredAt, questions: question.questions,
           ...(question.decided !== undefined ? { decided: question.decided } : {}) });
       }
@@ -121,6 +124,7 @@ export class DeferredQuestions {
     if (!object(entry)) return;
     const message = object(entry["message"]) ? entry["message"] : undefined;
     const at = stampOf({ timestamp: entry["timestamp"], ...(message !== undefined ? { message } : {}) }) ?? fallbackTime;
+    if (entry["type"] === "session" && typeof entry["cwd"] === "string") journal.cwd = entry["cwd"];
     if (entry["type"] === "session_info" && typeof entry["name"] === "string" && entry["name"].trim()) journal.name = entry["name"].trim();
     if (entry["type"] === "custom" && entry["customType"] === "ask-user:settlement" && object(entry["data"])) {
       const data = entry["data"];

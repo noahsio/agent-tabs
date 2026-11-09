@@ -54,6 +54,15 @@ function setup(open: boolean = true): {
 }
 
 describe("DeferredInbox", () => {
+  it("names_the_project_of_each_item_so_a_window_can_tell_its_own", async () => {
+    const fixture = setup(false);
+    await fixture.inbox.refresh();
+    expect(fixture.published).toContainEqual(expect.objectContaining({ type: "deferred", items: expect.arrayContaining([
+      expect.objectContaining({ kind: "question", id: "q", cwd: "/work" }),
+      expect.objectContaining({ kind: "approval", id: "g", cwd: "/work" }),
+    ]) }));
+  });
+
   it("explains a coordination proposal and leaves its answer delivery to the service", async () => {
     const fixture = setup(false);
     Object.assign(fixture.guardItems[0]!, { coordinationId: "proposal-1", sessionLabel: "Проект (session-)", reasons: ["Хранилище (22222222) не ответил; молчание не означает согласие"] });

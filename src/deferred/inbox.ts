@@ -63,6 +63,7 @@ export class DeferredInbox {
         for (const approval of this.approvals) {
           const file = await findSessionPath(this.agentDir, approval.session);
           this.items.push({ kind: "approval", id: approval.id, sessionTitle: approval.sessionLabel ?? (file === undefined ? undefined : this.questions.title(file)) ?? basename(approval.cwd),
+            cwd: approval.cwd,
             command: approval.command, createdAt: Date.parse(approval.createdAt), deferredAt: Date.parse(approval.deferredAt),
             ...(approval.coordinationId ? { coordination: approval.reasons.join("\n") } : {}) });
         }

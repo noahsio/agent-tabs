@@ -272,8 +272,16 @@ export class ChatPanel implements ApprovalPanel {
     if (this.awaitingGuard.size !== before && this.titleName !== undefined) this.setTitle(this.titleName);
   }
 
+  /** The folder this tab works in: its session's, or the one a draft opens in; undefined while not known yet. */
+  get cwd(): string | undefined {
+    return this.controller?.cwd ?? (this.opening.kind === "new" ? this.opening.cwd : undefined);
+  }
+
   postDeferred(message: DeferredHostMessage): void {
-    this.poster.send(message);
+    if (message.type !== "deferred") return this.poster.send(message);
+    // the inbox is one list per environment; each window shows its own tabs' projects first
+    const here = [...new Set([...this.host.panels].flatMap((panel) => panel.cwd ?? []))];
+    this.poster.send({ ...message, here });
   }
 
   /** A later answer uses the tab's existing controller and OmO's durable admission ID. */

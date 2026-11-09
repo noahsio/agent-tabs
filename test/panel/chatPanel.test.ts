@@ -162,6 +162,16 @@ describe("ChatPanel", () => {
     expect(other).toContainEqual({ type: "deferredResult", kind: "question", id: "q", ok: true });
   });
 
+  it("tells_the_inbox_view_which_projects_this_windows_tabs_hold", () => {
+    const first = fakePanel();
+    const second = fakePanel();
+    const shared = host();
+    const chat = ChatPanel.restore(shared, first.panel, { kind: "new", cwd: "/work" });
+    ChatPanel.restore(shared, second.panel, { kind: "new", cwd: "/shop" });
+    chat.postDeferred({ type: "deferred", items: [] });
+    expect(first.other).toContainEqual({ type: "deferred", items: [], here: ["/work", "/shop"] });
+  });
+
   it("sends_later_answers_through_the_attached_controller_with_the_stable_id", async () => {
     const { panel } = fakePanel();
     const chat = ChatPanel.restore(host(), panel, { kind: "attach", sessionPath: SESSION_FILE });

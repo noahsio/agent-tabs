@@ -2591,6 +2591,17 @@ button.uimg.att {
   border-bottom: none;
 }
 
+.pop-deferred button[data-role="deferred-others"] {
+  margin: 8px 2px 4px;
+}
+
+.deferred-project {
+  margin: 12px 2px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .deferred-meta,
 .deferred-decided {
   color: var(--muted);

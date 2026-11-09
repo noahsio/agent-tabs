@@ -12,16 +12,25 @@ export class DeferredPopover implements PopoverContent {
   private readonly all: HTMLButtonElement;
   private readonly rows = new Map<string, Row>();
   private deliveries: DeferredDelivery[] = [];
+  /** Rows of projects no tab of this window holds: kept out of sight and out of the count until asked for. */
+  private readonly elsewhere = new Set<string>();
+  private readonly others = el("div", { class: "deferred-others" });
+  private readonly othersToggle: HTMLButtonElement;
 
   constructor(private readonly post: Post, private readonly countChanged: (count: number) => void = () => undefined) {
     this.all = button("Ответить на все", { class: "secondary", "data-role": "deferred-all" }, () => {
-      for (const row of this.rows.values()) if (!row.busy && row.ready?.()) row.answer?.();
+      for (const [key, row] of this.rows) if (!this.elsewhere.has(key) && !row.busy && row.ready?.()) row.answer?.();
     });
     this.all.disabled = true;
+    this.others.hidden = true;
+    this.othersToggle = button("", { class: "link", "data-role": "deferred-others", "aria-expanded": "false" }, () => {
+      this.others.hidden = !this.others.hidden;
+      this.othersToggle.setAttribute("aria-expanded", String(!this.others.hidden));
+    });
     this.element = el("div", { class: "pop pop-deferred", "data-popover": "deferred", role: "dialog", "aria-label": "Отложенные" },
       el("div", { class: "deferred-toolbar" }, el("h2", {}, "Отложенные"),
         button("Обновить", { class: "secondary" }, () => this.post({ type: "listDeferred" }))),
-      this.status, this.list, this.all);
+      this.status, this.list, this.othersToggle, this.others, this.all);
   }
 
   opened(): void {
@@ -56,15 +65,28 @@ export class DeferredPopover implements PopoverContent {
     }
     this.list.querySelectorAll("[data-delivery]").forEach((element) => element.remove());
     this.deliveries = message.deliveries ?? [];
+    this.elsewhere.clear();
+    const groups = new Map<string, Row[]>();
+    for (const [key, row] of this.rows) {
+      const cwd = row.item.cwd;
+      if (message.here === undefined || cwd === undefined || message.here.some((dir) => cwd === dir || cwd.startsWith(`${dir}/`))) continue;
+      this.elsewhere.add(key);
+      groups.set(cwd, [...(groups.get(cwd) ?? []), row]);
+    }
+    const name = (dir: string): string => dir.split("/").filter(Boolean).pop() ?? dir;
+    this.others.replaceChildren(...[...groups].sort(([left], [right]) => name(left).localeCompare(name(right), "ru")).flatMap(([dir, rows]) => [
+      el("h3", { class: "deferred-project", title: dir }, name(dir)),
+      ...rows.sort((left, right) => right.item.deferredAt - left.item.deferredAt).map((row) => row.element),
+    ]));
     const ordered = [
-      ...[...this.rows.values()].map((row) => ({ at: row.item.deferredAt, element: row.element })),
+      ...[...this.rows].filter(([key]) => !this.elsewhere.has(key)).map(([, row]) => ({ at: row.item.deferredAt, element: row.element })),
       ...this.deliveries.map((entry) => ({ at: entry.createdAt, element: this.delivery(entry) })),
     ].sort((left, right) => right.at - left.at);
     ordered.forEach(({ element }, index) => {
       const current = this.list.children[index];
       if (current !== element) this.list.insertBefore(element, current ?? null);
     });
-    this.status.textContent = message.error ?? (ordered.length === 0 ? "Отложенных вопросов и команд нет" : "");
+    this.status.textContent = message.error ?? (ordered.length > 0 ? "" : this.elsewhere.size > 0 ? "В проектах этого окна отложенных нет" : "Отложенных вопросов и команд нет");
     this.status.hidden = ordered.length > 0 && message.error === undefined;
     this.changed();
   }
@@ -75,6 +97,11 @@ export class DeferredPopover implements PopoverContent {
     if (message.ok) {
       row?.element.remove();
       this.rows.delete(key);
+      this.elsewhere.delete(key);
+      this.others.querySelectorAll<HTMLElement>(".deferred-project").forEach((head) => {
+        const next = head.nextElementSibling;
+        if (next === null || next.classList.contains("deferred-project")) head.remove();
+      });
       this.deliveries = this.deliveries.filter((entry) => this.key(entry) !== key);
       this.list.querySelectorAll<HTMLElement>("[data-delivery]").forEach((element) => {
         if (element.dataset["delivery"] === key) element.remove();
@@ -85,7 +112,7 @@ export class DeferredPopover implements PopoverContent {
       row.error.hidden = false;
       for (const control of row.element.querySelectorAll<HTMLButtonElement | HTMLTextAreaElement>("button, textarea")) control.disabled = false;
     }
-    if (this.rows.size + this.deliveries.length === 0) {
+    if (this.rows.size - this.elsewhere.size + this.deliveries.length === 0) {
       this.status.textContent = "Отложенных вопросов и команд нет";
       this.status.hidden = false;
     }
@@ -97,9 +124,13 @@ export class DeferredPopover implements PopoverContent {
   }
 
   private changed(): void {
-    this.all.disabled = ![...this.rows.values()].some((row) => !row.busy && row.ready?.());
-    this.all.hidden = [...this.rows.values()].filter((row) => row.item.kind === "question").length < 2;
-    this.countChanged(this.rows.size + this.deliveries.length);
+    const here = [...this.rows].filter(([key]) => !this.elsewhere.has(key)).map(([, row]) => row);
+    this.all.disabled = !here.some((row) => !row.busy && row.ready?.());
+    this.all.hidden = here.filter((row) => row.item.kind === "question").length < 2;
+    this.othersToggle.textContent = `В других проектах: ${this.elsewhere.size}`;
+    this.othersToggle.hidden = this.elsewhere.size === 0;
+    if (this.elsewhere.size === 0) this.others.hidden = true;
+    this.countChanged(here.length + this.deliveries.length);
   }
 
   private submit(row: Row, action: DeferredAction): void {

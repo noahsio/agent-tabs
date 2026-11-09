@@ -25,6 +25,29 @@ beforeEach(() => {
 });
 
 describe("DeferredPopover", () => {
+  it("shows_this_windows_projects_and_keeps_other_projects_behind_one_line_grouped_by_project", () => {
+    const counts: number[] = [];
+    popover = new DeferredPopover((message) => posted.push(message), (count) => counts.push(count));
+    document.body.replaceChildren(popover.element);
+    const message = parseDeferredHostMessage({ type: "deferred", here: ["/work"], items: [
+      { ...question, cwd: "/work" },
+      { ...approval, cwd: "/elsewhere/shop" },
+      { ...approval, id: "g2", cwd: "/elsewhere/bank" },
+      { ...approval, id: "g3" },
+    ] });
+    if (message?.type !== "deferred") throw new Error("Missing inbox message");
+    popover.update(message);
+    const visible = (): string[] => [...popover.element.querySelectorAll<HTMLElement>("[data-deferred-id]")]
+      .filter((row) => row.closest("[hidden]") === null).map((row) => row.dataset["deferredId"] as string);
+    expect(visible()).toEqual(["g3", "q"]); // a row with no known project stays in sight
+    expect(counts.at(-1)).toBe(2);
+    click("В других проектах: 2");
+    expect(visible()).toEqual(["g3", "q", "g2", "g"]);
+    expect([...popover.element.querySelectorAll(".deferred-project")].map((head) => head.textContent)).toEqual(["bank", "shop"]);
+    expect(popover.element.querySelector(".deferred-project")?.getAttribute("title")).toBe("/elsewhere/bank");
+    expect(counts.at(-1)).toBe(2);
+  });
+
   it("shows the missing consent beside a proposal handed to the person", () => {
     const message = parseDeferredHostMessage({ type: "deferred", items: [{ ...approval, command: "git checkout feature", coordination: "Хранилище (22222222) не ответил. Молчание не означает согласие." }] });
     if (message?.type !== "deferred") throw new Error("Missing inbox message");
