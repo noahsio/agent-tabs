@@ -54,6 +54,21 @@ function setup(open: boolean = true): {
 }
 
 describe("DeferredInbox", () => {
+  it("explains a coordination proposal and leaves its answer delivery to the service", async () => {
+    const fixture = setup(false);
+    Object.assign(fixture.guardItems[0]!, { coordinationId: "proposal-1", sessionLabel: "Проект (session-)", reasons: ["Хранилище (22222222) не ответил; молчание не означает согласие"] });
+    await fixture.inbox.refresh();
+    expect(fixture.published).toContainEqual(expect.objectContaining({ type: "deferred", items: expect.arrayContaining([
+      expect.objectContaining({ kind: "approval", sessionTitle: "Проект (session-)", coordination: "Хранилище (22222222) не ответил; молчание не означает согласие" }),
+    ]) }));
+    await fixture.inbox.answer({ type: "answerDeferredApproval", id: "g", decision: "allow-once" });
+    expect(fixture.answer).toHaveBeenCalledWith("g", "allow-once", undefined);
+    expect(fixture.send).not.toHaveBeenCalled();
+    expect(fixture.attach).not.toHaveBeenCalled();
+    expect(fixture.store.read().outbox).toEqual({});
+    expect(fixture.published).toContainEqual({ type: "deferredResult", kind: "approval", id: "g", ok: true });
+  });
+
   it("persists_a_question_and_outbox_before_sending_to_the_open_tab", async () => {
     const fixture = setup();
     await fixture.inbox.refresh();

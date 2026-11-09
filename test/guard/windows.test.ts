@@ -92,6 +92,32 @@ const ROOT = "11111111-1111-4111-8111-111111111111";
 const CHILD = "22222222-2222-4222-8222-222222222222";
 
 describe("two windows, one decision service", () => {
+  it("routes quiet coordination state only to involved tabs and replays it after reload", async () => {
+    const agentDir = makeSvcDir({ human: { card: false } });
+    await boot(agentDir);
+    const owning = new Window(agentDir);
+    const ownerTab = owning.tab(ROOT);
+    const requesterTab = owning.tab(CHILD);
+    const strangerTab = owning.tab("stranger");
+    await owning.approvals.sync();
+    const coordinate = (session: string, input: Record<string, unknown>): Promise<Record<string, unknown>> =>
+      send(servicePaths(agentDir).hookSock, { op: "coordinate", call: { session, cwd: process.cwd(), tool: "coordinate", input } });
+    await coordinate(ROOT, { action: "hello", title: "Хранилище", idle: false });
+    await coordinate(CHILD, { action: "hello", title: "Проверка", idle: false });
+    await send(servicePaths(agentDir).hookSock, { op: "evaluate", call: { session: ROOT, cwd: process.cwd(), tool: "write", input: { path: "quiet-owned.txt" } } });
+    const request = await coordinate(CHILD, { action: "handoff", file: "quiet-owned.txt", what: "Добавить проверку" });
+    const latest = (tab: Tab): GuardHostMessage | undefined => tab.got.filter((message) => message.type === "coordination").at(-1);
+    await until(() => JSON.stringify(latest(requesterTab))?.includes("Хранилище (11111111)"));
+    expect(JSON.stringify(latest(ownerTab))).toContain("Проверка (22222222)");
+    expect(latest(strangerTab)).toBeUndefined();
+    const reloaded = owning.tab(CHILD);
+    owning.approvals.replay(reloaded);
+    expect(latest(reloaded)).toEqual(latest(requesterTab));
+    await coordinate(ROOT, { action: "accept", id: request["id"], result: "Готово" });
+    await until(() => JSON.stringify(latest(requesterTab)) === JSON.stringify({ type: "coordination", lines: [] }));
+    expect(ownerTab.cards).toHaveLength(0);
+  });
+
   it("a_request_of_a_session_open_in_one_window_never_reaches_the_other", async () => {
     const agentDir = makeSvcDir({ decider: { mode: "ask-me" }, human: { card: true, waitSeconds: 180 } });
     await boot(agentDir);

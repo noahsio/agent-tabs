@@ -494,6 +494,17 @@ describe("decision service: admin socket", () => {
       sub.close();
     });
 
+    it("a_wait_arriving_after_expiry_still_reports_the_deferred_request", async () => {
+      await boot({ decider: { mode: "ask-me" } });
+      const { id, ticket } = await hook(evaluate("rm -rf $U"));
+      clock.advance(181_000);
+      expect((await admin({ op: "deferred" })).items).toEqual([expect.objectContaining({ id })]);
+      const verdict = await hook({ op: "wait", id, ticket });
+      expect(verdict.decision).toBe("deny");
+      expect(verdict.reason).toContain(`отложена до решения человека (#${id})`);
+      expect(verdict.reason).toContain("Не обходи её другими командами");
+    });
+
     it("allowed_later_it_runs_once_for_that_exact_command_within_a_day", async () => {
       await boot({ decider: { mode: "ask-me" } });
       const { id } = await deferredRequest();

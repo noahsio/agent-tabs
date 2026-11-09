@@ -234,3 +234,179 @@ LSP-сервер TypeScript отсутствует, проверка типов 
 ответа. Существующий `service_restart_mid_wait_denies` воспроизвёл её отдельно; отказ снова отправляется
 синхронно, асинхронная повторная проверка аренды выполняется только для разрешения. Финальный полный прогон
 не содержит сбоев вне EPERM.
+
+## 8. Решения этапа 2
+
+Проверено 9 ноября 2026 года, OmO 5.1.59. Основа этапа — коммит `1aa3a43`;
+доработки жизненного цикла — `bcdcc5b`, интерфейса — `0466188`, контракта доставки — `f0b925f`,
+исправление позднего ожидания deferred — `3049bb9`.
+Состояние согласований, аренд и доставки хранит тот же `Coordination` внутри guard service.
+Ограничение C1 сохраняется: перезапуск службы теряет это оперативное состояние.
+
+### 8.1 Доставка: служба отвечает за единственную очередь
+
+`kit/guard/coordinationHost.mjs` соединяется с host socket текущего окружения, проверяет HMAC
+хоста по launch key и аутентифицируется. `list_sessions` находит durable id и путь журнала;
+`open_session {sessionPath, retain_on_disconnect:true}` временно подключает адресата.
+Его идентичность проверяется по **`open_session.state.sessionId`**. Верхний `sessionId` — только
+RPC handle. Live-прогон обнаружил неверное предположение исходного транспорта о верхнем
+`durableSessionId`; реалистичная фикстура сначала дала два отказа, исправление — четыре проходящих теста.
+
+Доставка использует `steer {whenIdle:"start", clientMessageId}`: хост атомарно запускает
+свободную сессию или ставит сообщение в очередь занятой. Это исключает гонку между отдельными
+`get_state` и `prompt`. Подтверждением служат `started` / `queued`, затем служба отпускает
+своё подключение. Открытая вкладка VS Code не требуется.
+
+ID сообщения стабилен: `coordinate-<request>-<recipient>-<event>`. Ошибка транспорта оставляет
+сообщение в очереди с тем же ID и текстом. Подтверждение приёма не означает согласие соседа.
+Тест `coordinateHost.test.ts` проверяет потерю соединения после приёма, повтор с тем же ID,
+доставку без вкладки, отказ при подмене адресата и неподтверждённом хосте. Повторный ID с
+другим текстом host отклоняет как `client_message_id_conflict`; повторять следует исходное сообщение.
+Ответ человека на coordination-карточку доставляет служба; `DeferredInbox` не создаёт вторую очередь.
+
+### 8.2 Ответ: только из адресованной сессии
+
+`coordinate-extension.mjs` берёт cwd и `ctx.sessionManager.getSessionId()` из runtime.
+Схема инструмента не принимает caller id. `Coordination.reply` сравнивает этот durable id
+со списком адресатов запроса; посторонний получает «Ответить может только адресат этого запроса».
+`coordinateExtension.test.ts` проверяет передачу идентичности из контекста, `coordinate.test.ts` —
+отказ постороннему, идемпотентный ответ и переходы handoff/proposal.
+
+Handoff не передаёт аренду: владелец сам меняет файл и вызывает `accept` после выполнения.
+Через 15 минут без ответа запрос завершается как `unanswered`, без обращения к человеку.
+Для действия над всей копией нужны согласия всех затронутых соседей; одно возражение запрещает
+действие. Молчание через две минуты передаёт вопрос человеку, `wait` назначает новый раунд,
+а новый сосед требует нового согласования. Таймауты проверяются управляемыми часами.
+Эта проверка связывает ответ с контекстом инструмента; криптографической аттестации отдельного
+агента поверх доступного ему hook socket этап 2 не добавляет.
+
+### 8.3 Завершение: lifecycle расширения и резервный TTL
+
+Расширение обрабатывает `session_shutdown`: причины `quit`, `new`, `resume`, `fork`
+закрывают прежнюю durable identity. `reload` сохраняет её. Отсоединение вкладки, отпускание
+транспортного attachment и неудачная доставка не означают завершение сессии.
+При недоступной службе или отсутствии события действует прежний **10-минутный TTL живости**.
+Регистрация обновляется на `session_start`, `agent_start`, `agent_end` и `tool_call`.
+
+`close` удаляет аренды, активность и недоставленные сообщения закрываемых запросов;
+инициатор отменённого согласования получает причину. Очистка по TTL использует тот же путь.
+Служба убирает связанные pending/deferred-карточки и завершает их ожидания. Три новых теста
+сначала воспроизвели утечки, после исправления проверки shutdown, TTL и карточек проходят.
+Закрытие процесса без lifecycle-события может удерживать состояние до TTL — это явная резервная граница.
+
+### 8.4 Имена и поверхность для человека
+
+Источник названия — `ctx.sessionManager.getSessionName()`, обновляемый runtime, в том числе
+через `set_session_name`. Формат — `название (первые 8 знаков durable id)`; пока названия нет,
+показывается короткий id. В итоговом live-handoff наблюдались «Проверка (01a1bffe)» и
+«Хранилище (01a1bffe)». Полные session UUID остаются в служебных данных, а текстовый ответ
+инструмента и подписи используют имена. UUID самого запроса сохраняется для команд ответа.
+
+`GuardAdmin` подписывается на coordination snapshot по явному флагу. `GuardApprovals` направляет
+тихую строку только вкладкам инициатора/адресатов и их владельцев, восстанавливает её после
+перезагрузки webview и очищает при завершении. Строка не блокирует ввод.
+Существующая карточка «Отложенные» показывает название, команду и причину обращения к человеку.
+Проверены маршрутизация между окнами, отсутствие строки у посторонней вкладки, восстановление,
+очистка, разбор протокола, пояснение в карточке и отсутствие двойного уведомления.
+
+Стенд `node scripts/harness.mjs` просмотрен в WebKit: тёмная и светлая темы, ширины 390 и
+1440 px. Текст переносится, горизонтальной прокрутки нет, строка совпадает по ширине с полем
+ввода, карточка и действия читаются. Снимки: `.agent/tasks/coordination-2/ui-{dark,light}-{390,1440}.png`.
+Это проверка собранного webview-стенда; расширение в пользовательский VS Code не устанавливалось.
+
+### 8.5 Автоматические проверки и ограничения среды
+
+```sh
+npx --no-install tsc --noEmit
+npx --no-install vitest run test/guard test/kit test/sessions test/webview
+```
+
+TypeScript: **exit 0**. `git diff --check`: **exit 0**.
+Итог обязательного набора:
+
+```text
+Test Files  3 failed | 80 passed | 32 skipped (115)
+     Tests  16 failed | 1776 passed | 108 skipped (1900)
+```
+
+Все тесты координации и изменённого UI проходят. Отдельный целевой прогон UI: **49/49**;
+транспорт после исправления RPC-контракта: **4/4**. Общий набор не зелёный. Ниже все оставшиеся отказы.
+
+14 тестов `test/kit/sandboxProfile.test.ts` требуют вложенного macOS sandbox, запрещённого
+в текущем окружении (`sandbox_apply: Operation not permitted`, exit 71):
+
+```text
+protected_writes_fail_and_project_writes_work
+git_config_and_hooks_cannot_be_written_but_commits_work
+claude_code_settings_plugins_and_hooks_are_closed
+ssh_control_socket_is_writable_but_keys_and_links_are_not
+files_the_person_runs_later_are_closed
+xdg_data_dirs_under_local_are_writable_but_path_dirs_under_it_are_not
+an_ancestor_of_a_protected_dir_cannot_be_renamed_away
+sockets_outside_the_hook_are_refused
+the_host_binds_its_socket_but_nobody_moves_it_or_reaches_it
+no_fake_host_waits_at_the_unprotected_place
+paths_with_spaces_and_quotes_are_escaped
+ps_runs_outside_the_sandbox
+an_explicit_temporary_root_opens_project_rules_but_never_core
+the_agent_cannot_rewrite_or_create_what_omo_loads_but_the_repo_around_a_skills_dir_stays_open
+```
+
+15-й — `test/guard/protection.test.ts > sandbox_check_tells_a_sandboxed_process_from_ours`:
+тест ожидает несандбоксированный родительский процесс, тогда как этот запуск уже в sandbox.
+16-й — `test/kit/setup.test.ts > omo_wrapper_runs_under_the_profile_when_protection_is_on`:
+в финальном запуске унаследована `OMO_LSP_DAEMON_DIR`; вместо `lsp=|a` wrapper печатает
+`lsp=<agentDir>/lsp-daemon|a`.
+В предыдущем запуске с удалённой переменной тот же тест доходил до ограничения вложенного sandbox.
+Профили, окружение пользователя и существующие проверки не ослаблялись.
+
+Прежний 17-й отказ — `test/kit/service.test.ts >
+the_agent_is_told_it_is_deferred_and_not_to_work_around_it` — **исправлен**.
+На неизменённом `main` (`131a423`) весь файл даёт **77/77**, на `1aa3a43` — **76 passed, 1 failed**.
+Это регрессия первого коммита этапа 2: добавленный admin tick мог переместить запрос в deferred
+раньше регистрации hook `wait`; поиск только в pending выдавал «запрос не найден».
+Теперь поздний wait узнаёт deferred-состояние и получает тот же запрещающий ответ с пояснением.
+Новый тест с управляемыми часами сначала воспроизвёл отказ; после исправления все **78/78**
+тестов службы проходят. Проверки baseline выполнены через `git archive` в отдельных временных
+копиях, без переключения ветки или установки зависимостей.
+
+Исходные ошибки и результаты сохранены в `.agent/tasks/coordination-2/`:
+`final-suites.log`, `service-baseline.log`, `service-main.log`, `service-late-wait-red.log`,
+`lifecycle-red.log`, `lifecycle-green.log`, `ui-red.log`, `ui-final.log`, `host-contract-red.log`.
+Этот каталог не коммитится.
+Kit installation/discovery проверяется существующими `setup`/`verify`-тестами;
+единственный отказ setup указан выше. Реальная установка, merge и push не выполнялись.
+
+### 8.6 Live: две сессии и настоящий host
+
+```sh
+AGENT_TABS_LIVE=1 \
+  AGENT_TABS_COORDINATION_EVIDENCE="$PWD/.agent/tasks/coordination-2/live-evidence.log" \
+  npx --no-install vitest run test/live/coordinatePhase2.live.test.ts
+```
+
+**1 passed (1)**, 124.56 секунды, модель `gw-anthropic/claude-haiku-5-5`.
+Тестовая фикстура загружает production `coordinate-extension.mjs` и вызывает production
+`runThinHook`. Для shell в этом runtime нужен активный `eval` и вызов `tool.bash` внутри него;
+попытка активировать только `bash` не давала модели доступного инструмента.
+
+- B («Хранилище») создал и арендовал `occupied.txt`; его attachment отпущен, host сообщает **0**.
+- A («Проверка») отправил handoff `9f2bea09-9860-4faf-9270-0f33067e1215` и создал независимый
+  `independent.txt` в **1794222551782 ms**, за **13 534 ms** до вызова B `accept` (**1794222565316 ms**).
+- Служба сама доставила задачу B. B добавил `HANDOFF_DONE`, проверил файл и ответил `accept`;
+  durable identity ответа совпала с адресатом. A получил результат и создал `receipt.txt`.
+- Два повтора исходного сообщения через production transport с тем же ID и текстом получили
+  подтверждения; в журнале B осталось **одно** входящее сообщение этого handoff.
+- A вызвал `eval` с `tool.bash({command:"git checkout feature"})`. Guard остановил его
+  до выполнения и создал предложение `8ce99481-0e50-48fe-8f0e-80220913356b`.
+  B получил его от службы и вызвал `object`: «Файл ещё нужен текущей ветке».
+  Состояние — `rejected`, A создал `objection.txt`, `HEAD` остался на `main`.
+
+Запросы соседу и ответы инициатору не подставлялись тестом вручную. Файлы:
+`test/live/coordinatePhase2.live.test.ts`, `test/live/fixtures/coordinatePhase2.mjs`.
+Свидетельства: `live.log`, `live-evidence.log`, `cleanup.json` в каталоге доказательств.
+После завершения нет ни процессов, ни каталогов последнего хоста `/private/tmp/ags-8Mj5sy`
+и предыдущего `/tmp/ags-okOuep`; временная копия main также удалена.
+
+Четыре вопроса этапа 1 закрыты указанными контрактами и проверками. Остались ограничения
+окружения из §8.5, TTL при отсутствии события завершения и ранее принятое ограничение C1.

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import type { DeferredItem, WebviewMessage } from "../../src/panel/protocol";
+import { parseDeferredHostMessage, type DeferredItem, type WebviewMessage } from "../../src/panel/protocol";
 import { DeferredPopover } from "../../webview/deferredPopover";
 import { ChatView } from "../../webview/render";
 
@@ -25,6 +25,16 @@ beforeEach(() => {
 });
 
 describe("DeferredPopover", () => {
+  it("shows the missing consent beside a proposal handed to the person", () => {
+    const message = parseDeferredHostMessage({ type: "deferred", items: [{ ...approval, command: "git checkout feature", coordination: "Хранилище (22222222) не ответил. Молчание не означает согласие." }] });
+    if (message?.type !== "deferred") throw new Error("Missing inbox message");
+    popover.update(message);
+    expect(popover.element.textContent).toContain("Хранилище (22222222) не ответил");
+    expect(popover.element.textContent).toContain("git checkout feature");
+    click("Разрешить");
+    expect(posted.at(-1)).toEqual({ type: "answerDeferredApproval", id: "g", decision: "allow-once" });
+  });
+
   it("refreshes_on_open_and_renders_sorted_plain_text_rows", () => {
     popover.opened();
     expect(posted).toEqual([{ type: "listDeferred" }]);
@@ -103,6 +113,20 @@ describe("DeferredPopover", () => {
 });
 
 describe("Inbox navigation", () => {
+  it("keeps the composer usable while the quiet coordination line updates", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const view = new ChatView(root, (message) => posted.push(message));
+    view.coordination(["Ожидаем Хранилище (22222222): добавить проверку"]);
+    const line = root.querySelector<HTMLElement>('[data-role="coordination"]');
+    expect(line?.hidden).toBe(false);
+    expect(line?.textContent).toContain("Хранилище (22222222)");
+    expect(root.querySelector("footer")?.textContent).toContain("добавить проверку");
+    expect(root.querySelector<HTMLElement>("footer")?.hidden).toBe(false);
+    view.coordination([]);
+    expect(line?.hidden).toBe(true);
+  });
+
   it("opens_from_the_header_and_sessions_entry_and_hides_the_zero_badge", () => {
     const root = document.createElement("div");
     document.body.append(root);

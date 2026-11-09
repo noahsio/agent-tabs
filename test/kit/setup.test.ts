@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { resolveEnv } from "../../kit/lib/envs.mjs";
 import { globalInstructionsState } from "../../kit/lib/tools.mjs";
@@ -50,6 +51,22 @@ const agentDirOf = (home: string, env = "system") =>
   env === "second" ? path.join(home, ".omo-second/agent") : path.join(home, ".omo/agent");
 
 describe("setup-omo", () => {
+  it("installs a discoverable coordinate tool without enabling protection or replacing other extensions", async () => {
+    const home = path.join(makeTmp(), "home");
+    const extensions = path.join(agentDirOf(home), "extensions");
+    fs.mkdirSync(extensions, { recursive: true });
+    fs.writeFileSync(path.join(extensions, "other.ts"), "// Existing extension\n");
+    const result = runSetup(["--home", home], { HOME: home });
+    expect(result.status, result.stderr).toBe(0);
+    const entry = path.join(extensions, "coordinate.ts");
+    expect(fs.existsSync(entry)).toBe(true);
+    const loaded = await import(pathToFileURL(entry).href);
+    const names: string[] = [];
+    loaded.default({ registerTool: (tool: { name: string }) => names.push(tool.name), on: () => undefined });
+    expect(names).toEqual(["coordinate"]);
+    expect(fs.readFileSync(path.join(extensions, "other.ts"), "utf8")).toBe("// Existing extension\n");
+    expect(fs.existsSync(path.join(agentDirOf(home), "guard/sandbox.sb"))).toBe(false);
+  });
   it("a_clean_default_setup_needs_no_optional_tools_or_superpowers", () => {
     const root = makeTmp();
     const home = path.join(root, "home");

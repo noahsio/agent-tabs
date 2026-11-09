@@ -173,6 +173,11 @@ export async function makeScratch(envInfo, scratchRoot, kitMarker) {
     const source = path.join(envInfo.agentDir, name);
     if (fs.existsSync(source)) fs.copyFileSync(source, path.join(agent, name));
   }
+  const coordinate = path.join(envInfo.agentDir, "extensions/coordinate.ts");
+  if (fs.existsSync(coordinate)) {
+    fs.mkdirSync(path.join(agent, "extensions"), { recursive: true });
+    fs.copyFileSync(coordinate, path.join(agent, "extensions/coordinate.ts"));
+  }
   const { buildHooksState } = await import("./lib/trust.mjs");
   const hooksFile = path.join(agent, "hooks.json");
   const config = JSON.parse(fs.readFileSync(hooksFile, "utf8"));
@@ -316,6 +321,7 @@ async function main() {
     }
     results.push(checkMcp(surfaces));
     const extensions = (Array.isArray(surfaces?.extensions) ? surfaces.extensions : []).map((item) => item?.name);
+    results.push(check("coordinate extension", extensions.includes("coordinate"), extensions.includes("coordinate") ? "coordinate discovered" : "coordinate missing"));
     const mark = client.frames.length;
     const listed = await client.request({ type: "prompt", message: "/hooks list", sessionId });
     await new Promise((resolve) => setTimeout(resolve, 2000));

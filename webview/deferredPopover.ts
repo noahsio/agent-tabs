@@ -159,6 +159,7 @@ export class DeferredPopover implements PopoverContent {
       element.append(el("div", { class: "deferred-actions" },
         button("Ответить", {}, row.answer), button("Убрать", { class: "secondary" }, () => this.submit(row, { type: "dismissDeferredQuestion", id: item.id }))));
     } else {
+      if (item.coordination) element.append(el("p", { class: "deferred-question" }, item.coordination));
       const command = el("pre", { class: "deferred-command" }, item.command);
       element.append(item.command.length > 180 || item.command.includes("\n")
         ? el("details", {}, el("summary", {}, el("code", {}, item.command.slice(0, 120) + "…")), command) : command);

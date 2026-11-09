@@ -62,8 +62,9 @@ export class DeferredInbox {
         this.items = this.scanned.filter((item) => !Object.hasOwn(answers, item.id));
         for (const approval of this.approvals) {
           const file = await findSessionPath(this.agentDir, approval.session);
-          this.items.push({ kind: "approval", id: approval.id, sessionTitle: (file === undefined ? undefined : this.questions.title(file)) ?? basename(approval.cwd),
-            command: approval.command, createdAt: Date.parse(approval.createdAt), deferredAt: Date.parse(approval.deferredAt) });
+          this.items.push({ kind: "approval", id: approval.id, sessionTitle: approval.sessionLabel ?? (file === undefined ? undefined : this.questions.title(file)) ?? basename(approval.cwd),
+            command: approval.command, createdAt: Date.parse(approval.createdAt), deferredAt: Date.parse(approval.deferredAt),
+            ...(approval.coordinationId ? { coordination: approval.reasons.join("\n") } : {}) });
         }
         this.publish();
       } catch (error) {
@@ -89,7 +90,7 @@ export class DeferredInbox {
           if (action.type === "dismissDeferredQuestion") {
             this.store.markAnswered(action.id, "", this.now());
           } else {
-            let entry: OutboxEntry;
+            let entry: OutboxEntry | undefined;
             if (action.type === "answerDeferredQuestion" && item.kind === "question") {
               if (action.answers.length !== item.questions.length) throw new Error("Ответьте на каждый вопрос");
               const time = new Date(item.createdAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
@@ -109,10 +110,11 @@ export class DeferredInbox {
                 await admin.answer(action.id, action.decision, action.message);
                 // Accepted risk: a crash between guard's OK and this synchronous outbox write can lose the notification.
                 // Keep the guard contract unchanged; every persisted retry uses OmO's stable admission ID.
-                this.store.enqueue(entry);
+                if (approval.coordinationId) entry = undefined; // The coordination service owns this notification and its admission ID.
+                else this.store.enqueue(entry);
               } finally { admin.close(); }
             } else throw new Error("Тип ответа не соответствует запросу");
-            if (!(await this.deliver(entry))) throw new Error(this.failures.get(key) ?? NOT_SENT);
+            if (entry !== undefined && !(await this.deliver(entry))) throw new Error(this.failures.get(key) ?? NOT_SENT);
           }
         }
         this.items = this.items.filter((item) => item.kind !== kind || item.id !== action.id);

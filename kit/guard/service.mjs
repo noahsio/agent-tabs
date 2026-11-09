@@ -37,6 +37,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { classify, commandsOf, FILE_WRITE_TOOLS, fileWriteTargets, isReadTool } from "./classify.mjs";
 import { Coordination } from "./coordination.mjs";
+import { deliverCoordination } from "./coordinationHost.mjs";
 import { askDecider, catReferencePath, DEFAULT_OMO_PATH, readCache, resolveDeciderTransport, writeCache, writeJsonAtomic } from "./decider.mjs";
 import { commandText, guardStateReason, protectedTarget } from "./protect.mjs";
 import { loadDefaultRules, makeWhitelistEntry, parseRules, validateRules } from "./rules.mjs";
@@ -332,6 +333,72 @@ export async function startService({
   // id -> { id, key, session, view, deadline, waitSeconds, answer, used, tickets: Map<ticket, {tool, waiting}>, waiters, telegramSent }
   const requests = new Map();
   const coordination = new Coordination(now);
+  let coordinationSnapshot = "";
+  let deliveringCoordination = false;
+  let nextCoordinationDelivery = 0;
+  async function pumpCoordination() {
+    if (deliveringCoordination || closed || now() < nextCoordinationDelivery) return;
+    if (![...coordination.outbox.values()].some((message) => !message.delivered)) return;
+    deliveringCoordination = true;
+    try {
+      for (const message of coordination.outbox.values()) {
+        if (closed) break;
+        if (message.delivered) continue;
+        try {
+          await deliverCoordination(agentDir, { ...message, text: redactor()(message.text) });
+          message.delivered = true;
+        } catch (error) {
+          log(`coordination-delivery-pending id=${message.id} reason=${capReason(redactor()(error.message))}`);
+        }
+      }
+    } finally {
+      deliveringCoordination = false;
+      nextCoordinationDelivery = now() + 10_000;
+    }
+  }
+  function publishCoordination() {
+    const items = JSON.parse(redactor()(JSON.stringify(coordination.snapshot())));
+    const snapshot = JSON.stringify(items);
+    if (snapshot === coordinationSnapshot) return;
+    coordinationSnapshot = snapshot;
+    for (const [socket, subscriber] of subscribers) if (subscriber.coordination) writeLine(socket, { event: "coordination", items });
+  }
+  function escalateCoordination() {
+    coordination.prune();
+    // A closed session or a late reply ends the human question too; persisted cards cannot outlive their proposal.
+    for (const record of requests.values()) {
+      if (!record.view.coordinationId || record.answer || coordination.requests.get(record.view.coordinationId)?.state === "deferred") continue;
+      requests.delete(record.id);
+      release(record, () => deny("[guard] согласование завершено; повторите команду"));
+      broadcast({ event: "resolved", id: record.id, decision: "deny", by: "timeout", session: record.session });
+    }
+    const obsolete = deferredState.items.filter((item) => item.coordinationId && coordination.requests.get(item.coordinationId)?.state !== "deferred");
+    if (obsolete.length > 0) {
+      deferredState.items = deferredState.items.filter((item) => !obsolete.includes(item));
+      saveDeferred();
+      for (const item of obsolete) broadcast({ event: "resolved", id: item.id, decision: "deny", by: "timeout", session: item.session, deferred: true });
+    }
+    if (!rulesState.ok) return;
+    for (const proposal of coordination.requests.values()) {
+      if (proposal.kind !== "proposal" || proposal.state !== "deferred" || proposal.humanId) continue;
+      const view = {
+        session: proposal.session, cwd: proposal.cwd, tool: proposal.tool, command: proposal.subject,
+        reasons: [`Соседи не ответили за две минуты: ${proposal.participants.map((session) => coordination.label(session)).join(", ")}. Молчание не означает согласие.`],
+        coordinationId: proposal.id,
+        sessionLabel: coordination.label(proposal.session),
+      };
+      const hour = new Date(now()).getHours();
+      const key = `coordination:${proposal.id}`;
+      if (hour >= 22 || hour < 8) {
+        proposal.humanId = newId();
+        deferredState.items.push({ id: proposal.humanId, ...view, key, createdAt: iso(now()), deferredAt: iso(now()) });
+        saveDeferred();
+      } else {
+        const pending = openRequest(rulesState.rules, key, proposal.tool, view);
+        if (pending.decision === "pending") proposal.humanId = pending.id;
+      }
+    }
+  }
   // Spec 2026-11-08: a request nobody answered in time is deferred, not lost. The person answers it later; an allow
   // becomes a one-time allowance for exactly that call (its key: command, heredoc bodies and cwd) for ALLOWANCE_MS.
   const deferredFile = path.join(paths.dir, "deferred.json");
@@ -703,8 +770,23 @@ export async function startService({
     const guardState = guardStateReason(text, where, isReadTool(tool));
     // A whitelist entry is consulted inside classify, after the deny set — so a guard-state touch still overrides it here
     // (guardState keeps the call for the person however `allow` it looked): a whitelist can never bypass guard-state.
-    const shared = plan?.neighbours.length > 0;
+    let shared = plan?.neighbours.length > 0;
     if (shared) verdict.key = createHash("sha256").update(`${verdict.key}\0${plan.neighbours.join("\0")}`).digest("hex").slice(0, 32);
+    if (shared && verdict.tier !== "deny" && !guardState) {
+      const proposal = coordination.proposal(call, plan);
+      if (proposal.state !== "approved") {
+        publishCoordination();
+        return {
+          ...deny(`[guard] ${proposal.state === "deferred" ? "Предложение отложено" : "Ждём согласия соседей"} (#${proposal.id}): ` +
+            `${plan.neighbours.map((session) => coordination.label(session)).join(", ")}. ` +
+            "Молчание не разрешает действие. Продолжайте независимую работу."),
+          coordination: coordination.view(proposal),
+        };
+      }
+      proposal.state = "done";
+      shared = false;
+      publishCoordination();
+    }
     if (verdict.tier === "allow" && !guardState && !shared) {
       return Array.isArray(verdict.whitelisted) && verdict.whitelisted.length > 0 ? allowedByWhitelist(call, verdict) : allow("[guard] разрешено");
     }
@@ -715,7 +797,7 @@ export async function startService({
     // P38: a container mounting home, /, ~/.omo, LaunchAgents or the agent dir runs outside the sandbox — the person decides
     const humanOnly = shared || Boolean(guardState) || verdict.reasons.some((reason) => reason.startsWith("docker-mount"));
     const reasons = (guardState ? [...verdict.reasons, `guard-state: ${guardState} — решает только человек`] : verdict.reasons).map(shown);
-    if (shared) reasons.push(...plan.neighbours.map((session) => `Общая рабочая копия: активна сессия «${redact(session)}». Действие затронет её работу; решает человек.`));
+    if (shared) reasons.push(...plan.neighbours.map((session) => `Общая рабочая копия: активна сессия «${redact(coordination.label(session))}». Действие затронет её работу; решает человек.`));
     // B2: an eval shows the shell commands it runs; its code goes apart (the key and guard-state above use the whole code)
     const extracted = tool === "eval" ? commandsOf(tool, call.input) : undefined;
     const commands = Array.isArray(extracted) && extracted.length > 0 ? extracted.join("\n") : text;
@@ -780,6 +862,12 @@ export async function startService({
     const record = typeof id === "string" ? requests.get(id) : undefined;
     if (!record) return answerDeferred(id, decision, by, message);
     if (record.answer) return { ok: false, error: "запрос уже отвечен" };
+    if (record.view.coordinationId) {
+      if (decision === "allow-always") return { ok: false, error: "Согласование действует только один раз" };
+      const result = coordination.override(record.view.coordinationId, decision === "deny" ? "deny" : "allow");
+      if (!result.ok) return result;
+      publishCoordination();
+    }
     if (decision === "allow-always" && saveWhitelist(record) === null) return { ok: false, error: "нечего внести в вайтлист или правила не сохранить" };
     const words = message !== undefined ? redactor()(message.trim()) : undefined;
     record.answer = { decision: decision === "deny" ? "deny" : "allow", by, at: now(), ...(words !== undefined ? { message: words } : {}) };
@@ -800,9 +888,15 @@ export async function startService({
   function answerDeferred(id, decision, by, message) {
     const index = deferredState.items.findIndex((item) => item.id === id);
     if (index < 0) return { ok: false, error: "запрос не найден" };
-    const [item] = deferredState.items.splice(index, 1);
+    const item = deferredState.items[index];
     const allowed = decision !== "deny";
-    if (allowed) deferredState.allowances.push({ id, key: item.key, expiresAt: now() + ALLOWANCE_MS });
+    if (item.coordinationId) {
+      if (decision === "allow-always") return { ok: false, error: "Согласование действует только один раз" };
+      const result = coordination.override(item.coordinationId, allowed ? "allow" : "deny");
+      if (!result.ok) return result;
+      publishCoordination();
+    } else if (allowed) deferredState.allowances.push({ id, key: item.key, expiresAt: now() + ALLOWANCE_MS });
+    deferredState.items.splice(index, 1);
     saveDeferred();
     const words = message !== undefined ? redactor()(message.trim()) : undefined;
     broadcast({ event: "resolved", id, decision: allowed ? "allow" : "deny", by, session: item.session, deferred: true, ...(words !== undefined ? { message: words } : {}) });
@@ -822,6 +916,9 @@ export async function startService({
   }
 
   function tick() {
+    escalateCoordination();
+    publishCoordination();
+    void pumpCoordination();
     for (const record of [...requests.values()]) {
       if (!record.answer && now() >= record.deadline) {
         requests.delete(record.id);
@@ -852,7 +949,8 @@ export async function startService({
 
   function waitOn(message, socket, reply) {
     const record = typeof message.id === "string" ? requests.get(message.id) : undefined;
-    if (!record) return reply(deny("[guard] запрос не найден или уже закрыт — повторите команду"));
+    if (!record) return reply(deny(deferredState.items.some((item) => item.id === message.id)
+      ? deferredReason(message.id) : "[guard] запрос не найден или уже закрыт — повторите команду"));
     const entry = typeof message.ticket === "string" ? record.tickets.get(message.ticket) : undefined;
     if (!entry || entry.waiting) return reply({ error: "unknown ticket" });
     // The lease may have changed while a human or the decider was answering. A ticket never bypasses acquisition.
@@ -891,6 +989,12 @@ export async function startService({
         if (!message || typeof message !== "object") return reply({ error: "bad request" });
         if (message.op === "evaluate") return reply(await evaluate(message.call));
         if (message.op === "wait") return waitOn(message, socket, reply);
+        if (message.op === "coordinate") {
+          if (!isCall(message.call)) return reply({ ok: false, error: "Некорректный вызов coordinate" });
+          const result = await coordination.command(message.call);
+          publishCoordination();
+          return reply(JSON.parse(redactor()(JSON.stringify(result))));
+        }
         return reply({ error: "unknown op" });
       } catch (error) {
         return reply(deny(`[guard] внутренняя ошибка службы защиты: ${capReason(redactor()(error?.message ?? error))}`));
@@ -899,10 +1003,20 @@ export async function startService({
   }
 
   function adminReply(message, socket) {
+    tick();
     switch (message.op) {
+      case "coordination":
+        return { items: JSON.parse(redactor()(JSON.stringify(coordination.snapshot()))) };
+      case "coordination.answer": {
+        const result = coordination.override(message.id, message.decision);
+        publishCoordination();
+        return result;
+      }
       case "pending":
+        escalateCoordination();
         return { items: openViews() };
       case "deferred":
+        escalateCoordination();
         return { items: deferredState.items.map(({ key: _key, ...view }) => view) };
       case "answer":
         return answerRequest(message.id, message.decision, message.by, message.message);
@@ -921,13 +1035,14 @@ export async function startService({
         return { version: SERVICE_VERSION, protocol: SERVICE_PROTOCOL, kit: ownGuardDir(), rulesOk: rulesState.ok };
       case "subscribe": {
         const protocol = Number.isInteger(message.protocol) && message.protocol > 0 ? message.protocol : 1;
-        subscribers.set(socket, { protocol });
+        subscribers.set(socket, { protocol, coordination: message.coordination === true });
         socket.on("close", () => {
           subscribers.delete(socket);
           // a window that went away shows nothing: its requests are routed again rather than waiting out the deadline
           for (const record of openRecords()) if (Array.isArray(record.audience) && record.audience.includes(socket)) dropFromAudience(record, socket);
         });
         writeLine(socket, { ok: true, protocol: SERVICE_PROTOCOL });
+        if (message.coordination === true) writeLine(socket, { event: "coordination", items: JSON.parse(redactor()(JSON.stringify(coordination.snapshot()))) });
         offerOpen(socket, protocol);
         return undefined;
       }

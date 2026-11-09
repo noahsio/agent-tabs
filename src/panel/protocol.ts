@@ -79,7 +79,7 @@ export type SessionItem = {
   current: boolean;
 };
 
-export type DeferredApproval = { kind: "approval"; id: string; sessionTitle: string; createdAt: number; deferredAt: number; command: string };
+export type DeferredApproval = { kind: "approval"; id: string; sessionTitle: string; createdAt: number; deferredAt: number; command: string; coordination?: string };
 export type DeferredItem = DeferredQuestion | DeferredApproval;
 export type DeferredResult = { type: "deferredResult"; kind: DeferredItem["kind"]; id: string } & ({ ok: true } | { ok: false; reason: string });
 export type DeferredDelivery = { kind: "question" | "approval"; id: string; text: string; createdAt: number; reason: string };
@@ -107,7 +107,8 @@ export function parseDeferredHostMessage(raw: unknown): DeferredHostMessage | un
       typeof item["deferredAt"] !== "number" || !Number.isFinite(new Date(item["deferredAt"]).getTime())) return undefined;
     const common = { id: item["id"], sessionTitle: item["sessionTitle"], createdAt: item["createdAt"], deferredAt: item["deferredAt"] };
     if (item["kind"] === "approval" && typeof item["command"] === "string") {
-      items.push({ ...common, kind: "approval", command: item["command"] });
+      if (item["coordination"] !== undefined && typeof item["coordination"] !== "string") return undefined;
+      items.push({ ...common, kind: "approval", command: item["command"], ...(typeof item["coordination"] === "string" ? { coordination: item["coordination"] } : {}) });
     } else if (item["kind"] === "question" && typeof item["sessionPath"] === "string" && Array.isArray(item["questions"]) &&
       item["questions"].length > 0 && (item["decided"] === undefined || typeof item["decided"] === "string")) {
       const questions: DeferredQuestion["questions"] = [];
@@ -169,6 +170,7 @@ export type GuardStep = {
 
 /** Host → webview: the guard's approval cards and decider steps (src/guard/approvals.ts). */
 export type GuardHostMessage =
+  | { type: "coordination"; lines: string[] }
   /**
    * An open request: a card, while `human.card` is on. `elsewhere`: not this tab's session, so the card is an offer and
    * says where it came from — `owner` is the session that owns it, and without it we could not attribute the request.
