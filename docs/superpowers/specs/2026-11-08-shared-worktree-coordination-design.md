@@ -356,7 +356,7 @@ the_agent_cannot_rewrite_or_create_what_omo_loads_but_the_repo_around_a_skills_d
 тест ожидает несандбоксированный родительский процесс, тогда как этот запуск уже в sandbox.
 16-й — `test/kit/setup.test.ts > omo_wrapper_runs_under_the_profile_when_protection_is_on`:
 в финальном запуске унаследована `OMO_LSP_DAEMON_DIR`; вместо `lsp=|a` wrapper печатает
-`lsp=/Users/administrator/.cache/.m/apps/omo/data/lsp-daemon|a`.
+`lsp=<agentDir>/lsp-daemon|a`.
 В предыдущем запуске с удалённой переменной тот же тест доходил до ограничения вложенного sandbox.
 Профили, окружение пользователя и существующие проверки не ослаблялись.
 
