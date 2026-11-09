@@ -281,7 +281,8 @@ export class ChatPanel implements ApprovalPanel {
     if (message.type !== "deferred") return this.poster.send(message);
     // the inbox is one list per environment; each window shows its own tabs' projects first
     const here = [...new Set([...this.host.panels].flatMap((panel) => panel.cwd ?? []))];
-    this.poster.send({ ...message, here });
+    const sessions = [...new Set([...this.host.panels].flatMap((panel) => panel.durableId ?? []))];
+    this.poster.send({ ...message, here, sessions });
   }
 
   /** A later answer uses the tab's existing controller and OmO's durable admission ID. */

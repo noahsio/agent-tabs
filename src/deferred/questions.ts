@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { sessionTitle, stampOf, textOf } from "../sessions/history";
@@ -12,6 +12,8 @@ export type DeferredQuestion = {
   sessionTitle: string;
   /** The session's folder (its journal header): a window shows its own projects first. */
   cwd?: string;
+  /** The session's durable id: a window that has it open in a tab owns the item whatever the folder. */
+  session?: string;
   createdAt: number;
   deferredAt: number;
   questions: DeferredPrompt[];
@@ -19,7 +21,7 @@ export type DeferredQuestion = {
 };
 export type DeferredPrompt = { header: string; question: string; options: { label: string }[]; multiSelect: boolean };
 type Question = { id: string; createdAt: number; questions: DeferredPrompt[]; deferredAt?: number; deferred?: boolean; decided?: string };
-type Journal = { size: number; tail: string; decoder: StringDecoder; cwd?: string; name?: string; firstUser?: string; questions: Map<string, Question> };
+type Journal = { size: number; tail: string; decoder: StringDecoder; id?: string; cwd?: string; name?: string; firstUser?: string; questions: Map<string, Question> };
 const WEEK = 7 * 86400_000;
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -60,6 +62,41 @@ export async function findSessionPath(agentDir: string, durableId: string): Prom
   return (await journalPaths(agentDir)).find((file) => file.endsWith(`_${durableId}.jsonl`));
 }
 
+async function dirs(dir: string): Promise<string[]> {
+  try { return (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => entry.name); }
+  catch (error) {
+    if (object(error) && error["code"] === "ENOENT") return [];
+    throw error;
+  }
+}
+
+/**
+ * The session a request belongs to, as the person knows it. A task child (measured, OmO 5.1.59) keeps its journal under
+ * projects/<p>/senpi-task/children/<st>/sessions/<st>/ — not under sessions/ — with a header cwd that may be the home dir,
+ * and its task record (projects/<p>/senpi-task/tasks/<st>.json) names the root session that spawned it: that session
+ * shows the request and receives the answer. `task` is set when the request came from a child.
+ */
+export async function ownerSession(agentDir: string, durableId: string): Promise<{ durableId: string; file: string; task?: string } | undefined> {
+  const own = await findSessionPath(agentDir, durableId);
+  if (own !== undefined || !/^[A-Za-z0-9-]+$/.test(durableId)) return own === undefined ? undefined : { durableId, file: own };
+  const projects = join(agentDir, "projects");
+  for (const project of await dirs(projects)) {
+    const tasks = join(projects, project, "senpi-task");
+    for (const task of await dirs(join(tasks, "children"))) {
+      const journals = await readdir(join(tasks, "children", task, "sessions", task)).catch(() => [] as string[]);
+      if (!journals.some((name) => name.endsWith(`_${durableId}.jsonl`))) continue;
+      let record: unknown;
+      try { record = JSON.parse(await readFile(join(tasks, "tasks", `${task}.json`), "utf8")); }
+      catch { return undefined; }
+      const root = object(record) ? record["root_session_id"] : undefined;
+      if (typeof root !== "string" || root === durableId) return undefined;
+      const file = await findSessionPath(agentDir, root);
+      return file === undefined ? undefined : { durableId: root, file, task };
+    }
+  }
+  return undefined;
+}
+
 /** Append-only journals are parsed once; incomplete final records stay buffered for the next scan. */
 export class DeferredQuestions {
   private readonly journals = new Map<string, Journal>();
@@ -95,6 +132,7 @@ export class DeferredQuestions {
         if (!question.deferred || question.deferredAt === undefined || Object.hasOwn(answered, question.id)) continue;
         items.push({ kind: "question", id: question.id, sessionPath: file, sessionTitle: sessionTitle(journal.name, journal.firstUser),
           ...(journal.cwd !== undefined ? { cwd: journal.cwd } : {}),
+          ...(journal.id !== undefined ? { session: journal.id } : {}),
           createdAt: question.createdAt, deferredAt: question.deferredAt, questions: question.questions,
           ...(question.decided !== undefined ? { decided: question.decided } : {}) });
       }
@@ -117,6 +155,11 @@ export class DeferredQuestions {
     return journal === undefined ? undefined : sessionTitle(journal.name, journal.firstUser);
   }
 
+  /** The folder a scanned journal's header names. */
+  cwd(file: string): string | undefined {
+    return this.journals.get(file)?.cwd;
+  }
+
   private consume(journal: Journal, line: string, fallbackTime: number): void {
     let entry: unknown;
     try { entry = JSON.parse(line); }
@@ -125,6 +168,7 @@ export class DeferredQuestions {
     const message = object(entry["message"]) ? entry["message"] : undefined;
     const at = stampOf({ timestamp: entry["timestamp"], ...(message !== undefined ? { message } : {}) }) ?? fallbackTime;
     if (entry["type"] === "session" && typeof entry["cwd"] === "string") journal.cwd = entry["cwd"];
+    if (entry["type"] === "session" && typeof entry["id"] === "string") journal.id = entry["id"];
     if (entry["type"] === "session_info" && typeof entry["name"] === "string" && entry["name"].trim()) journal.name = entry["name"].trim();
     if (entry["type"] === "custom" && entry["customType"] === "ask-user:settlement" && object(entry["data"])) {
       const data = entry["data"];

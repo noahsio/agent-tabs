@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import type { GuardAdmin, DeferredView } from "../guard/admin";
 import type { DeferredAction, DeferredHostMessage, DeferredItem, DeferredQuestion } from "../panel/protocol";
 import type { SessionController } from "../sessions/controller";
-import { DeferredQuestions, findSessionPath } from "./questions";
+import { DeferredQuestions, ownerSession } from "./questions";
 import { DeferredStore, type OutboxEntry } from "./store";
 
 export type DeliverySession = Pick<SessionController, "send" | "release">;
@@ -61,9 +61,10 @@ export class DeferredInbox {
         const answers = this.store.read().questions;
         this.items = this.scanned.filter((item) => !Object.hasOwn(answers, item.id));
         for (const approval of this.approvals) {
-          const file = await findSessionPath(this.agentDir, approval.session);
-          this.items.push({ kind: "approval", id: approval.id, sessionTitle: approval.sessionLabel ?? (file === undefined ? undefined : this.questions.title(file)) ?? basename(approval.cwd),
-            cwd: approval.cwd,
+          const owner = await ownerSession(this.agentDir, approval.session);
+          const cwd = (owner === undefined ? undefined : this.questions.cwd(owner.file)) ?? approval.cwd;
+          this.items.push({ kind: "approval", id: approval.id, sessionTitle: approval.sessionLabel ?? (owner === undefined ? undefined : this.questions.title(owner.file)) ?? basename(cwd),
+            cwd, session: owner?.durableId ?? approval.session,
             command: approval.command, createdAt: Date.parse(approval.createdAt), deferredAt: Date.parse(approval.deferredAt),
             ...(approval.coordinationId ? { coordination: approval.reasons.join("\n") } : {}) });
         }
@@ -147,14 +148,17 @@ export class DeferredInbox {
 
   private async deliver(entry: OutboxEntry): Promise<boolean> {
     try {
-      const file = entry.kind === "question" ? entry.sessionPath : await findSessionPath(this.agentDir, entry.sessionId);
+      const owner = entry.kind === "question" ? undefined : await ownerSession(this.agentDir, entry.sessionId);
+      const file = entry.kind === "question" ? entry.sessionPath : owner?.file;
       if (file === undefined) throw new Error("Файл сессии для доставки не найден");
+      // a subagent's command is answered to the session that spawned it, which can resume or re-run that work
+      const text = owner?.task === undefined ? entry.text : `${entry.text} Её запускал субагент ${owner.task}.`;
       const open = this.deps.open(file);
       let sent: boolean;
-      if (open !== undefined) sent = await open.send(entry.text, "auto", [], entry.clientMessageId);
+      if (open !== undefined) sent = await open.send(text, "auto", [], entry.clientMessageId);
       else {
         const session = await this.deps.attach(file);
-        try { sent = await session.send(entry.text, "auto", [], entry.clientMessageId); }
+        try { sent = await session.send(text, "auto", [], entry.clientMessageId); }
         finally { await session.release(); }
       }
       if (!sent) throw new Error(NOT_SENT);

@@ -169,7 +169,7 @@ describe("ChatPanel", () => {
     const chat = ChatPanel.restore(shared, first.panel, { kind: "new", cwd: "/work" });
     ChatPanel.restore(shared, second.panel, { kind: "new", cwd: "/shop" });
     chat.postDeferred({ type: "deferred", items: [] });
-    expect(first.other).toContainEqual({ type: "deferred", items: [], here: ["/work", "/shop"] });
+    expect(first.other).toContainEqual({ type: "deferred", items: [], here: ["/work", "/shop"], sessions: [] });
   });
 
   it("sends_later_answers_through_the_attached_controller_with_the_stable_id", async () => {

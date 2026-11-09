@@ -54,12 +54,34 @@ function setup(open: boolean = true): {
 }
 
 describe("DeferredInbox", () => {
+  // Measured live (OmO 5.1.59): a task child's journal lives under projects/<p>/senpi-task/children/<st>/sessions/<st>/,
+  // its header cwd can be the home dir, and its task record names the root session. Its held command showed as
+  // «administrator» in every window and its answer failed with «Файл сессии для доставки не найден».
+  it("a_subagents_held_command_belongs_to_its_root_session_and_its_answer_goes_there", async () => {
+    const fixture = setup();
+    const project = join(fixture.agentDir, "projects", "home-abc", "senpi-task");
+    mkdirSync(join(project, "children", "st_1", "sessions", "st_1"), { recursive: true });
+    mkdirSync(join(project, "tasks"), { recursive: true });
+    writeFileSync(join(project, "children", "st_1", "sessions", "st_1", "2026_child-1.jsonl"), JSON.stringify({ type: "session", id: "child-1", cwd: "/home" }) + "\n");
+    writeFileSync(join(project, "tasks", "st_1.json"), JSON.stringify({ id: "st_1", parent_session_id: "session-1", root_session_id: "session-1", cwd: "/work" }));
+    Object.assign(fixture.guardItems[0]!, { session: "child-1", cwd: "/home" });
+    await fixture.inbox.refresh();
+    expect(fixture.published).toContainEqual(expect.objectContaining({ type: "deferred", items: expect.arrayContaining([
+      expect.objectContaining({ kind: "approval", id: "g", sessionTitle: "Проект", cwd: "/work", session: "session-1" }),
+    ]) }));
+    await fixture.inbox.answer({ type: "answerDeferredApproval", id: "g", decision: "allow-once" });
+    expect(fixture.send).toHaveBeenCalledTimes(1);
+    expect(fixture.send.mock.calls[0]?.[0]).toContain("st_1");
+    expect(fixture.store.read().outbox).toEqual({});
+    expect(fixture.published).toContainEqual({ type: "deferredResult", kind: "approval", id: "g", ok: true });
+  });
+
   it("names_the_project_of_each_item_so_a_window_can_tell_its_own", async () => {
     const fixture = setup(false);
     await fixture.inbox.refresh();
     expect(fixture.published).toContainEqual(expect.objectContaining({ type: "deferred", items: expect.arrayContaining([
-      expect.objectContaining({ kind: "question", id: "q", cwd: "/work" }),
-      expect.objectContaining({ kind: "approval", id: "g", cwd: "/work" }),
+      expect.objectContaining({ kind: "question", id: "q", cwd: "/work", session: "session-1" }),
+      expect.objectContaining({ kind: "approval", id: "g", cwd: "/work", session: "session-1" }),
     ]) }));
   });
 

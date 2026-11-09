@@ -79,12 +79,12 @@ export type SessionItem = {
   current: boolean;
 };
 
-export type DeferredApproval = { kind: "approval"; id: string; sessionTitle: string; cwd?: string; createdAt: number; deferredAt: number; command: string; coordination?: string };
+export type DeferredApproval = { kind: "approval"; id: string; sessionTitle: string; cwd?: string; session?: string; createdAt: number; deferredAt: number; command: string; coordination?: string };
 export type DeferredItem = DeferredQuestion | DeferredApproval;
 export type DeferredResult = { type: "deferredResult"; kind: DeferredItem["kind"]; id: string } & ({ ok: true } | { ok: false; reason: string });
 export type DeferredDelivery = { kind: "question" | "approval"; id: string; text: string; createdAt: number; reason: string };
-/** `here`: the folders of this window's tabs (the plugin adds it per window); the rest are other projects. */
-export type DeferredHostMessage = { type: "deferred"; items: DeferredItem[]; here?: string[]; deliveries?: DeferredDelivery[]; error?: string } | DeferredResult;
+/** `here` / `sessions`: the folders and sessions of this window's tabs (the plugin adds them per window); the rest are other projects. */
+export type DeferredHostMessage = { type: "deferred"; items: DeferredItem[]; here?: string[]; sessions?: string[]; deliveries?: DeferredDelivery[]; error?: string } | DeferredResult;
 export type DeferredAction =
   | { type: "answerDeferredQuestion"; id: string; answers: string[] }
   | { type: "dismissDeferredQuestion"; id: string }
@@ -101,16 +101,18 @@ export function parseDeferredHostMessage(raw: unknown): DeferredHostMessage | un
     return undefined;
   }
   if (raw["type"] !== "deferred" || !Array.isArray(raw["items"]) || (raw["error"] !== undefined && typeof raw["error"] !== "string")) return undefined;
+  const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((entry) => typeof entry === "string");
   const here = raw["here"];
-  if (here !== undefined && !(Array.isArray(here) && here.every((dir) => typeof dir === "string"))) return undefined;
+  const sessions = raw["sessions"];
+  if ((here !== undefined && !strings(here)) || (sessions !== undefined && !strings(sessions))) return undefined;
   const items: DeferredItem[] = [];
   for (const item of raw["items"]) {
     if (!isObject(item) || !isBlockId(item["id"]) || typeof item["sessionTitle"] !== "string" ||
       typeof item["createdAt"] !== "number" || !Number.isFinite(new Date(item["createdAt"]).getTime()) ||
       typeof item["deferredAt"] !== "number" || !Number.isFinite(new Date(item["deferredAt"]).getTime()) ||
-      (item["cwd"] !== undefined && typeof item["cwd"] !== "string")) return undefined;
+      (item["cwd"] !== undefined && typeof item["cwd"] !== "string") || (item["session"] !== undefined && typeof item["session"] !== "string")) return undefined;
     const common = { id: item["id"], sessionTitle: item["sessionTitle"], createdAt: item["createdAt"], deferredAt: item["deferredAt"],
-      ...(typeof item["cwd"] === "string" ? { cwd: item["cwd"] } : {}) };
+      ...(typeof item["cwd"] === "string" ? { cwd: item["cwd"] } : {}), ...(typeof item["session"] === "string" ? { session: item["session"] } : {}) };
     if (item["kind"] === "approval" && typeof item["command"] === "string") {
       if (item["coordination"] !== undefined && typeof item["coordination"] !== "string") return undefined;
       items.push({ ...common, kind: "approval", command: item["command"], ...(typeof item["coordination"] === "string" ? { coordination: item["coordination"] } : {}) });
@@ -140,7 +142,7 @@ export function parseDeferredHostMessage(raw: unknown): DeferredHostMessage | un
       deliveries.push({ id: entry["id"], kind: entry["kind"], text: entry["text"], reason: entry["reason"], createdAt: entry["createdAt"] });
     }
   }
-  return { type: "deferred", items, ...(here !== undefined ? { here: here as string[] } : {}), ...(raw["deliveries"] !== undefined ? { deliveries } : {}),
+  return { type: "deferred", items, ...(here !== undefined ? { here } : {}), ...(sessions !== undefined ? { sessions } : {}), ...(raw["deliveries"] !== undefined ? { deliveries } : {}),
     ...(typeof raw["error"] === "string" ? { error: raw["error"] } : {}) };
 }
 

@@ -68,8 +68,10 @@ export class DeferredPopover implements PopoverContent {
     this.elsewhere.clear();
     const groups = new Map<string, Row[]>();
     for (const [key, row] of this.rows) {
+      // exact folders only: a tab in the home dir holds that dir, not every project below it
       const cwd = row.item.cwd;
-      if (message.here === undefined || cwd === undefined || message.here.some((dir) => cwd === dir || cwd.startsWith(`${dir}/`))) continue;
+      const session = row.item.session;
+      if (message.here === undefined || cwd === undefined || message.here.includes(cwd) || (session !== undefined && message.sessions?.includes(session) === true)) continue;
       this.elsewhere.add(key);
       groups.set(cwd, [...(groups.get(cwd) ?? []), row]);
     }

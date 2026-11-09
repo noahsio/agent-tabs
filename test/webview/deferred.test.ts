@@ -29,23 +29,25 @@ describe("DeferredPopover", () => {
     const counts: number[] = [];
     popover = new DeferredPopover((message) => posted.push(message), (count) => counts.push(count));
     document.body.replaceChildren(popover.element);
-    const message = parseDeferredHostMessage({ type: "deferred", here: ["/work"], items: [
+    // a tab in the home dir holds that dir, not every project below it; a tab's own session is its own whatever the folder
+    const message = parseDeferredHostMessage({ type: "deferred", here: ["/work", "/home"], sessions: ["s-open"], items: [
       { ...question, cwd: "/work" },
-      { ...approval, cwd: "/elsewhere/shop" },
-      { ...approval, id: "g2", cwd: "/elsewhere/bank" },
+      { ...approval, cwd: "/home/elsewhere/shop" },
+      { ...approval, id: "g2", cwd: "/home/elsewhere/bank" },
       { ...approval, id: "g3" },
+      { ...approval, id: "g4", cwd: "/home/moved", session: "s-open", deferredAt: 1 },
     ] });
     if (message?.type !== "deferred") throw new Error("Missing inbox message");
     popover.update(message);
     const visible = (): string[] => [...popover.element.querySelectorAll<HTMLElement>("[data-deferred-id]")]
       .filter((row) => row.closest("[hidden]") === null).map((row) => row.dataset["deferredId"] as string);
-    expect(visible()).toEqual(["g3", "q"]); // a row with no known project stays in sight
-    expect(counts.at(-1)).toBe(2);
+    expect(visible()).toEqual(["g3", "q", "g4"]); // a row with no known project stays in sight
+    expect(counts.at(-1)).toBe(3);
     click("В других проектах: 2");
-    expect(visible()).toEqual(["g3", "q", "g2", "g"]);
+    expect(visible()).toEqual(["g3", "q", "g4", "g2", "g"]);
     expect([...popover.element.querySelectorAll(".deferred-project")].map((head) => head.textContent)).toEqual(["bank", "shop"]);
-    expect(popover.element.querySelector(".deferred-project")?.getAttribute("title")).toBe("/elsewhere/bank");
-    expect(counts.at(-1)).toBe(2);
+    expect(popover.element.querySelector(".deferred-project")?.getAttribute("title")).toBe("/home/elsewhere/bank");
+    expect(counts.at(-1)).toBe(3);
   });
 
   it("shows the missing consent beside a proposal handed to the person", () => {
