@@ -445,6 +445,9 @@ async function provision(paths: EnvPaths, deps: ProtectionDeps, spec: { node: st
 
   // must exist before a sandboxed host starts (it cannot create them); the guard dir exists since the rules step
   fs.mkdirSync(path.join(paths.agentDir, "extensions"), { recursive: true });
+  // the coordinate tool of this kit copy (as kit/setup-omo.mjs writes it): agents cannot write extensions/, the plugin can
+  await writeIfDifferent(deps, path.join(paths.agentDir, "extensions/coordinate.ts"),
+    `export { default } from ${JSON.stringify(path.join(kitGuard, "coordinate-extension.mjs"))};\n`, 0o644);
   fs.mkdirSync(path.dirname(hostSocketPath(paths.agentDir)), { recursive: true });
   fs.mkdirSync(path.dirname(protectedHostSocketPath(paths.agentDir)), { recursive: true, mode: 0o700 });
 

@@ -128,7 +128,8 @@ beforeEach(() => {
     },
     writeFile: async (file, content, mode) => {
       observe();
-      const name = file === plistFile() ? "plist" : file === profilePath(paths.agentDir) ? "profile" : file === rulesFile() ? "rules" : `write ${file}`;
+      const name = file === plistFile() ? "plist" : file === profilePath(paths.agentDir) ? "profile" : file === rulesFile() ? "rules"
+        : file === path.join(paths.agentDir, "extensions/coordinate.ts") ? "coordinate" : `write ${file}`;
       calls.push(name);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, content, { mode });
@@ -158,7 +159,7 @@ afterEach(async () => {
 describe("protection lifecycle", () => {
   it("enable_runs_in_order_and_twice_is_a_no_op", async () => {
     await enableProtection(paths, deps);
-    expect(calls).toEqual(["rules", "kit", "plist", "bootout", "bootstrap", "socket", "hook", "dirs", "profile", "restart"]);
+    expect(calls).toEqual(["rules", "kit", "plist", "bootout", "bootstrap", "socket", "hook", "dirs", "coordinate", "profile", "restart"]);
     expect(await protectionState(paths, vscode)).toBe("on");
     expect(fs.statSync(path.join(paths.agentDir, "extensions")).isDirectory()).toBe(true);
     expect(fs.statSync(path.join(paths.guardDir, "host")).isDirectory()).toBe(true);
@@ -447,6 +448,14 @@ describe("protection lifecycle", () => {
   it("enable_makes_the_dirs_a_sandboxed_host_cannot", async () => {
     await enableProtection(paths, deps);
     for (const dir of ["extensions", "rpc", "guard/host"]) expect(fs.statSync(path.join(paths.agentDir, dir)).isDirectory(), dir).toBe(true);
+  });
+
+  it("enable_points_the_coordinate_extension_at_the_kit_copy_it_installs", async () => {
+    await enableProtection(paths, deps);
+    const kitGuard = guardFilesDir(paths.home, path.join(deps.kitDir, "guard"));
+    const loader = fs.readFileSync(path.join(paths.agentDir, "extensions/coordinate.ts"), "utf8");
+    expect(loader).toBe(`export { default } from ${JSON.stringify(path.join(kitGuard, "coordinate-extension.mjs"))};\n`);
+    expect(fs.existsSync(path.join(kitGuard, "coordinate-extension.mjs"))).toBe(true);
   });
 
   it("a_stale_unreadable_or_partial_profile_is_broken_and_regenerated", async () => {
