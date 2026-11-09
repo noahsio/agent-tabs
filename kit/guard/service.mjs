@@ -949,7 +949,8 @@ export async function startService({
 
   function waitOn(message, socket, reply) {
     const record = typeof message.id === "string" ? requests.get(message.id) : undefined;
-    if (!record) return reply(deny("[guard] запрос не найден или уже закрыт — повторите команду"));
+    if (!record) return reply(deny(deferredState.items.some((item) => item.id === message.id)
+      ? deferredReason(message.id) : "[guard] запрос не найден или уже закрыт — повторите команду"));
     const entry = typeof message.ticket === "string" ? record.tickets.get(message.ticket) : undefined;
     if (!entry || entry.waiting) return reply({ error: "unknown ticket" });
     // The lease may have changed while a human or the decider was answering. A ticket never bypasses acquisition.
