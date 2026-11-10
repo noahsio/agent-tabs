@@ -96,7 +96,7 @@ describe.runIf(LIVE)("fork and rewind (live omo, scratch agent dir, haiku only)"
     const blockId = user?.id as string;
     expect((await store.read(source.sessionUuid as string)).points.get(blockId)).toBeDefined();
 
-    const opened: [string, ForkDraft][] = [];
+    const opened: [string, ForkDraft | undefined][] = [];
     const actions = new MessageActions({ controller: source, checkpointer, runningCwds: async () => [], openFork: (path, draft) => opened.push([path, draft]) });
     const preview = await actions.preview(blockId, false);
     expect(preview).toMatchObject({ ok: true, items: [{ path: "note.txt", action: "delete", changed: "no" }] });

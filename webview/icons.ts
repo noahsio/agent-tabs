@@ -23,6 +23,13 @@ const SHAPES = {
     ["path", "M4.64 15.25A8.5 8.5 0 1 1 8.41 18.7L3.5 20.5z"],
     ["path", "M12 7.8v6.4M8.8 11h6.4"],
   ],
+  // Two branches (top) joined into one stem (bottom): a fork.
+  fork: [
+    ["circle", 6.5, 5.5, 2.5],
+    ["circle", 17.5, 5.5, 2.5],
+    ["circle", 12, 18.5, 2.5],
+    ["path", "M6.5 8v1.5a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V8M12 11.5V16"],
+  ],
   spark: [["path", "M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"]],
   plus: [["path", "M12 5v14M5 12h14"]],
   search: [

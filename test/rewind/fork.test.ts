@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Entry } from "../../src/rewind/edits";
-import { buildFork, forkDraft, forkFileName, forkTitle, readSessionHeader, writeFork } from "../../src/rewind/fork";
+import { buildFork, buildSessionFork, forkDraft, forkFileName, forkTitle, readSessionHeader, writeFork, writeSessionFork } from "../../src/rewind/fork";
 
 const HEADER: Entry = { type: "session", version: 3, id: "orig-id", timestamp: "2026-11-04T09:00:00.000Z", cwd: "/p" };
 const NOW = new Date("2026-11-04T10:11:12.345Z");
@@ -56,6 +56,28 @@ describe("rewind fork", () => {
     const many = Array.from({ length: 7 }, () => ({ type: "image", data: "AAAA", mimeType: "image/png" }));
     expect(forkDraft(entryWith(many)).images).toHaveLength(5);
     expect(forkDraft(entryWith([{ type: "image", data: "A".repeat(5_242_881), mimeType: "image/png" }, { type: "image", mimeType: "image/png" }])).images).toEqual([]);
+  });
+
+  it("session_fork_keeps_the_leaf_and_only_its_branch", () => {
+    const ids = (leaf: string): string[] =>
+      buildSessionFork(HEADER, ENTRIES, leaf, "new-id", NOW, "/s/orig.jsonl").text.trimEnd().split("\n").slice(1).map((line) => JSON.parse(line).id);
+    expect(ids("a2")).toEqual(["m0", "u1", "a1", "u2", "a2"]);
+    expect(ids("u3")).toEqual(["m0", "u1", "a1", "u3"]);
+    expect(() => buildSessionFork(HEADER, ENTRIES, "missing", "new-id", NOW, "/s/orig.jsonl")).toThrow();
+  });
+
+  it("write_session_fork_copies_the_source_lines_verbatim", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-tabs-fork-"));
+    const source = join(dir, "2026-11-04T09-00-00-000Z_orig-id.jsonl");
+    const raw = [HEADER, ...ENTRIES].map((entry) => JSON.stringify(entry));
+    writeFileSync(source, raw.join("\n") + "\n");
+    const result = await writeSessionFork(source, "a2", NOW);
+    expect(dirname(result.sessionPath)).toBe(dir);
+    expect(statSync(result.sessionPath).mode & 0o777).toBe(0o600);
+    const lines = readFileSync(result.sessionPath, "utf8").trimEnd().split("\n");
+    expect(JSON.parse(lines[0] as string)).toMatchObject({ type: "session", id: result.sessionUuid, parentSession: source });
+    expect(lines.slice(1)).toEqual(raw.slice(1, 6));
+    expect(result.chain.map((entry) => entry["id"])).toEqual(["m0", "u1", "a1", "u2", "a2"]);
   });
 
   it("fork_file_name_is_like_omo", () => {

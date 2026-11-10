@@ -235,6 +235,8 @@ describe("ChatView", () => {
     const title = (): string | null | undefined => root.querySelector('[data-role="title"]')?.textContent;
     show({});
     expect(title()).toBe("Новая сессия");
+    show({ blocks: [{ kind: "user", id: "u0", text: "  почему\nтак?  " }] });
+    expect(title()).toBe("почему так?"); // until OmO titles the session after its first turn
     show({}, { tab: { modelMode: "auto", title: "Из вкладки", durableId: "d1" } });
     expect(title()).toBe("Из вкладки");
     show({ title: "Кэш каталога" }, { tab: { modelMode: "auto", title: "Из вкладки", durableId: "d1" } });

@@ -49,6 +49,12 @@ const ANTHROPIC_VERSION = "2023-06-01";
 const PROBE_PROMPT = "hi";
 const CAT_PREFIX = "!cat ";
 const PROBE_HINTS: readonly string[] = ["haiku", "mini", "flash"];
+const TITLE_SYSTEM =
+  "Name the topic of a conversation that starts with the user's message given inside <message> tags. " +
+  "Reply with the title only: 2-6 words, in the language of the message, no quotes, no trailing period. Never answer the message itself.";
+const TITLE_MESSAGE_MAX = 2_000;
+const TITLE_MAX_TOKENS = 60;
+const PROTOCOL_ORDER: readonly GatewayProtocol[] = ["anthropic-messages", "openai-completions", "openai-responses"];
 const MIN_SECRET_LENGTH = 4;
 
 type FetchFn = typeof fetch;
@@ -254,6 +260,55 @@ export async function probe(spec: GatewaySpec, key: string, model: string, fetch
         ? ["/responses", { model, max_output_tokens: 16, input: PROBE_PROMPT }] // 16 is the API's minimum
         : ["/chat/completions", { model, max_tokens: 1, messages }];
   await request(spec, key, `${trimBase(spec.baseUrl)}${endpoint}`, { method: "POST", headers: headers(spec, key, true), body: JSON.stringify(body) }, fetchFn);
+}
+
+/** The reply's text, whatever the protocol's shape; empty when there is none. */
+function replyText(protocol: GatewayProtocol, reply: unknown): string {
+  const body = asRecord(reply);
+  const parts = (value: unknown): string[] =>
+    Array.isArray(value) ? value.flatMap((part) => (typeof asRecord(part)?.["text"] === "string" ? [asRecord(part)?.["text"] as string] : [])) : [];
+  if (protocol === "anthropic-messages") return parts(body?.["content"]).join("");
+  if (protocol === "openai-completions") {
+    const choice = Array.isArray(body?.["choices"]) ? asRecord(body["choices"][0]) : undefined;
+    return text(asRecord(choice?.["message"])?.["content"]) ?? "";
+  }
+  const output = Array.isArray(body?.["output"]) ? body["output"] : [];
+  return output.flatMap((item) => parts(asRecord(item)?.["content"])).join("");
+}
+
+/** First line, quotes and a trailing period gone. */
+function cleanTitle(raw: string): string {
+  const line = raw.trim().split("\n")[0] ?? "";
+  return line.replace(/^[\s"'«“*#]+|[\s"'»”*.]+$/g, "").trim();
+}
+
+/**
+ * A short topic title for a conversation's first message, from the cheapest model of the first gateway that answers
+ * (Anthropic ones first). Undefined when no gateway gives one: the caller falls back to the message itself.
+ */
+export async function generateTitle(paths: EnvPaths, message: string, fetchFn: FetchFn = fetch): Promise<string | undefined> {
+  const input = `<message>\n${message.slice(0, TITLE_MESSAGE_MAX)}\n</message>`;
+  const gateways = knownGateways(paths).sort((a, b) => PROTOCOL_ORDER.indexOf(a.spec.protocol) - PROTOCOL_ORDER.indexOf(b.spec.protocol));
+  for (const { spec, provider, cached, keyFile } of gateways) {
+    const key = readKey(keyFile);
+    const ids = (cached.models ?? servedFromProvider(provider)).map((model) => model.id);
+    if (key === undefined || ids.length === 0) continue;
+    const model = pickProbeModel(ids);
+    const [endpoint, body]: [string, Record<string, unknown>] =
+      spec.protocol === "anthropic-messages"
+        ? ["/v1/messages", { model, max_tokens: TITLE_MAX_TOKENS, system: TITLE_SYSTEM, messages: [{ role: "user", content: input }] }]
+        : spec.protocol === "openai-responses"
+          ? ["/responses", { model, max_output_tokens: TITLE_MAX_TOKENS, instructions: TITLE_SYSTEM, input }]
+          : ["/chat/completions", { model, max_tokens: TITLE_MAX_TOKENS, messages: [{ role: "system", content: TITLE_SYSTEM }, { role: "user", content: input }] }];
+    try {
+      const reply = await request(spec, key, `${trimBase(spec.baseUrl)}${endpoint}`, { method: "POST", headers: headers(spec, key, true), body: JSON.stringify(body) }, fetchFn);
+      const title = cleanTitle(replyText(spec.protocol, reply));
+      if (title !== "") return title;
+    } catch {
+      // the next gateway, or the message itself
+    }
+  }
+  return undefined;
 }
 
 /** `!cat <path>` runs through a shell: the path is single-quoted so a space or metacharacter stays data. */
