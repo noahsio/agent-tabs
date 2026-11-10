@@ -1,4 +1,4 @@
-import type { Block } from "../src/chat/model";
+import { untitledName, type Block } from "../src/chat/model";
 import { applyDelta } from "../src/panel/delta";
 import type { PendingView } from "../src/guard/admin";
 import type {
@@ -218,7 +218,7 @@ export class ChatView {
     this.last = message;
     const { state, tab } = message;
 
-    const title = state.title ?? tab.title ?? UNTITLED;
+    const title = state.title ?? tab.title ?? untitledName(state.blocks) ?? UNTITLED;
     this.header.update(title, tab.durableId, tab.pinned === true, state.running);
     this.sessionsPopover.setDraft(tab.draft === true ? title : undefined);
     this.composer.update(message);

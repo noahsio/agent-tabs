@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { tabTitle } from "./tabTitle";
 import * as vscode from "vscode";
-import type { ModelRef } from "../chat/model";
+import { normalizeSessionName, untitledName, type ModelRef } from "../chat/model";
 import { initialState } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import type { DeferredInbox } from "../deferred/inbox";
@@ -11,7 +11,7 @@ import type { ApprovalPanel, GuardApprovals } from "../guard/approvals";
 import type { Checkpointer } from "../rewind/checkpointer";
 import type { ForkDraft } from "../rewind/fork";
 import { claimAutoUnwedge, releaseAutoUnwedge } from "../sessions/autoUnwedge";
-import { SessionController, normalizeSessionName, type CommandRow, type TabState } from "../sessions/controller";
+import { SessionController, type CommandRow, type TabState } from "../sessions/controller";
 import type { ReapOutcome } from "../sessions/reapHost";
 import { heldPause, ReconnectLoop } from "../sessions/reconnect";
 import { classifyOpen, giveUpText, heldByAnotherHostCopy, type Holder } from "../sessions/refusal";
@@ -95,6 +95,8 @@ export type PanelHost = {
   hiddenCommands?: () => readonly string[];
   /** This environment's model ladder, read on demand so an edit in the modal counts from the next failure on. */
   ladder?: () => Ladder;
+  /** A topic title for a session's first message (one cheap model call); absent while the environment is incomplete. */
+  titler?: (message: string) => Promise<string | undefined>;
   /** The window's approval cards (one guard subscription for every tab); absent while the environment is incomplete. */
   guard?: Pick<GuardApprovals, "answer" | "replay" | "panelsChanged">;
   deferred?: Pick<DeferredInbox, "refresh" | "answer">;
@@ -376,6 +378,7 @@ export class ChatPanel implements ApprovalPanel {
     this.controller = controller;
     const ladder = this.host.ladder;
     if (ladder !== undefined) controller.setLadder({ ladder, view: (view) => this.poster.send({ type: "ladder", view: view ?? null }) });
+    if (this.host.titler !== undefined) controller.setTitler(this.host.titler);
     const checkpointer = this.host.checkpointer;
     if (checkpointer !== undefined) {
       const manager = daemon.value;
@@ -1107,7 +1110,7 @@ export class ChatPanel implements ApprovalPanel {
     const thinkingLevels = this.thinkingLevels ?? this.host.catalog.thinkingLevels;
     const hiddenCommands = this.host.hiddenCommands?.();
     this.track(tab.sessionPath);
-    this.setTitle(state.title ?? tab.title ?? UNTITLED);
+    this.setTitle(state.title ?? tab.title ?? untitledName(state.blocks) ?? UNTITLED);
     // A connection failure the quiet line over the composer already shows (it is handed the controller's own error
     // text) must not be echoed into the red banner too — that duplication is the transient error the person asked to
     // be rid of. The banner keeps a must-act `this.banner`, and a session error the retry line is not already showing.
