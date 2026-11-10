@@ -916,6 +916,10 @@ function onEntryAppended(s: ChatState, frame: Json): ChatState {
  */
 const HOUSEKEEPING = /^(hot-)?reload(ing|ed)?\b/i;
 
+/** OmO 5.1.59, in English, whenever a session whose goal ran many automatic continuations is opened again. */
+const SUPPRESSED_CONTINUATION = /^Goal auto-continuation suppressed for this resumed session \((\d+) historical continuations?\)/;
+const SUPPRESSED_NOTICE_ID = "goal-continuation-suppressed";
+
 function onUiRequest(s: ChatState, frame: Json): ChatState {
   const method = frame["method"];
   const id = asString(frame["id"]);
@@ -923,6 +927,12 @@ function onUiRequest(s: ChatState, frame: Json): ChatState {
     const text = asString(frame["message"]);
     if (!id || !text) return s;
     if (stoppedGoalNotice(frame) !== undefined) return s; // handled, in Russian, by the controller
+    const suppressed = SUPPRESSED_CONTINUATION.exec(text.trim());
+    if (suppressed !== null) {
+      // said on every reopen (the idle sweep parks every 30 min): one line, in Russian, moved to the end
+      const line = `Цель не продолжается сама после переоткрытия сессии (автопродолжений уже ${suppressed[1]}) — продолжится с вашим следующим сообщением`;
+      return { ...s, blocks: [...s.blocks.filter((block) => block.id !== SUPPRESSED_NOTICE_ID), notice(SUPPRESSED_NOTICE_ID, "info", line)] };
+    }
     const type = frame["notifyType"];
     const level = type === "error" ? "error" : type === "warning" || type === "warn" ? "warn" : "info";
     if (level === "info" && HOUSEKEEPING.test(text.trim())) return s;

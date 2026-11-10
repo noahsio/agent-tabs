@@ -1017,6 +1017,23 @@ describe("a goal OmO stopped is not a turn waiting for an answer", () => {
     expect(applyFrame(initialState(), frame(undefined)).dialogs[0]?.blocking).toBeUndefined();
   });
 
+  // Seen live (2026-11-10): OmO says this on every reopen of a session whose goal ran many continuations; the idle sweep
+  // parks and the tab reopens it every 30 minutes, so the feed filled with the same English line.
+  it("omo_s_suppressed_goal_continuation_shows_once_in_russian_at_the_end", () => {
+    const SUPPRESSED = "Goal auto-continuation suppressed for this resumed session (18 historical continuations). Send a message to resume.";
+    const notify = (state: ReturnType<typeof initialState>, id: string, message: string) =>
+      applyFrame(state, { type: "extension_ui_request", method: "notify", id, message, notifyType: "info" });
+    let state = notify(initialState(), "n1", SUPPRESSED);
+    state = notify(state, "n2", "Другое уведомление");
+    state = notify(state, "n3", SUPPRESSED);
+    const texts = state.blocks.map((block) => (block.kind === "notice" ? block.text : block.kind));
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toBe("Другое уведомление");
+    expect(texts[1]).toMatch(/^Цель не продолжается сама после переоткрытия сессии/);
+    expect(texts[1]).toContain("18");
+    expect(texts.join("\n")).not.toMatch(/suppressed/);
+  });
+
   it("omo_s_english_resume_notice_never_reaches_the_feed", () => {
     const notify = (message: string) => applyFrame(initialState(), { type: "extension_ui_request", method: "notify", id: "n1", message, notifyType: "info" });
     for (const status of ["blocked", "paused"]) {
