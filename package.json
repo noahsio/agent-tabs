@@ -15,6 +15,7 @@
     "onCommand:agentTabs.newSession",
     "onCommand:agentTabs.openSession",
     "onCommand:agentTabs.restartHost",
+    "onCommand:agentTabs.toggleFocusView",
     "onWebviewPanel:agentTabs.chat"
   ],
   "contributes": {
@@ -34,6 +35,17 @@
       {
         "command": "agentTabs.restartHost",
         "title": "Agent Tabs: Перезапустить OmO"
+      },
+      {
+        "command": "agentTabs.toggleFocusView",
+        "title": "Agent Tabs: Режим фокуса"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "agentTabs.toggleFocusView",
+        "key": "ctrl+alt+f",
+        "when": "activeWebviewPanelId == 'agentTabs.chat'"
       }
     ],
     "menus": {
@@ -67,6 +79,12 @@
               "value"
             ]
           }
+        },
+        "agentTabs.focusView": {
+          "type": "boolean",
+          "scope": "application",
+          "default": false,
+          "description": "Режим фокуса: в ленте видны только ваши сообщения и ответы агента, шаги работы свёрнуты в одну строку и раскрываются по клику. Переключается в меню «/», командой «Agent Tabs: Режим фокуса» или ctrl+alt+f."
         },
         "agentTabs.omoPath": {
           "type": "string",

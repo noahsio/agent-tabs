@@ -695,6 +695,23 @@ describe("ChatPanel", () => {
     expect(newSession).toHaveBeenCalledWith(2);
   });
 
+  it("the_focus_view_is_the_windows_setting_carried_in_every_state", async () => {
+    let on = false;
+    const setFocusView = vi.fn(async (enabled: boolean) => {
+      on = enabled;
+    });
+    const { receive, posted, chat } = await openAttached({ focusView: () => on, setFocusView });
+    expect(posted.at(-1)?.focusView).toBeUndefined();
+    receive({ type: "setFocusView", enabled: true });
+    await settle(() => setFocusView.mock.calls.length === 1);
+    expect(setFocusView).toHaveBeenCalledWith(true);
+    chat.focusViewChanged(); // what the window does once the setting is stored
+    await settle(() => posted.at(-1)?.focusView === true);
+    on = false;
+    chat.focusViewChanged();
+    await settle(() => posted.at(-1)?.focusView === undefined);
+  });
+
   it("open_session_and_new_session_answer_while_this_tabs_own_session_is_still_opening", async () => {
     const fake = fakePanel();
     const openSession = vi.fn(async () => undefined);

@@ -43,6 +43,8 @@ export type StateMessage = {
   hiddenCommands?: readonly string[];
   /** False when «Переподключить» cannot help (e.g. the environment is incomplete). */
   reconnectable: boolean;
+  /** The window's focus view is on: the feed folds each turn's steps (absent: off). */
+  focusView?: true;
 };
 
 /**
@@ -64,6 +66,8 @@ export type StateDelta = {
   commands?: CommandRow[];
   thinkingLevels?: string[];
   hiddenCommands?: readonly string[];
+  /** Always the current value, like `reconnectable`. */
+  focusView?: true;
 };
 
 /** One row of the sessions list. */
@@ -317,6 +321,8 @@ export type WebviewMessage =
   | { type: "listSessions" }
   | { type: "openSession"; sessionPath: string }
   | { type: "newSession" }
+  /** The focus view switched from the «/» menu: the window's setting, so every tab follows. */
+  | { type: "setFocusView"; enabled: boolean }
   /** «Перезапустить OmO» from the actions menu: the extension's command, with its confirmation. */
   | { type: "restartHost" }
   /** The context ring: compact the conversation now. */
@@ -450,6 +456,8 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
       if (typeof name !== "string" || (sessionPath !== undefined && typeof sessionPath !== "string")) return undefined;
       return { type: "rename", name, ...(sessionPath !== undefined ? { sessionPath } : {}) };
     }
+    case "setFocusView":
+      return typeof raw["enabled"] === "boolean" ? { type: "setFocusView", enabled: raw["enabled"] } : undefined;
     case "pin":
       return typeof raw["durableId"] === "string" && typeof raw["pinned"] === "boolean"
         ? { type: "pin", durableId: raw["durableId"], pinned: raw["pinned"] }

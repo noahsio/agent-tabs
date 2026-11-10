@@ -25,6 +25,7 @@ export function diffState(previous: StateMessage, next: StateMessage): StateDelt
     ...(next.commands !== undefined && next.commands !== previous.commands ? { commands: next.commands } : {}),
     ...(next.thinkingLevels !== undefined && next.thinkingLevels !== previous.thinkingLevels ? { thinkingLevels: next.thinkingLevels } : {}),
     ...(next.hiddenCommands !== undefined && next.hiddenCommands !== previous.hiddenCommands ? { hiddenCommands: next.hiddenCommands } : {}),
+    ...(next.focusView === true ? { focusView: true as const } : {}),
   };
 }
 
@@ -48,5 +49,6 @@ export function applyDelta(base: StateMessage, delta: StateDelta): StateMessage 
     ...(commands !== undefined ? { commands } : {}),
     ...(thinkingLevels !== undefined ? { thinkingLevels } : {}),
     ...(hiddenCommands !== undefined ? { hiddenCommands } : {}),
+    ...(delta.focusView === true ? { focusView: true as const } : {}),
   };
 }

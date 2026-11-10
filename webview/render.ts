@@ -170,6 +170,9 @@ export class ChatView {
       mode: () => this.composer.mode,
       setMode: (mode) => this.composer.setMode(mode),
       openSettings: () => this.settingsModal.open("connections"),
+      focusView: () => this.last?.focusView === true,
+      // The window's setting: the host stores it and every tab (this one too) gets it back in its state.
+      setFocusView: (enabled) => this.post({ type: "setFocusView", enabled }),
       done: choose,
     });
 
@@ -229,6 +232,7 @@ export class ChatView {
     this.modelPopover.update(message);
     this.slashMenu.setHidden(message.hiddenCommands);
     this.slashMenu.setCommands(message.commands);
+    this.feed.setFocus(message.focusView === true);
     this.renderFeed(stick);
   }
 

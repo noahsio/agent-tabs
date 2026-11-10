@@ -135,6 +135,7 @@ describe("parseWebviewMessage", () => {
       { type: "openSession", sessionPath: "/p" },
       { type: "newSession" },
       { type: "forkSession" },
+      { type: "setFocusView", enabled: true },
       { type: "restartHost" },
       { type: "compact" },
       { type: "getImage", id: "i" },

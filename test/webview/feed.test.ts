@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Answer, Block } from "../../src/chat/model";
 import type { WebviewMessage } from "../../src/panel/protocol";
-import { DataUrlCache, Feed, type FeedImage } from "../../webview/feed";
+import { DataUrlCache, Feed, foldLabel, formatDuration, type FeedImage } from "../../webview/feed";
 
 let root: HTMLElement;
 let posted: WebviewMessage[];
@@ -1034,5 +1034,79 @@ describe("turn sections for the sticky sent bubbles", () => {
     feed.update([{ kind: "user", id: "u1", text: "первый" }, { ...streaming, text: "раз два" }], false); // the agent streamed on
     expect(entry("u1")).toBe(head); // the same sticky bubble element, never rebuilt — nothing jumps
     expect(entry("u1").parentElement).toBe(section); // and still in the same turn wrapper
+  });
+});
+
+describe("focus view", () => {
+  const tool = (id: string, state: "running" | "ok" | "error", name = "bash"): Block => ({ kind: "tool", id, name, summary: "ls", args: {}, output: "", truncated: false, state });
+  const thought = (id: string, extra: Partial<Extract<Block, { kind: "assistant" }>> = {}): Block => ({ kind: "assistant", id, text: "", thinking: "план", streaming: false, ...extra });
+  const turn: Block[] = [
+    { kind: "user", id: "u1", text: "почини" },
+    thought("a1", { thinkingMs: 4_000 }),
+    tool("t1", "ok"),
+    tool("t2", "error"),
+    { kind: "assistant", id: "a2", text: "Готово", thinking: "проверю", streaming: false, thinkingMs: 2_000 },
+    { kind: "user", id: "u2", text: "ещё" },
+    tool("t3", "running"),
+  ];
+  /** The timeline's rows in order: a block by its id, a folded run as fold:<first id>. */
+  const order = (): string[] =>
+    [...root.querySelectorAll<HTMLElement>(".entry")].map((row) => (row.dataset["fold"] !== undefined ? `fold:${row.dataset["fold"]}` : (row.dataset["block"] ?? "?")));
+  const fold = (key: string): HTMLButtonElement => root.querySelector(`[data-fold="${key}"] [data-role="fold"]`) as HTMLButtonElement;
+
+  it("folds_each_run_of_steps_and_keeps_the_messages_and_answers", () => {
+    feed.setFocus(true);
+    feed.update(turn, true, { activity: "tool", tool: "bash" });
+    expect(order()).toEqual(["u1", "fold:a1", "a2", "u2", "fold:t3"]);
+    expect(fold("a1").textContent).toBe("2 действия · 1 с ошибкой▸");
+    expect(root.querySelector('[data-fold="a1"] .step')?.classList.contains("error")).toBe(true);
+    expect(root.querySelector('[data-fold="t3"] .step')?.classList.contains("running")).toBe(true);
+    expect(entry("a2").textContent).toContain("Готово");
+    expect(entry("a2").querySelector("details.thinking")).toBeNull(); // an answer shows without its thinking
+    expect((root.querySelector('[data-role="indicator"]') as HTMLElement).hidden).toBe(false); // the live line still names the tool
+  });
+
+  it("a_folded_run_opens_and_closes_in_place", () => {
+    feed.setFocus(true);
+    feed.update(turn, false);
+    fold("a1").click();
+    expect(order()).toEqual(["u1", "fold:a1", "a1", "t1", "t2", "a2", "u2", "fold:t3"]);
+    expect(fold("a1").getAttribute("aria-expanded")).toBe("true");
+    feed.update([...turn.slice(0, 6), tool("t3", "ok")], false); // a new state keeps it open
+    expect(order()).toContain("t1");
+    fold("a1").click();
+    expect(order()).toEqual(["u1", "fold:a1", "a2", "u2", "fold:t3"]);
+  });
+
+  it("switching_off_shows_every_step_again", () => {
+    feed.setFocus(true);
+    feed.update(turn, false);
+    feed.setFocus(false);
+    expect(order()).toEqual(["u1", "a1", "t1", "t2", "a2", "u2", "t3"]);
+    expect(entry("a2").querySelector("details.thinking")).not.toBeNull();
+  });
+
+  it("an_approval_after_a_step_is_never_folded_away", () => {
+    feed.setFocus(true);
+    feed.update(turn.slice(0, 4), true);
+    feed.addGuardRow("g1", document.createElement("div"), "t1");
+    const rows = [...root.querySelectorAll<HTMLElement>(".entry")].map((row) => (row.classList.contains("guard-entry") ? "guard" : (row.dataset["fold"] ?? row.dataset["block"])));
+    expect(rows).toEqual(["u1", "a1", "guard", "t2"]); // the run ends at the approval; the next step starts its own
+  });
+
+  it("thinking_folded_away_leaves_the_bottom_line_to_say_it", () => {
+    feed.setFocus(true);
+    feed.update([{ kind: "user", id: "u1", text: "x" }, thought("a1", { thinkingStartedAt: Date.now() })], true, { activity: "thinking" });
+    expect(fold("a1").textContent).toBe("Размышляю…▸");
+    expect((root.querySelector('[data-role="indicator"]') as HTMLElement).hidden).toBe(false);
+  });
+
+  it("fold_label_names_actions_thinking_or_steps", () => {
+    expect(foldLabel([tool("t", "ok")])).toBe("1 действие");
+    expect(foldLabel([tool("t", "ok"), tool("u", "ok"), tool("v", "ok"), tool("w", "ok"), tool("x", "ok")])).toBe("5 действий");
+    expect(foldLabel([thought("a", { thinkingMs: 4_000 }), thought("b", { thinkingMs: 3_000 })])).toBe(`Размышлял ${formatDuration(7_000)}`);
+    expect(foldLabel([thought("a")])).toBe("Размышления");
+    const todo: Block = { kind: "tool", id: "td", name: "todo", summary: "", args: {}, output: "", truncated: false, state: "ok", todo: { op: "done", task: "x" } } as Block;
+    expect(foldLabel([todo, thought("a")])).toBe("2 шага");
   });
 });

@@ -93,6 +93,10 @@ export type PanelHost = {
   firstRun?: () => Promise<boolean>;
   /** The «/» menu's hidden commands (the same array until they change); absent while the environment is incomplete. */
   hiddenCommands?: () => readonly string[];
+  /** The window's focus view (the `agentTabs.focusView` setting); absent: off. */
+  focusView?: () => boolean;
+  /** Stores the focus view; every tab hears of it through `focusViewChanged`. */
+  setFocusView?: (enabled: boolean) => Promise<void>;
   /** This environment's model ladder, read on demand so an edit in the modal counts from the next failure on. */
   ladder?: () => Ladder;
   /** A topic title for a session's first message (one cheap model call); absent while the environment is incomplete. */
@@ -560,6 +564,7 @@ export class ChatPanel implements ApprovalPanel {
       message.type === "archive" ||
       message.type === "openSession" ||
       message.type === "newSession" ||
+      message.type === "setFocusView" ||
       message.type === "restartHost" ||
       message.type === "settingsGet" ||
       message.type === "settingsAction" ||
@@ -729,6 +734,14 @@ export class ChatPanel implements ApprovalPanel {
         return;
       case "newSession":
         this.host.newSession(this.panel.viewColumn); // in the group of the tab it was asked from
+        return;
+      case "setFocusView":
+        try {
+          await this.host.setFocusView?.(message.enabled);
+        } catch (error) {
+          this.warn(`Не удалось переключить режим фокуса: ${errorText(error)}`);
+          this.publish(); // the menu shows the setting as it stayed
+        }
         return;
       case "restartHost":
         this.host.restartHost();
@@ -1109,6 +1122,7 @@ export class ChatPanel implements ApprovalPanel {
     const commands = this.commands ?? this.host.catalog.commands;
     const thinkingLevels = this.thinkingLevels ?? this.host.catalog.thinkingLevels;
     const hiddenCommands = this.host.hiddenCommands?.();
+    const focusView = this.host.focusView?.() === true;
     this.track(tab.sessionPath);
     this.setTitle(state.title ?? tab.title ?? untitledName(state.blocks) ?? UNTITLED);
     // A connection failure the quiet line over the composer already shows (it is handed the controller's own error
@@ -1124,8 +1138,14 @@ export class ChatPanel implements ApprovalPanel {
       ...(commands !== undefined ? { commands } : {}),
       ...(thinkingLevels !== undefined ? { thinkingLevels } : {}),
       ...(hiddenCommands !== undefined ? { hiddenCommands } : {}),
+      ...(focusView ? { focusView: true as const } : {}),
     };
     this.poster.push(message);
+  }
+
+  /** The window's focus view changed (menu, command or settings): this tab shows it. */
+  focusViewChanged(): void {
+    if (!this.disposed) this.publish();
   }
 
   /** Keeps the registry key equal to the session's current file. */
