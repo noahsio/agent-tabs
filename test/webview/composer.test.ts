@@ -654,7 +654,7 @@ describe("Composer", () => {
       caret("раз ".length);
       await attach("a.png", "b.png", "c.png");
       expect(pills(input()).map((pill) => pill.querySelector('[data-role="pill-name"]')?.textContent)).toEqual(["a.png", "b.png", "c.png"]);
-      expect(text(input())).toBe("раз \uFFFC\uFFFC\uFFFCдва");
+      expect(text(input())).toBe("раз \uFFFC \uFFFC \uFFFC два");
     });
 
     it("the_message_carries_a_label_where_each_pill_stands_and_the_pictures_in_that_order", async () => {
@@ -678,7 +678,7 @@ describe("Composer", () => {
       caret(0);
       await attach("first.png");
       press("Enter");
-      expect(sent().text).toBe("[картинка 1]конец[картинка 2]");
+      expect(sent().text).toBe("[картинка 1] конец [картинка 2] ");
       expect(sent().images?.map((image) => image.name)).toEqual(["first.png", "last.png"]);
     });
 
@@ -689,7 +689,7 @@ describe("Composer", () => {
       await composer.addFiles([png("shelf.png")]); // «+»: no caret to aim at
       expect(thumbs().map((thumb) => thumb.querySelector('[data-role="thumb-name"]')?.textContent)).toEqual(["shelf.png"]);
       press("Enter");
-      expect(sent().text).toBe("смотри [картинка 1]");
+      expect(sent().text).toBe("смотри [картинка 1] ");
       expect(sent().images?.map((image) => image.name)).toEqual(["inline.png", "shelf.png"]);
     });
 
@@ -731,7 +731,7 @@ describe("Composer", () => {
       type(input(), "до после");
       caret("до ".length);
       await attach("x.png");
-      expect(text(input())).toBe("до \uFFFCпосле");
+      expect(text(input())).toBe("до \uFFFC после");
 
       caret("до \uFFFC".length);
       expect(press("Backspace").defaultPrevented).toBe(true);
@@ -759,7 +759,7 @@ describe("Composer", () => {
       input().dispatchEvent(new Event("input", { bubbles: true }));
       press("Enter");
       expect(sent().images).toBeUndefined();
-      expect(sent().text).toBe("раз ");
+      expect(sent().text).toBe("раз  "); // by hand the person deletes the space too
     });
 
     it("the_sixth_picture_in_the_line_is_marked_like_the_sixth_on_the_shelf", async () => {
@@ -769,7 +769,7 @@ describe("Composer", () => {
       expect(role("attach-notes").textContent).toContain("6.png — Не больше 5 картинок в сообщении");
       press("Enter");
       expect(sent().images).toHaveLength(5);
-      expect(sent().text).toBe("[картинка 1][картинка 2][картинка 3][картинка 4][картинка 5]");
+      expect(sent().text).toBe("[картинка 1] [картинка 2] [картинка 3] [картинка 4] [картинка 5]  ");
     });
 
     it("the_prompt_shows_until_there_is_a_word_or_a_pill", async () => {
@@ -814,7 +814,7 @@ describe("Composer", () => {
       caret("сюда ".length);
       input().dispatchEvent(withFiles("drop", [png("aimed.png")]));
       await vi.waitFor(() => expect(pills(input())[0]?.dataset["status"]).toBe("ready"));
-      expect(text(input())).toBe("сюда \uFFFC");
+      expect(text(input())).toBe("сюда \uFFFC ");
 
       app.dispatchEvent(withFiles("drop", [png("loose.png")]));
       await settled(1);

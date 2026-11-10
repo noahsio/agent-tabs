@@ -61,6 +61,27 @@ describe("the composer's text field", () => {
     expect(field.selectionStart).toBe("слева ".length + 1); // after the pill it just put there
   });
 
+  // The person asked for room around a picture: a real space on each side, so the chip never touches a word and the
+  // caret always has a place after it (at the end of the line especially), without doubling spaces already there.
+  it("a_pill_put_in_by_the_person_gets_a_space_on_each_side_unless_one_is_there", () => {
+    field.value = "слевасправа";
+    caret("слева".length);
+    field.insertPill(pill("1", "a.png"));
+    expect(field.value).toBe(`слева ${PILL} справа`);
+    expect(field.selectionStart).toBe("слева ".length + 2); // past the pill and its space
+
+    field.value = "конец ";
+    caret(field.value.length);
+    field.insertPill(pill("2", "b.png"));
+    expect(field.value).toBe(`конец ${PILL} `); // no second space before it; one after it for the caret
+    expect(field.selectionStart).toBe(field.value.length);
+
+    field.value = "";
+    field.insertPill(pill("3", "c.png"));
+    field.insertPill(pill("4", "d.png"));
+    expect(field.value).toBe(`${PILL} ${PILL} `);
+  });
+
   it("puts_several_pills_in_the_order_they_were_given", () => {
     field.value = "раз два";
     caret("раз ".length);
@@ -96,12 +117,12 @@ describe("the composer's text field", () => {
     expect(field.value).toBe("раз без картинки");
   });
 
-  it("removes_one_pill_by_key_and_leaves_the_text_alone", () => {
+  it("removes_one_pill_by_key_and_closes_the_gap_to_one_space", () => {
     field.value = "до  после";
     caret("до ".length);
     field.insertNode(pill("gone", "g.png"));
     expect(field.removePill("gone")).toBe(true);
-    expect(field.value).toBe("до  после");
+    expect(field.value).toBe("до после"); // the space that stood beside the picture goes with it
     expect(field.removePill("gone")).toBe(false);
   });
 

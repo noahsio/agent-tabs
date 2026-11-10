@@ -719,7 +719,7 @@ export class Composer {
     const placed = spot === "caret";
     const record = { ...attachment, placed };
     this.attachments.push(record);
-    if (placed) this.field.insertNode(this.pillFor(record));
+    if (placed) this.field.insertPill(this.pillFor(record));
     this.enforceLimits();
   }
 

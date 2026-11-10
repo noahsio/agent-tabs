@@ -157,6 +157,13 @@ export class TextField {
   removePill(key: string): boolean {
     const node = this.pill(key);
     if (node === undefined) return false;
+    // the space put in with it goes too, so taking a picture out leaves no double space (or a lone one at the start)
+    const parent = node.parentNode;
+    const at = parent === null ? undefined : serialize(this.element, { node: parent, offset: [...parent.childNodes].indexOf(node) }).at;
+    const text = this.value;
+    let next = node.nextSibling;
+    while (next instanceof Text && next.data === "") next = next.nextSibling;
+    if (at !== undefined && (at === 0 || /\s/.test(text[at - 1] ?? "")) && next instanceof Text && /^[ \u00a0]/.test(next.data)) next.data = next.data.slice(1);
     node.remove();
     this.refresh();
     return true;
@@ -210,6 +217,21 @@ export class TextField {
   insertNode(node: Element): void {
     if (this.edit("insertHTML", node.outerHTML)) return;
     this.insertNodes([node]);
+  }
+
+  /**
+   * A pill the person puts in, with a space on each side unless one is already there: the chip never touches a word,
+   * and the caret always has a place after it — at the end of the line too.
+   */
+  insertPill(node: Element): void {
+    const text = this.value;
+    const start = this.selectionStart;
+    const end = this.selectionEnd;
+    const before = start > 0 && !/\s/.test(text[start - 1] ?? "") ? " " : "";
+    const after = end < text.length && /\s/.test(text[end] ?? "") ? "" : " ";
+    // a trailing plain space at the end of a line would collapse; the field reads a no-break space back as a space
+    if (this.edit("insertHTML", `${before}${node.outerHTML}${after === "" ? "" : "&nbsp;"}`)) return;
+    this.insertNodes([...(before === "" ? [] : [document.createTextNode(before)]), node, ...(after === "" ? [] : [document.createTextNode(after)])]);
   }
 
   insertNodes(nodes: Node[]): void {

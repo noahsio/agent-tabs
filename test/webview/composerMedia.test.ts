@@ -60,12 +60,12 @@ describe("composer media", () => {
       images: ["first.png", "last.png", "shelf.png"].map((name) => ({ id: expect.any(String), dataUrl: `data:image/png;base64,${btoa(name)}` })),
       index: 1,
     });
-    expect(composer.field.value).toBe(`${PILL}text${PILL}`);
+    expect(composer.field.value).toBe(`${PILL} text ${PILL} `);
     root.querySelector<HTMLElement>('[data-role="thumb-view"]')?.click();
     expect(opened[1]?.index).toBe(2);
     pills(composer.input)[0]?.querySelector<HTMLElement>('[data-role="pill-remove"]')?.click();
     expect(opened).toHaveLength(2);
-    expect(composer.field.value).toBe(`text${PILL}`);
+    expect(composer.field.value).toBe(`text ${PILL} `);
   });
 
   it("recalls_literal_markers_and_edge_pills_without_duplicating_images", async () => {
@@ -80,7 +80,7 @@ describe("composer media", () => {
     const original = sent();
     history([{ kind: "user", id: original.id, text: original.text, images: original.images?.map((image, index) => ({ id: `image-${index}`, mimeType: image.mimeType, name: image.name })) }]);
     key("ArrowUp");
-    expect(composer.field.value).toBe(`${PILL}${literal}${PILL}`);
+    expect(composer.field.value).toBe(`${PILL}${literal}${PILL} `);
     expect(pills(composer.input)).toHaveLength(2);
     expect(root.querySelectorAll(".thumb")).toHaveLength(1);
     original.images?.forEach((image, index) => composer.image(`image-${index}`, `data:${image.mimeType};base64,${image.data}`));
@@ -100,7 +100,7 @@ describe("composer media", () => {
     key("ArrowUp");
     composer.field.setSelectionRange(composer.field.value.length);
     key("ArrowDown");
-    expect(composer.field.value).toBe(`${PILL}[картинка 1] draft`);
+    expect(composer.field.value).toBe(`${PILL} [картинка 1] draft`);
     expect(pills(composer.input)).toHaveLength(1);
     expect(root.querySelectorAll(".thumb")).toHaveLength(1);
   });
