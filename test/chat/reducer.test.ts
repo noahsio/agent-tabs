@@ -941,6 +941,18 @@ describe("a goal OmO stopped is not a turn waiting for an answer", () => {
     expect(applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(lifecycle))).toMatchObject({ running: false, activity: "idle" });
   });
 
+  // Measured live (omo 5.1.59, 2026-11-10): a turn that ends on a plain reply asking the person something (no question
+  // tool) leaves waiting_human with a `question` wait whose requestId is `question:<runId>:<n>` — a tool question carries
+  // the tool call id instead. Read as running, every message the person sent was steered into a queue nothing drained.
+  it("a_reply_that_ends_with_a_question_is_an_ended_turn_the_tab_is_idle", () => {
+    const lifecycle = {
+      state: "waiting_human",
+      runId: "r1",
+      waitingOn: { children: 0, background: [], human: [{ kind: "question", requestId: "question:r1:2", revision: 1 }] },
+    };
+    expect(applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(lifecycle))).toMatchObject({ running: false, activity: "idle" });
+  });
+
   it("a_blocking_question_still_runs", () => {
     const lifecycle = {
       state: "waiting_human",

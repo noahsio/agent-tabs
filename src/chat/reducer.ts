@@ -819,7 +819,12 @@ export function lifecycleRunning(lifecycle: unknown): boolean | undefined {
 function standingQuestion(lifecycle: Json): boolean {
   const waiting = lifecycle["waitingOn"];
   const background = isObject(waiting) && Array.isArray(waiting["background"]) ? waiting["background"] : [];
-  return background.some((wait) => isObject(wait) && wait["source"] === "ask-user");
+  if (background.some((wait) => isObject(wait) && wait["source"] === "ask-user")) return true;
+  // A turn that ended on a plain reply asking something (no question tool): OmO names that wait `question:<runId>:<n>`,
+  // where a tool question carries its tool call id (measured live, 5.1.59). The next user message is the answer.
+  const human = isObject(waiting) && Array.isArray(waiting["human"]) ? waiting["human"] : [];
+  return human.length > 0 && human.every((wait) => isObject(wait) &&
+    (ATTENTION_KINDS.has(String(wait["kind"])) || (wait["kind"] === "question" && String(wait["requestId"]).startsWith("question:"))));
 }
 
 /**
