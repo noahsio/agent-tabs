@@ -108,14 +108,21 @@ describe.skipIf(!hasChrome)("pictures standing in the line of text (headless Chr
     expect(pill.bottom).toBeGreaterThan(words.top);
   });
 
-  it("the_cross_keeps_its_room_so_hovering_never_moves_the_line", async () => {
+  it("the_cross_shows_over_the_name_on_hover_and_takes_no_room", async () => {
     const before = await rect(page, ".input .att");
-    const cross = await rect(page, '.input [data-role="pill-remove"]');
-    expect(cross.width).toBeGreaterThan(0); // room reserved, invisible until hovered
+    const name = await rect(page, ".input .att .lbl");
+    expect(before.right - name.right).toBeLessThanOrEqual(8); // no pocket kept for the ✕ after the name
     expect(await page.evaluate<string>(`getComputedStyle(document.querySelector('.input [data-role="pill-remove"]')).opacity`)).toBe("0");
+    // air on both sides, so the chip does not stick to the words around it
+    const margins = await page.evaluate<number[]>(`(() => { const s = getComputedStyle(document.querySelector(".input .att")); return [parseFloat(s.marginLeft), parseFloat(s.marginRight)]; })()`);
+    for (const margin of margins) expect(margin).toBeGreaterThanOrEqual(4);
 
     await page.move({ x: Math.round((before.left + before.right) / 2), y: Math.round((before.top + before.bottom) / 2) });
     await waitFor(page, `getComputedStyle(document.querySelector('.input [data-role="pill-remove"]')).opacity === "1"`);
+    await shot(page, "b-composer-pill-hover");
+    const cross = await rect(page, '.input [data-role="pill-remove"]');
+    expect(cross.left).toBeGreaterThanOrEqual(before.left); // over the chip's own end, on top of the name
+    expect(cross.right).toBeLessThanOrEqual(before.right);
     const after = await rect(page, ".input .att");
     expect(after.width).toBe(before.width); // the ✕ appearing does not re-wrap anything
     expect(after.left).toBe(before.left);

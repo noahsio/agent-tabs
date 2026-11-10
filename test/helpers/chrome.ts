@@ -90,9 +90,12 @@ export async function openPage(html: string, size = { width: 900, height: 700 })
   const dir = mkdtempSync(join(tmpdir(), "agent-tabs-chrome-"));
   const file = join(dir, "page.html");
   writeFileSync(file, html);
+  // Inside an agent's macOS sandbox Chrome's own sandbox cannot start (nested sandboxes are refused, the GPU process
+  // dies and Chrome quits). AGENT_TABS_CHROME_NO_SANDBOX=1 runs the shell without it there: the page is our own bundle.
+  const nested = process.env["AGENT_TABS_CHROME_NO_SANDBOX"] === "1" ? ["--no-sandbox"] : [];
   const chrome: ChildProcess = spawn(
     CHROME,
-    ["--remote-debugging-pipe", `--user-data-dir=${join(dir, "profile")}`, `--window-size=${size.width},${size.height}`, "--no-first-run", "about:blank"],
+    [...nested, "--remote-debugging-pipe", `--user-data-dir=${join(dir, "profile")}`, `--window-size=${size.width},${size.height}`, "--no-first-run", "about:blank"],
     { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] },
   );
   running.add(chrome);

@@ -2323,15 +2323,32 @@ button.stop i {
   font-weight: 500;
 }
 
-/* The ✕ keeps its space at all times: appearing on hover must not re-wrap the line. */
+/* The ✕ takes no room: on hover it sits over the end of the name, so it never re-wraps the line or leaves a pocket. */
+.att {
+  position: relative;
+}
+
 .att .xx {
-  flex: none;
-  width: 12px;
-  text-align: center;
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  transform: translateY(-50%);
+  border-radius: 3px;
+  background: var(--chip-hover);
   color: var(--muted);
   font-size: 9px;
   opacity: 0;
+  pointer-events: none;
   cursor: pointer;
+}
+
+/* Air on both sides in the input, so a chip does not stick to the words around it. */
+.input .att {
+  margin: 0 4px;
 }
 
 .att:hover {
@@ -2341,6 +2358,7 @@ button.stop i {
 
 .att:hover .xx {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .att .xx:hover {

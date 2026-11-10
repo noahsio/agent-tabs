@@ -854,7 +854,7 @@ export class Composer {
     this.errors.replaceChildren(...notes);
   }
 
-  /** The pill a picture takes in the text: the same chip as the shelf's, 20 px tall, with room for its ✕ at all times. */
+  /** The pill a picture takes in the text: the same chip as the shelf's, 20 px tall; its ✕ shows over the name on hover. */
   private pillFor(attachment: Attachment): HTMLElement {
     const node = el("span", { class: "att", "data-role": "pill", "data-key": attachment.key, contenteditable: "false" });
     this.paintPill(node, attachment);
