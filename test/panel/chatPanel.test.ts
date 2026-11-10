@@ -1193,6 +1193,22 @@ describe("ChatPanel", () => {
       expect(daemon.requests.filter((request) => request["type"] === "set_session_name").map((request) => request["name"])).toEqual(["Починить вход (fork 2)"]);
     });
 
+    it("fork_session_copies_the_whole_conversation_into_a_new_tab_without_a_draft", async () => {
+      const { sessionFile, checkpointer } = await rewindable();
+      const fake = fakePanel();
+      const openFork = vi.fn();
+      ChatPanel.restore(host({ checkpointer, openFork }), fake.panel, { kind: "attach", sessionPath: sessionFile });
+      await settle(() => daemon.requests.some((request) => request["type"] === "get_available_models"));
+      fake.receive({ type: "forkSession" });
+      await settle(() => openFork.mock.calls.length === 1);
+      const [path, draft, column] = openFork.mock.calls[0] as unknown as [string, unknown, unknown];
+      expect(dirname(path)).toBe(dirname(sessionFile));
+      expect(draft).toBeUndefined();
+      expect(column).toBe(2);
+      const ids = readFileSync(path, "utf8").trimEnd().split("\n").slice(1).map((line) => (JSON.parse(line) as { id: string }).id);
+      expect(ids).toEqual(["u1", "a1", "r1"]);
+    });
+
     it("rewind_request_routes_to_the_service_and_answers_rewound", async () => {
       const { sessionFile, checkpointer, repo } = await rewindable();
       const fake = fakePanel();

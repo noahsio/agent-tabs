@@ -100,8 +100,8 @@ export type PanelHost = {
   deferred?: Pick<DeferredInbox, "refresh" | "answer">;
   /** Snapshots and the checkpoint log; absent when the environment is incomplete. */
   checkpointer?: Checkpointer;
-  /** Opens a forked session in a new tab whose composer starts with `draft`; the tab names the session `name` once it is open. */
-  openFork(sessionPath: string, draft: ForkDraft, column?: vscode.ViewColumn, name?: string): void;
+  /** Opens a forked session in a new tab whose composer starts with `draft` (if any); the tab names the session `name` once it is open. */
+  openFork(sessionPath: string, draft: ForkDraft | undefined, column?: vscode.ViewColumn, name?: string): void;
   /**
    * Stops a second copy of this environment's own host that holds a session file, when every proof of safety holds —
    * `force` is the person's own say-so, which skips the proofs of idleness and keeps those of attribution. One attempt
@@ -778,6 +778,15 @@ export class ChatPanel implements ApprovalPanel {
           // In the feed as well as a toast: a toast is easy to miss (do-not-disturb), and «nothing happened» is not an answer.
           this.host.log(`Ответвление не удалось: ${result.reason}`);
           this.controller?.note("warn", `Не удалось ответвить разговор: ${result.reason}`);
+          this.warn(result.reason);
+        }
+        return;
+      }
+      case "forkSession": {
+        const result = this.actions ? await this.actions.forkSession() : { ok: false as const, reason: NOT_OPEN };
+        if (!result.ok) {
+          this.host.log(`Ответвление сессии не удалось: ${result.reason}`);
+          this.controller?.note("warn", `Не удалось ответвить сессию: ${result.reason}`);
           this.warn(result.reason);
         }
         return;

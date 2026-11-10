@@ -48,9 +48,28 @@ export function buildFork(
   const lineage = ancestors(entries, selectedEntryId);
   if (!isUserEntry(lineage[lineage.length - 1])) throw new Error(`entry ${selectedEntryId} is not a user message`);
   const chain = lineage.slice(0, -1);
+  return { text: forkText(header, chain, id, now, sourcePath, raw), chain };
+}
+
+/** The fork of the conversation as it stands: the leaf's ancestors, root first, the leaf itself included. */
+export function buildSessionFork(
+  header: Entry,
+  entries: Entry[],
+  leafId: string,
+  id: string,
+  now: Date,
+  sourcePath: string,
+  raw?: ReadonlyMap<string, string>,
+): { text: string; chain: Entry[] } {
+  const chain = ancestors(entries, leafId);
+  if (chain.length === 0) throw new Error(`entry ${leafId} is not in the session file`);
+  return { text: forkText(header, chain, id, now, sourcePath, raw), chain };
+}
+
+function forkText(header: Entry, chain: Entry[], id: string, now: Date, sourcePath: string, raw?: ReadonlyMap<string, string>): string {
   const head = JSON.stringify({ ...header, id, timestamp: now.toISOString(), parentSession: sourcePath });
   const lines = chain.map((entry) => raw?.get(entry["id"] as string) ?? JSON.stringify(entry));
-  return { text: [head, ...lines].join("\n") + "\n", chain };
+  return [head, ...lines].join("\n") + "\n";
 }
 
 /** The session file: its header and every entry with the exact line it was stored as (a torn or malformed line is skipped). */
@@ -118,6 +137,25 @@ export async function writeFork(
   const sessionUuid = randomUUID();
   const { text, chain } = buildFork(header, entries, selectedEntryId, sessionUuid, now, sourcePath, raw);
   const selected = entries.find((entry) => entry["id"] === selectedEntryId) as Entry;
+  const sessionPath = await writeForkFile(sourcePath, sessionUuid, now, text);
+  return { sessionPath, sessionUuid, chain, draft: forkDraft(selected) };
+}
+
+/** Writes the fork of the whole conversation up to `leafId` (that entry included) next to the source session. */
+export async function writeSessionFork(
+  sourcePath: string,
+  leafId: string,
+  now: Date = new Date(),
+): Promise<{ sessionPath: string; sessionUuid: string; chain: Entry[] }> {
+  const { header, entries, raw } = await readSessionFile(sourcePath);
+  const sessionUuid = randomUUID();
+  const { text, chain } = buildSessionFork(header, entries, leafId, sessionUuid, now, sourcePath, raw);
+  const sessionPath = await writeForkFile(sourcePath, sessionUuid, now, text);
+  return { sessionPath, sessionUuid, chain };
+}
+
+/** Temp file, then rename: the fork appears whole or not at all. */
+async function writeForkFile(sourcePath: string, sessionUuid: string, now: Date, text: string): Promise<string> {
   const sessionPath = join(dirname(sourcePath), forkFileName(sessionUuid, now));
   const temp = `${sessionPath}.tmp`;
   try {
@@ -127,5 +165,5 @@ export async function writeFork(
     await unlink(temp).catch(() => undefined);
     throw error;
   }
-  return { sessionPath, sessionUuid, chain, draft: forkDraft(selected) };
+  return sessionPath;
 }

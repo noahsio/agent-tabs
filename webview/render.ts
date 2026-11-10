@@ -219,7 +219,7 @@ export class ChatView {
     const { state, tab } = message;
 
     const title = state.title ?? tab.title ?? UNTITLED;
-    this.header.update(title, tab.durableId, tab.pinned === true);
+    this.header.update(title, tab.durableId, tab.pinned === true, state.running);
     this.sessionsPopover.setDraft(tab.draft === true ? title : undefined);
     this.composer.update(message);
     this.renderBanner();

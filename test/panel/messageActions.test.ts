@@ -49,7 +49,7 @@ describe("message actions", () => {
   let running: boolean;
   let liveCwds: string[];
   let noted: [string, string][];
-  let opened: [string, ForkDraft][];
+  let opened: [string, ForkDraft | undefined][];
   let agentFilesAtFork: boolean[];
   let sessionPath: string;
   let actions: MessageActions;
@@ -152,6 +152,25 @@ describe("message actions", () => {
     running = true;
     expect((await actions.menu("c2")).fork).toEqual({ ok: false, reason: "Дождитесь конца хода" });
     expect(await actions.fork("c2")).toEqual({ ok: false, reason: "Дождитесь конца хода" });
+    expect(await actions.forkSession()).toEqual({ ok: false, reason: "Дождитесь конца хода" });
+    expect(opened).toEqual([]);
+  });
+
+  it("fork_session_takes_the_active_branch_up_to_the_leaf_and_every_checkpoint_on_it", async () => {
+    expect(await actions.forkSession()).toEqual({ ok: true });
+    const [[path, draft]] = opened as [[string, ForkDraft | undefined]];
+    expect(draft).toBeUndefined();
+    const [head, ...lines] = readFileSync(path, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line) as { id: string; parentSession?: string });
+    expect(head?.parentSession).toBe(sessionPath);
+    expect(lines.map((entry) => entry.id)).toEqual(["m0", "u1", "a1", "a1-r0", "u2", "a2", "a2-r0", "a2-r1"]);
+    expect([...(await store.read(head?.id as string)).points.keys()]).toEqual(["c1", "c2"]);
+  });
+
+  it("fork_session_of_a_session_without_messages_is_refused", async () => {
+    leafId = null;
+    expect(await actions.forkSession()).toEqual({ ok: false, reason: "В сессии ещё нет сообщений" });
+    leafId = "not-written-yet";
+    expect(await actions.forkSession()).toMatchObject({ ok: false });
     expect(opened).toEqual([]);
   });
 

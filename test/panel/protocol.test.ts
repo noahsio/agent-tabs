@@ -134,6 +134,7 @@ describe("parseWebviewMessage", () => {
       { type: "listSessions" },
       { type: "openSession", sessionPath: "/p" },
       { type: "newSession" },
+      { type: "forkSession" },
       { type: "restartHost" },
       { type: "compact" },
       { type: "getImage", id: "i" },

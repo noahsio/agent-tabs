@@ -337,6 +337,8 @@ export type WebviewMessage =
   | { type: "rewindPreview"; blockId: string; fork: boolean }
   | { type: "rewind"; blockId: string; fork: boolean; fingerprint: string }
   | { type: "fork"; blockId: string }
+  /** The header's «Ответвить сессию»: the whole conversation as it stands, into a new tab. */
+  | { type: "forkSession" }
   /** «Отозвать» / «Изменить» on a message waiting in OmO's queue. */
   | { type: "dequeue"; blockId: string }
   | { type: "editQueued"; blockId: string; text: string };
@@ -405,6 +407,7 @@ export function parseWebviewMessage(raw: unknown): WebviewMessage | undefined {
     case "stopHolder":
     case "listSessions":
     case "newSession":
+    case "forkSession":
     case "restartHost":
     case "settingsGet":
     case "compact":
