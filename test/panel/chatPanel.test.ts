@@ -55,7 +55,7 @@ function openData(handle: string): unknown {
 }
 
 /** `posted` holds the full state the webview has after each state or delta message; `kinds` the message types as sent. */
-function fakePanel(): { panel: vscode.WebviewPanel; posted: StateMessage[]; kinds: string[]; other: Record<string, unknown>[]; receive(raw: unknown): void; show(visible: boolean): void } {
+function fakePanel(): { panel: vscode.WebviewPanel; posted: StateMessage[]; kinds: string[]; other: Record<string, unknown>[]; receive(raw: unknown): void; focus(active: boolean, visible?: boolean): void } {
   const other: Record<string, unknown>[] = [];
   const listeners: ((raw: unknown) => void)[] = [];
   const posted: StateMessage[] = [];
@@ -64,6 +64,7 @@ function fakePanel(): { panel: vscode.WebviewPanel; posted: StateMessage[]; kind
   const panel = {
     title: "",
     iconPath: undefined,
+    active: true,
     visible: true,
     webview: {
       options: {},
@@ -91,11 +92,13 @@ function fakePanel(): { panel: vscode.WebviewPanel; posted: StateMessage[]; kind
     reveal: () => undefined,
     viewColumn: 2,
   };
-  const show = (visible: boolean): void => {
+  /** The person goes to the tab (or away from it); `visible`: still on screen in its group while another one is focused. */
+  const focus = (active: boolean, visible: boolean = active): void => {
+    panel.active = active;
     panel.visible = visible;
     viewListeners.forEach((listener) => listener());
   };
-  return { panel: panel as unknown as vscode.WebviewPanel, posted, kinds, other, receive: (raw) => listeners.forEach((listener) => listener(raw)), show };
+  return { panel: panel as unknown as vscode.WebviewPanel, posted, kinds, other, receive: (raw) => listeners.forEach((listener) => listener(raw)), focus };
 }
 
 function host(overrides: Partial<PanelHost> = {}): PanelHost {
@@ -288,6 +291,8 @@ describe("ChatPanel", () => {
 
   describe("the tab's dot when the agent has finished", () => {
     const icon = (panel: vscode.WebviewPanel): string => String((panel.iconPath as { light: vscode.Uri }).light);
+    const DOT = "media/mark-done-light.svg";
+    const PLAIN = "media/mark-light.svg";
     const turn = async (posted: StateMessage[], end: Frame = { type: "agent_settled" }): Promise<void> => {
       daemon.push({ sessionId: "rpc-1", type: "agent_start" });
       await settle(() => posted.at(-1)?.state.running === true);
@@ -295,43 +300,58 @@ describe("ChatPanel", () => {
       await settle(() => posted.at(-1)?.state.running === false);
     };
 
-    it("a_tab_out_of_sight_gets_the_dot_when_the_turn_ends_and_loses_it_when_seen", async () => {
-      const { panel, posted, show } = await openAttached();
-      expect(icon(panel)).toBe("media/mark-light.svg");
-      show(false);
+    it("a_tab_not_in_focus_gets_the_dot_when_the_turn_ends_and_loses_it_when_focused", async () => {
+      const { panel, posted, focus } = await openAttached();
+      expect(icon(panel)).toBe(PLAIN);
+      focus(false);
       await turn(posted);
-      expect(icon(panel)).toBe("media/mark-done-light.svg");
+      expect(icon(panel)).toBe(DOT);
       expect(String((panel.iconPath as { dark: vscode.Uri }).dark)).toBe("media/mark-done-dark.svg");
-      show(true);
-      expect(icon(panel)).toBe("media/mark-light.svg");
+      focus(true);
+      expect(icon(panel)).toBe(PLAIN);
     });
 
-    it("a_tab_in_sight_gets_no_dot", async () => {
+    it("a_tab_on_screen_in_another_group_still_gets_it_and_only_focus_takes_it_away", async () => {
+      const { panel, posted, focus } = await openAttached();
+      focus(false, true);
+      await turn(posted);
+      expect(icon(panel)).toBe(DOT);
+      focus(false, true); // a view-state change that is not the person going to the tab
+      expect(icon(panel)).toBe(DOT);
+      focus(true);
+      expect(icon(panel)).toBe(PLAIN);
+    });
+
+    it("the_focused_tab_gets_no_dot", async () => {
       const { panel, posted } = await openAttached();
       await turn(posted);
-      expect(icon(panel)).toBe("media/mark-light.svg");
+      expect(icon(panel)).toBe(PLAIN);
     });
 
     it("the_dot_waits_for_background_work_but_not_for_a_command_left_running", async () => {
-      const { panel, posted, show } = await openAttached();
-      show(false);
+      const { panel, posted, focus } = await openAttached();
+      focus(false);
       const waiting = (sources: string[]): Frame => ({
         type: "session_lifecycle",
         lifecycle: { state: "waiting_background", runId: "r1", waitingOn: { children: 0, background: sources.map((source) => ({ source, activeCount: 1 })), human: [] } },
       });
       await turn(posted, waiting(["senpi-task"]));
-      expect(icon(panel)).toBe("media/mark-light.svg"); // a child agent still works: the agent will be back
+      expect(icon(panel)).toBe(PLAIN); // a child agent still works: the agent will be back
       daemon.push({ sessionId: "rpc-1", ...waiting(["terminal-background-sessions"]) });
-      await settle(() => icon(panel) === "media/mark-done-light.svg"); // only a dev server is left running
+      await settle(() => icon(panel) === DOT); // only a dev server is left running
     });
 
-    it("the_dot_goes_when_the_agent_starts_again", async () => {
-      const { panel, posted, show } = await openAttached();
-      show(false);
+    it("the_dot_hides_while_the_agent_works_again_and_stays_until_the_tab_is_focused", async () => {
+      const { panel, posted, focus } = await openAttached();
+      focus(false);
       await turn(posted);
-      expect(icon(panel)).toBe("media/mark-done-light.svg");
+      expect(icon(panel)).toBe(DOT);
       daemon.push({ sessionId: "rpc-1", type: "agent_start" });
-      await settle(() => icon(panel) === "media/mark-light.svg");
+      await settle(() => icon(panel) === PLAIN);
+      daemon.push({ sessionId: "rpc-1", type: "agent_settled" });
+      await settle(() => icon(panel) === DOT);
+      focus(true);
+      expect(icon(panel)).toBe(PLAIN);
     });
   });
 
