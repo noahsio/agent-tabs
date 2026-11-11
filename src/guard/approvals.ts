@@ -402,11 +402,13 @@ export class GuardApprovals {
   }
 
   /**
-   * A feed step with no card before it: a decider's verdict, or the person's own whitelist allowing a call. Goes where
-   * the request's card would — its session's tab, else every tab, saying whose session it was.
+   * A feed step with no card before it: a decider's verdict, or the person's own whitelist allowing a call. It is already
+   * decided — nobody has to answer it — so it shows only in a tab of its own session (or the one running or owning it);
+   * a session no tab of this window holds gets no step here, rather than a copy in every tab.
    */
   private postStep(request: PendingView, decider?: NonNullable<PendingView["decider"]>, whitelist?: { scopes: string[] }): void {
-    const { panels, elsewhere, owner } = this.targets(request.session);
+    const { panels, elsewhere } = this.targets(request.session);
+    if (elsewhere) return;
     const step = {
       type: "guardStep" as const,
       id: request.id,
@@ -416,7 +418,6 @@ export class GuardApprovals {
       ...(decider !== undefined ? { decider } : {}),
       ...(whitelist !== undefined ? { whitelist } : {}),
     };
-    const away = { ...step, cwd: request.cwd, ...(owner !== undefined ? { owner } : {}) };
-    for (const panel of panels) panel.postGuard(elsewhere ? away : step);
+    for (const panel of panels) panel.postGuard(step);
   }
 }

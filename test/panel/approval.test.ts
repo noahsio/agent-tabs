@@ -342,12 +342,15 @@ describe("guard approvals in the chat", () => {
     expect(admin.claims).toEqual([{ id: "abc123abc123", verdict: "no" }]);
   });
 
-  it("a_decider_step_of_a_child_whose_tab_is_closed_names_the_session_too", async () => {
+  // Seen live (2026-11-11): every tab of a window showed «Решатель разрешил» for a session open in another window. A step
+  // is already decided — nobody has to answer it — so it shows only in the tab it belongs to, never fanned out.
+  it("a_decider_step_of_a_child_whose_tab_is_closed_shows_in_no_tab", async () => {
     await taskRecord({ task_id: "st_1", child_session_id: "child-of-s9", parent_session_id: "s9-not-open", root_session_id: "s9-not-open" });
     const decider = { model: "gw/m", decision: "deny", reason: "force push", ms: 300 };
     const item = pending({ id: "d9", session: "child-of-s9", decider });
     admin.emit({ event: "resolved", id: "d9", decision: "deny", by: "decider", session: "child-of-s9", decider, item });
-    expect(guardMessages(tabS1)).toEqual([expect.objectContaining({ type: "guardStep", id: "d9", cwd: "/work/proj", owner: "s9-not-open" })]);
+    expect(guardMessages(tabS1)).toEqual([]);
+    expect(guardMessages(tabS2)).toEqual([]);
   });
 
   it("the_registry_of_another_environment_is_never_read", async () => {
@@ -553,14 +556,10 @@ describe("guard approvals in the chat", () => {
     fresh.dispose();
   });
 
-  it("a_decider_step_of_a_session_no_tab_shows_goes_to_every_tab_labelled_with_its_cwd", () => {
+  it("a_decider_step_of_a_session_no_tab_shows_goes_to_no_tab", () => {
     const decider = { model: "gw/m", decision: "deny", reason: "force push", ms: 300 };
     admin.emit({ event: "resolved", id: "d2", decision: "deny", by: "decider", session: "terminal-session", decider, item: pending({ id: "d2", session: "terminal-session", decider }) });
-    for (const tab of [tabS1, tabS2]) {
-      expect(guardMessages(tab)).toEqual([
-        { type: "guardStep", id: "d2", tool: "bash", command: "git push origin main", decider, at: "2026-11-04T10:00:00.000Z", cwd: "/work/proj" },
-      ]);
-    }
+    for (const tab of [tabS1, tabS2]) expect(guardMessages(tab)).toEqual([]);
   });
 
   it("after_a_resubscription_requests_the_service_no_longer_has_are_closed", async () => {
