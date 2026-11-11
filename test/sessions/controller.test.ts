@@ -118,6 +118,60 @@ describe("SessionController", () => {
     expect(ofType("steer")).toHaveLength(0);
   });
 
+  describe("a message OmO left in its queue with no turn to drain it", () => {
+    const asked = { state: "waiting_human", runId: "r1", waitingOn: { children: 0, background: [], human: [{ kind: "question", requestId: "question:r1:1", revision: 1 }] } };
+    const strandedState = (isStreaming: boolean, lifecycle: object = { state: "running", runId: "r1", waitingOn: { children: 0, background: [], human: [] } }) => openData("rpc-1", {
+      isStreaming,
+      lifecycle,
+      ordered: [{ queuedId: "q_1", text: "живы ноды?", mode: "steer", revision: 1, clientMessageId: "m-1" }],
+    });
+
+    it("is_taken_out_of_the_queue_and_sent_as_the_next_turn_when_the_tab_opens", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(false) }));
+      daemon.on("dequeue_message", (request) => ({ data: { queuedId: request["queuedId"], status: "removed" } }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      expect(controller.state.running).toBe(false);
+      await settle(() => ofType("prompt").length === 1);
+      expect(types().filter((type) => ["dequeue_message", "prompt", "steer"].includes(type))).toEqual(["dequeue_message", "prompt"]);
+      expect(ofType("dequeue_message")[0]).toMatchObject({ queuedId: "q_1" });
+      expect(ofType("prompt")[0]).toMatchObject({ message: "живы ноды?" });
+    });
+
+    it("is_sent_too_when_the_reply_that_ended_the_turn_asked_something", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(false, asked) }));
+      daemon.on("dequeue_message", (request) => ({ data: { queuedId: request["queuedId"], status: "removed" } }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      expect(controller.state.running).toBe(false);
+      await settle(() => ofType("prompt").length === 1);
+      expect(ofType("prompt")[0]).toMatchObject({ message: "живы ноды?" });
+    });
+
+    it("stays_queued_while_omo_holds_the_session", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(false, { state: "paused", runId: "r1", waitingOn: { children: 0, background: [], human: [] } }) }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("more", "followUp"); // a later request: a drain would have been asked for before it
+      expect(ofType("dequeue_message")).toHaveLength(0);
+    });
+
+    it("one_omo_delivered_meanwhile_is_not_sent_again", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(false) }));
+      daemon.on("dequeue_message", () => ({ data: { queuedId: "q_1", status: "already_delivered" } }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await settle(() => ofType("dequeue_message").length === 1);
+      await controller.send("next", "auto"); // a later request: the drain's own requests are already in by its answer
+      expect(ofType("prompt").map((request) => request["message"])).toEqual(["next"]);
+    });
+
+    it("stays_queued_while_a_turn_really_runs", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(true) }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      expect(controller.state.running).toBe(true);
+      await controller.send("more", "followUp"); // a later request: a drain would have been asked for before it
+      expect(ofType("dequeue_message")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(0);
+    });
+  });
+
   it("create_opens_session_without_model", async () => {
     controller = await SessionController.create(manager, "/tmp");
     const open = ofType("open_session")[0] as Frame;
