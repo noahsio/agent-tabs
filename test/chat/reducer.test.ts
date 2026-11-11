@@ -941,6 +941,21 @@ describe("a goal OmO stopped is not a turn waiting for an answer", () => {
     expect(applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(lifecycle))).toMatchObject({ running: false, activity: "idle" });
   });
 
+  // Seen live (omo 5.1.64, 2026-11-11): a reply that ends by asking the person something ends the turn, and OmO raises a
+  // `question` wait of its own, keyed `question:<runId>:<n>`, with no `ask-user` background wait and no tool call blocked.
+  it("a_turn_that_ended_with_a_question_is_idle", () => {
+    const lifecycle = {
+      state: "waiting_human",
+      runId: "r1",
+      waitingOn: {
+        children: 0,
+        background: [{ source: "terminal-background-sessions", activeCount: 1 }],
+        human: [{ kind: "question", requestId: "question:r1:1", revision: 1 }],
+      },
+    };
+    expect(applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(lifecycle))).toMatchObject({ running: false, activity: "idle" });
+  });
+
   it("a_blocking_question_still_runs", () => {
     const lifecycle = {
       state: "waiting_human",

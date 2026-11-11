@@ -154,21 +154,34 @@ function errorText(error: unknown): string {
 /** Asking the host what it supports is on the path of a prompt: never long. */
 const PROTOCOL_INFO_TIMEOUT_MS = 3_000;
 
-/** Whether the host behind a connection advertises `tool_barrier`: an answer is kept per connection, a failure is asked again. */
-const barrierSupport = new WeakMap<RpcClient, Promise<boolean>>();
+/** What the host behind a connection advertises: an answer is kept per connection, a failure is asked again. */
+const hostCapabilities = new WeakMap<RpcClient, Promise<unknown[]>>();
+
+function capabilities(client: RpcClient): Promise<unknown[]> {
+  const known = hostCapabilities.get(client);
+  if (known !== undefined) return known;
+  const asking: Promise<unknown[]> = client
+    .request<Frame>("get_protocol_info", {}, PROTOCOL_INFO_TIMEOUT_MS)
+    .then((info) => (Array.isArray(info?.["capabilities"]) ? info["capabilities"] : []))
+    .catch(() => {
+      if (hostCapabilities.get(client) === asking) hostCapabilities.delete(client);
+      return [];
+    });
+  hostCapabilities.set(client, asking);
+  return asking;
+}
 
 function supportsToolBarrier(client: RpcClient): Promise<boolean> {
-  const known = barrierSupport.get(client);
-  if (known !== undefined) return known;
-  const asking: Promise<boolean> = client
-    .request<Frame>("get_protocol_info", {}, PROTOCOL_INFO_TIMEOUT_MS)
-    .then((info) => Array.isArray(info?.["capabilities"]) && info["capabilities"].includes("tool_barrier"))
-    .catch(() => {
-      if (barrierSupport.get(client) === asking) barrierSupport.delete(client);
-      return false;
-    });
-  barrierSupport.set(client, asking);
-  return asking;
+  return capabilities(client).then((known) => known.includes("tool_barrier"));
+}
+
+/**
+ * `steer` with `whenIdle: "start"` (OmO capability `steer_when_idle`): on a session with no turn the message starts
+ * one instead of waiting in the queue for a tool boundary that will never come. The tab steers whenever it believes a
+ * turn runs, and that belief can be stale — a lifecycle it misreads, a frame it missed — so OmO, which knows, decides.
+ */
+function supportsSteerWhenIdle(client: RpcClient): Promise<boolean> {
+  return capabilities(client).then((known) => known.includes("steer_when_idle"));
 }
 
 /**
@@ -429,8 +442,9 @@ export class SessionController extends EventEmitter {
             : "prompt";
       const barrier = type === "prompt" ? await this.barrierPoint() : undefined;
       const toolBarrier = barrier ? { toolBarrier: { id: barrier.pointId, deadlineMs: BARRIER_DEADLINE_MS } } : {};
+      const whenIdle = type === "steer" && (await supportsSteerWhenIdle(this.client)) ? { whenIdle: "start" } : {};
       const armedAt = Date.now();
-      const sent = this.request<Frame>(type, { ...fields, ...toolBarrier });
+      const sent = this.request<Frame>(type, { ...fields, ...toolBarrier, ...whenIdle });
       const answer =
         type !== "prompt"
           ? sent.then((data) => ({ data, steered: false, queued: false }))

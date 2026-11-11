@@ -831,13 +831,25 @@ function standingQuestion(lifecycle: Json): boolean {
 const ATTENTION_KINDS = new Set(["goal_blocked", "goal_paused", "stalled", "interrupted_run"]);
 
 /**
- * True when every one of the lifecycle's human waits is one of those (and there is at least one): nothing is being
- * asked, so no turn is running. A host that reports no `waitingOn` says nothing either way and keeps `waiting_human`.
+ * A reply that ended by asking the person something: OmO ends the turn and raises a `question` wait of its own, keyed
+ * `question:<runId>:<n>` (5.1.64; its other synthetic waits are keyed the same way). No tool call is blocked on it — the
+ * answer is simply the next user message. A question a tool call is blocked on carries that call's id instead
+ * (`toolu_…`, `call_…|fc_…`). Seen live (2026-11-11): read as a running turn, the tab sent the person's next message as
+ * a steer, OmO queued it for a tool boundary that never came, and every «Стоп» / «Снять зависание» brought it back.
+ */
+function turnEndQuestion(wait: Json): boolean {
+  return wait["kind"] === "question" && typeof wait["requestId"] === "string" && wait["requestId"].startsWith("question:");
+}
+
+/**
+ * True when every one of the lifecycle's human waits is one of those or a turn-end question (and there is at least
+ * one): nothing is being asked by a running turn, so none is running. A host that reports no `waitingOn` says nothing
+ * either way and keeps `waiting_human`.
  */
 function attentionOnly(lifecycle: Json): boolean {
   const waiting = lifecycle["waitingOn"];
   const human = isObject(waiting) && Array.isArray(waiting["human"]) ? waiting["human"] : [];
-  return human.length > 0 && human.every((wait) => isObject(wait) && ATTENTION_KINDS.has(String(wait["kind"])));
+  return human.length > 0 && human.every((wait) => isObject(wait) && (ATTENTION_KINDS.has(String(wait["kind"])) || turnEndQuestion(wait)));
 }
 
 /**

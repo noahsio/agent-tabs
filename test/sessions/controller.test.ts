@@ -374,6 +374,43 @@ describe("SessionController", () => {
       await controller.send("three", "auto");
       expect(types().filter((type) => type === "prompt" || type === "steer")).toEqual(["prompt", "steer", "prompt"]);
     });
+
+    it("a_message_after_a_reply_that_ended_with_a_question_goes_as_a_prompt", async () => {
+      controller = await SessionController.create(manager, "/tmp");
+      await controller.send("build it", "auto");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(frame({ type: "agent_settled" }));
+      daemon.push(frame({ type: "session_lifecycle", lifecycle: {
+        state: "waiting_human", runId: "r1",
+        waitingOn: { children: 0, background: [], human: [{ kind: "question", requestId: "question:r1:1", revision: 1 }] },
+      } }));
+      await settle(() => controller?.state.activity === "idle");
+      expect(controller.state.running).toBe(false);
+      await controller.send("answer", "auto", [], "m-2");
+      expect(ofType("prompt").at(-1)).toMatchObject({ message: "answer", clientMessageId: "m-2" });
+      expect(ofType("steer")).toHaveLength(0);
+    });
+
+    it("a_steer_asks_omo_to_start_a_turn_if_none_runs", async () => {
+      daemon.on("get_protocol_info", () => ({ data: { capabilities: ["steer_when_idle"] } }));
+      daemon.on("steer", () => ({ data: { disposition: "started" } }));
+      controller = await SessionController.create(manager, "/tmp");
+      daemon.push(frame({ type: "agent_start" }));
+      await settle(() => controller?.state.running === true);
+      expect(await controller.send("one", "auto")).toBe(true);
+      expect(ofType("steer")[0]).toMatchObject({ message: "one", whenIdle: "start" });
+      expect(ofType("prompt")).toHaveLength(0);
+    });
+
+    it("a_host_without_steer_when_idle_gets_a_plain_steer", async () => {
+      daemon.on("get_protocol_info", () => ({ data: { capabilities: [] } }));
+      controller = await SessionController.create(manager, "/tmp");
+      daemon.push(frame({ type: "agent_start" }));
+      await settle(() => controller?.state.running === true);
+      await controller.send("one", "auto");
+      expect(ofType("steer")[0]).toMatchObject({ message: "one" });
+      expect(ofType("steer")[0]).not.toHaveProperty("whenIdle");
+    });
   });
 
   describe("a queued message", () => {
