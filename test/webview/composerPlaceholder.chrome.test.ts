@@ -60,6 +60,18 @@ describe.skipIf(!hasChrome)("the composer's placeholder and undo (headless Chrom
     expect(await page.evaluate<string>(`document.querySelector('${INPUT}').textContent`)).toBe("abcx");
   }, 20_000);
 
+  it("lines_sit_as_close_as_claude_codes_and_a_pill_gets_the_looser_line", async () => {
+    const lineHeight = (): Promise<number> => page.evaluate<number>(`(() => {
+      const input = document.querySelector('${INPUT}');
+      return parseFloat(getComputedStyle(input).lineHeight) / parseFloat(getComputedStyle(input).fontSize);
+    })()`);
+    await page.evaluate(`document.querySelector('${INPUT}').focus(); document.execCommand("selectAll"); document.execCommand("insertText", false, "один\\nдва\\nтри")`);
+    expect(await lineHeight()).toBeCloseTo(1.5, 2);
+    await page.evaluate(`document.querySelector('${INPUT}').append(Object.assign(document.createElement("span"), { className: "att" }))`);
+    expect(await lineHeight()).toBeCloseTo(1.9, 2);
+    await page.evaluate(`document.querySelector('${INPUT} .att').remove()`);
+  }, 20_000);
+
   describe("smart undo: each ⌘Z takes back one step", () => {
     const text = (): Promise<string> => page.evaluate<string>(`document.querySelector('${INPUT}').textContent`);
     /** VS Code's ⌘Z in a webview: `execCommand("undo")` in the page. */
