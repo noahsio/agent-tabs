@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { tabTitle } from "./tabTitle";
 import * as vscode from "vscode";
-import { normalizeSessionName, untitledName, type ModelRef } from "../chat/model";
+import { normalizeSessionName, untitledName, type ChatState, type ModelRef } from "../chat/model";
 import { initialState } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import type { DeferredInbox } from "../deferred/inbox";
@@ -140,6 +140,19 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** A command left running in the background (a dev server): it can run for hours and never counts as the agent's work. */
+const LONG_LIVED_SOURCE = "terminal-background-sessions";
+
+/**
+ * The agent is still at work: a turn runs, a child agent runs or waits, or OmO waits on background work that will wake
+ * the agent again. A command it left running in the background does not count — the agent has finished with it.
+ */
+function atWork(state: ChatState): boolean {
+  if (state.running) return true;
+  if (state.agents.some((agent) => agent.status === "running" || agent.status === "waiting")) return true;
+  return state.background?.sources.some((source) => source !== LONG_LIVED_SOURCE) === true;
+}
+
 /** One editor tab = one webview = one SessionController. */
 export class ChatPanel implements ApprovalPanel {
   private controller: SessionController | undefined;
@@ -202,6 +215,10 @@ export class ChatPanel implements ApprovalPanel {
   private readonly pending: { model?: ModelRef | "auto"; level?: string; name?: string } = {};
   private readonly poster: StatePoster;
   private readonly tab: TabState;
+  /** Whether the agent was at work when the tab last looked; undefined until the first look (an opened tab is no news). */
+  private working: boolean | undefined;
+  /** The agent finished while the tab was out of sight: the icon carries a dot until the tab is seen. */
+  private unread = false;
 
   static create(host: PanelHost, opening: Opening, column?: vscode.ViewColumn): ChatPanel {
     const panel = vscode.window.createWebviewPanel(CHAT_VIEW_TYPE, UNTITLED, targetColumn(column), {
@@ -229,10 +246,13 @@ export class ChatPanel implements ApprovalPanel {
     this.tab = opening.kind === "attach" ? { modelMode: "auto", ...opening.saved, sessionPath: opening.sessionPath } : { modelMode: "auto" };
     this.forkDraft = opening.kind === "attach" ? opening.draft : undefined;
     this.poster = new StatePoster((json) => void panel.webview.postMessage(json), host.secrets);
-    panel.iconPath = { light: vscode.Uri.joinPath(host.extensionUri, "media", "mark-light.svg"), dark: vscode.Uri.joinPath(host.extensionUri, "media", "mark-dark.svg") };
+    this.showIcon();
     panel.webview.html = this.html();
     panel.webview.onDidReceiveMessage((raw: unknown) => this.onMessage(raw));
     panel.onDidDispose(() => this.dispose());
+    panel.onDidChangeViewState(() => {
+      if (panel.visible) this.markUnread(false); // seen
+    });
     host.panels.add(this);
     host.settings?.on("changed", this.onSettingsChanged);
     host.settings?.on("login", this.onSettingsLogin);
@@ -301,6 +321,30 @@ export class ChatPanel implements ApprovalPanel {
     this.titleName = name;
     const waiting = (this.controller?.state.dialogs.length ?? 0) > 0 || this.awaitingGuard.size > 0;
     this.panel.title = tabTitle(redact(name, this.host.secrets), waiting);
+  }
+
+  /**
+   * Like the Claude Code tab: when the agent has finished all its work while its tab is out of sight, the tab's icon
+   * gets a dot; seeing the tab takes it away, and so does the agent starting again.
+   */
+  private noteWork(state: ChatState): void {
+    const working = atWork(state);
+    const was = this.working;
+    this.working = working;
+    if (working) this.markUnread(false);
+    else if (was === true && !this.panel.visible) this.markUnread(true);
+  }
+
+  private markUnread(unread: boolean): void {
+    if (this.unread === unread) return;
+    this.unread = unread;
+    this.showIcon();
+  }
+
+  private showIcon(): void {
+    const name = this.unread ? "mark-done" : "mark";
+    const media = (theme: string): vscode.Uri => vscode.Uri.joinPath(this.host.extensionUri, "media", `${name}-${theme}.svg`);
+    this.panel.iconPath = { light: media("light"), dark: media("dark") };
   }
 
   /** A new tab with no session yet: choices are kept in `pending`, nothing reaches the daemon. */
@@ -1106,6 +1150,7 @@ export class ChatPanel implements ApprovalPanel {
     const draft = this.noSession;
     const chosen = draft && this.pending.model !== undefined && this.pending.model !== "auto" ? this.pending.model : undefined;
     const base = this.controller?.state ?? initialState();
+    this.noteWork(base);
     // Without a choice of its own a draft shows the level its model is remembered at: the level its session will start at.
     const level = this.pending.level ?? (chosen !== undefined ? this.host.rememberedLevel?.(chosen) : undefined);
     // A draft shows its pending choices as if they were the session's.

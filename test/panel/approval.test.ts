@@ -114,6 +114,7 @@ function fakePanel(): { panel: vscode.WebviewPanel; posted: Array<Record<string,
         return true;
       },
     },
+    onDidChangeViewState: () => ({ dispose: () => undefined }),
     onDidDispose: () => ({ dispose: () => undefined }),
     reveal: () => undefined,
     viewColumn: 2,

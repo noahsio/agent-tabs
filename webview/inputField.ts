@@ -236,6 +236,9 @@ export class TextField {
    * of its own, not a class named `empty` — the feed's own hint already owns that class, margins and all.
    */
   refresh(): void {
+    // Erasing everything typed leaves the browser's own `<br>` behind (it holds the line open), which reads as a newline
+    // and kept the placeholder away; a line the person breaks takes two of them, so a lone one is never theirs.
+    if (this.element.childNodes.length === 1 && this.element.firstChild instanceof HTMLBRElement) this.element.replaceChildren();
     this.element.toggleAttribute("data-empty", this.value === "");
   }
 
