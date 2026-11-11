@@ -1984,7 +1984,7 @@ button.qtab.on {
   cursor: zoom-in;
 }
 
-/* Inline pills need a looser line than plain prose: 1.9 keeps a 20 px chip from touching the line above. */
+/* Lines as close as Claude Code's input (1.5); a field that holds a pill takes the looser line below. */
 .input {
   display: block;
   width: 100%;
@@ -1992,7 +1992,7 @@ button.qtab.on {
   max-height: 40vh;
   overflow-y: auto;
   font: inherit;
-  line-height: 1.9;
+  line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--fg-strong);
@@ -2006,9 +2006,9 @@ button.qtab.on {
   outline: none;
 }
 
-/* Nothing in it at all — no words, no pill: the prompt shows and the line goes back to prose spacing. */
-.input[data-empty] {
-  line-height: 1.55;
+/* Inline pills need a looser line than plain prose: 1.9 keeps a 20 px chip from touching the line above. */
+.input:has(.att) {
+  line-height: 1.9;
 }
 
 .input[data-empty]::before {
