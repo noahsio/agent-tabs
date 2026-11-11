@@ -36,6 +36,7 @@ import { MessageMenu } from "./messageMenu";
 import { ModelPopover } from "./modelPopover";
 import { Popovers } from "./popover";
 import { ReconnectDetails, ReconnectLine } from "./reconnectLine";
+import { installCopyKey } from "./copyKey";
 import { installRefocusGuard } from "./refocus";
 import { RewindConfirm } from "./rewindConfirm";
 import { SessionsPopover } from "./sessionsPopover";
@@ -87,6 +88,7 @@ export class ChatView {
     private readonly post: Post,
   ) {
     installRefocusGuard(); // the click that brings the window (or the panel) back only focuses it
+    installCopyKey(); // ⌘C over the feed copies at once, before VS Code's wrapper can move the focus off the selection
     this.popovers = new Popovers(root, () => this.composer.input.focus());
     const close = (): void => this.popovers.close();
     /** A choice made in a popover: it closes and typing continues in the composer. */

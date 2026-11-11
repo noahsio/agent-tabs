@@ -161,21 +161,51 @@ function errorText(error: unknown): string {
 /** Asking the host what it supports is on the path of a prompt: never long. */
 const PROTOCOL_INFO_TIMEOUT_MS = 3_000;
 
-/** Whether the host behind a connection advertises `tool_barrier`: an answer is kept per connection, a failure is asked again. */
-const barrierSupport = new WeakMap<RpcClient, Promise<boolean>>();
+/** What the host behind a connection advertises: an answer is kept per connection, a failure is asked again. */
+const hostCapabilities = new WeakMap<RpcClient, Promise<unknown[]>>();
+
+function capabilities(client: RpcClient): Promise<unknown[]> {
+  const known = hostCapabilities.get(client);
+  if (known !== undefined) return known;
+  const asking: Promise<unknown[]> = client
+    .request<Frame>("get_protocol_info", {}, PROTOCOL_INFO_TIMEOUT_MS)
+    .then((info) => (Array.isArray(info?.["capabilities"]) ? info["capabilities"] : []))
+    .catch(() => {
+      if (hostCapabilities.get(client) === asking) hostCapabilities.delete(client);
+      return [];
+    });
+  hostCapabilities.set(client, asking);
+  return asking;
+}
 
 function supportsToolBarrier(client: RpcClient): Promise<boolean> {
-  const known = barrierSupport.get(client);
-  if (known !== undefined) return known;
-  const asking: Promise<boolean> = client
-    .request<Frame>("get_protocol_info", {}, PROTOCOL_INFO_TIMEOUT_MS)
-    .then((info) => Array.isArray(info?.["capabilities"]) && info["capabilities"].includes("tool_barrier"))
-    .catch(() => {
-      if (barrierSupport.get(client) === asking) barrierSupport.delete(client);
-      return false;
-    });
-  barrierSupport.set(client, asking);
-  return asking;
+  return capabilities(client).then((known) => known.includes("tool_barrier"));
+}
+
+/**
+ * `steer` with `whenIdle: "start"` (OmO capability `steer_when_idle`): on a session with no turn the message starts
+ * one instead of waiting in the queue for a tool boundary that will never come. The tab steers whenever it believes a
+ * turn runs, and that belief can be stale — a lifecycle it misreads, a frame it missed — so OmO, which knows, decides.
+ */
+function supportsSteerWhenIdle(client: RpcClient): Promise<boolean> {
+  return capabilities(client).then((known) => known.includes("steer_when_idle"));
+}
+
+/**
+ * A message stranded in OmO's queue: input waits there while nothing streams, compacts or runs a command — no turn
+ * will ever take it out. OmO still calls the session `running` (queued input counts as work), or `waiting_human` while
+ * the reply that ended the turn asked something. Seen live (omo 5.1.64, 2026-11-11): a steer sent to a session whose
+ * turn had ended sat there for 35 minutes through four «Стоп», four «Снять зависание» and a window reload —
+ * every reopen restored it to the same queue, and the tab said «Работаю…» throughout. Only a new turn drains it, so the
+ * tab starts one with what was queued. A session OmO holds (`paused`, `held`) keeps its queue on purpose.
+ */
+function strandedQueue(state: Frame): boolean {
+  const lifecycle = state["lifecycle"];
+  if (!isObject(lifecycle) || lifecycle["state"] === "paused" || lifecycle["state"] === "held") return false;
+  if (state["isStreaming"] === true || state["isCompacting"] === true || state["isBashRunning"] === true) return false;
+  if (state["paused"] === true || state["runPaused"] === true) return false;
+  if (typeof state["retryAttempt"] === "number" && state["retryAttempt"] > 0) return false;
+  return Array.isArray(state["ordered"]) && state["ordered"].length > 0;
 }
 
 /**
@@ -436,8 +466,9 @@ export class SessionController extends EventEmitter {
             : "prompt";
       const barrier = type === "prompt" ? await this.barrierPoint() : undefined;
       const toolBarrier = barrier ? { toolBarrier: { id: barrier.pointId, deadlineMs: BARRIER_DEADLINE_MS } } : {};
+      const whenIdle = type === "steer" && (await supportsSteerWhenIdle(this.client)) ? { whenIdle: "start" } : {};
       const armedAt = Date.now();
-      const sent = this.request<Frame>(type, { ...fields, ...toolBarrier }, ADMISSION_TIMEOUT_MS);
+      const sent = this.request<Frame>(type, { ...fields, ...toolBarrier, ...whenIdle }, ADMISSION_TIMEOUT_MS);
       const answer =
         type !== "prompt"
           ? sent.then((data) => ({ data, steered: false, queued: false }))
@@ -1254,6 +1285,7 @@ export class SessionController extends EventEmitter {
     const startedAt = Date.now();
     let openedMs = 0;
     let journal: JournalLoad = { ms: 0, pages: 0 };
+    let stranded = false;
     try {
       const data = await this.client.request<Frame>("open_session", openFields);
       openedMs = Date.now() - startedAt;
@@ -1278,6 +1310,9 @@ export class SessionController extends EventEmitter {
           journal = await this.loadEntries(undefined);
         }
       }
+      stranded = strandedQueue(sessionState);
+      // after the history, so the queued bubbles sit under it; the queue_update OmO sends later says the same
+      if (stranded) this.current = applyFrame(this.current, { type: "queue_update", ordered: sessionState["ordered"] }, this.sink);
     } finally {
       const held = this.buffer ?? [];
       this.buffer = undefined;
@@ -1288,6 +1323,13 @@ export class SessionController extends EventEmitter {
       `Сессия открыта за ${Date.now() - startedAt} мс: open_session ${openedMs} мс, журнал ${journal.ms} мс (${journal.pages} стр.), блоков ${this.current.blocks.length}`,
     );
     void this.restoreAgents(); // never awaited: the conversation is already in hand
+    if (stranded) void this.deliverStrandedQueue();
+  }
+
+  /** What OmO left in its queue with no turn to take it (see `strandedQueue`) goes out now, as after «Стоп». */
+  private async deliverStrandedQueue(): Promise<void> {
+    this.log?.("Очередь OmO без хода: отправляю застрявшие сообщения заново");
+    await this.drainQueueAfterStop();
   }
 
   /**
@@ -1325,7 +1367,8 @@ export class SessionController extends EventEmitter {
   private seedFromState(base: ChatState, sessionState: Frame): ChatState {
     const { error: _cleared, activity: _verb, activityTool: _tool, background: _background, ...rest } = base;
     const lifecycle = sessionState["lifecycle"];
-    const running = lifecycleRunning(lifecycle) ?? sessionState["isStreaming"] === true;
+    const stranded = strandedQueue(sessionState);
+    const running = !stranded && (lifecycleRunning(lifecycle) ?? sessionState["isStreaming"] === true);
     const blocks = running
       ? rest.blocks
       : rest.blocks.map((block) => {
@@ -1334,6 +1377,7 @@ export class SessionController extends EventEmitter {
           return block;
         });
     let next: ChatState = applyLifecycle({ ...rest, blocks, dialogs: [], running }, lifecycle);
+    if (stranded) next = { ...next, running: false, activity: "idle", activityTool: undefined }; // "running" is only the queue
     const model = sessionState["model"];
     if (isObject(model) && typeof model["provider"] === "string" && typeof model["id"] === "string") {
       next = { ...next, model: { provider: model["provider"], id: model["id"] } };

@@ -72,6 +72,7 @@ describe("agents popover end to end", () => {
           return true;
         },
       },
+      onDidChangeViewState: () => ({ dispose: () => undefined }),
       onDidDispose: () => ({ dispose: () => undefined }),
       reveal: () => undefined,
     } as unknown as vscode.WebviewPanel;

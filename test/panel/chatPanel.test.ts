@@ -55,14 +55,16 @@ function openData(handle: string): unknown {
 }
 
 /** `posted` holds the full state the webview has after each state or delta message; `kinds` the message types as sent. */
-function fakePanel(): { panel: vscode.WebviewPanel; posted: StateMessage[]; kinds: string[]; other: Record<string, unknown>[]; receive(raw: unknown): void } {
+function fakePanel(): { panel: vscode.WebviewPanel; posted: StateMessage[]; kinds: string[]; other: Record<string, unknown>[]; receive(raw: unknown): void; show(visible: boolean): void } {
   const other: Record<string, unknown>[] = [];
   const listeners: ((raw: unknown) => void)[] = [];
   const posted: StateMessage[] = [];
   const kinds: string[] = [];
+  const viewListeners: (() => void)[] = [];
   const panel = {
     title: "",
     iconPath: undefined,
+    visible: true,
     webview: {
       options: {},
       html: "",
@@ -82,10 +84,18 @@ function fakePanel(): { panel: vscode.WebviewPanel; posted: StateMessage[]; kind
       },
     },
     onDidDispose: () => ({ dispose: () => undefined }),
+    onDidChangeViewState: (listener: () => void) => {
+      viewListeners.push(listener);
+      return { dispose: () => undefined };
+    },
     reveal: () => undefined,
     viewColumn: 2,
   };
-  return { panel: panel as unknown as vscode.WebviewPanel, posted, kinds, other, receive: (raw) => listeners.forEach((listener) => listener(raw)) };
+  const show = (visible: boolean): void => {
+    panel.visible = visible;
+    viewListeners.forEach((listener) => listener());
+  };
+  return { panel: panel as unknown as vscode.WebviewPanel, posted, kinds, other, receive: (raw) => listeners.forEach((listener) => listener(raw)), show };
 }
 
 function host(overrides: Partial<PanelHost> = {}): PanelHost {
@@ -274,6 +284,55 @@ describe("ChatPanel", () => {
     daemon.on("get_commands", () => ({ data: { commands: [{ name: "review", source: "skill", syntax: "dollar" }] } }));
     daemon.on("set_session_name", () => ({}));
     daemon.on("close_session", () => ({}));
+  });
+
+  describe("the tab's dot when the agent has finished", () => {
+    const icon = (panel: vscode.WebviewPanel): string => String((panel.iconPath as { light: vscode.Uri }).light);
+    const turn = async (posted: StateMessage[], end: Frame = { type: "agent_settled" }): Promise<void> => {
+      daemon.push({ sessionId: "rpc-1", type: "agent_start" });
+      await settle(() => posted.at(-1)?.state.running === true);
+      daemon.push({ sessionId: "rpc-1", ...end });
+      await settle(() => posted.at(-1)?.state.running === false);
+    };
+
+    it("a_tab_out_of_sight_gets_the_dot_when_the_turn_ends_and_loses_it_when_seen", async () => {
+      const { panel, posted, show } = await openAttached();
+      expect(icon(panel)).toBe("media/mark-light.svg");
+      show(false);
+      await turn(posted);
+      expect(icon(panel)).toBe("media/mark-done-light.svg");
+      expect(String((panel.iconPath as { dark: vscode.Uri }).dark)).toBe("media/mark-done-dark.svg");
+      show(true);
+      expect(icon(panel)).toBe("media/mark-light.svg");
+    });
+
+    it("a_tab_in_sight_gets_no_dot", async () => {
+      const { panel, posted } = await openAttached();
+      await turn(posted);
+      expect(icon(panel)).toBe("media/mark-light.svg");
+    });
+
+    it("the_dot_waits_for_background_work_but_not_for_a_command_left_running", async () => {
+      const { panel, posted, show } = await openAttached();
+      show(false);
+      const waiting = (sources: string[]): Frame => ({
+        type: "session_lifecycle",
+        lifecycle: { state: "waiting_background", runId: "r1", waitingOn: { children: 0, background: sources.map((source) => ({ source, activeCount: 1 })), human: [] } },
+      });
+      await turn(posted, waiting(["senpi-task"]));
+      expect(icon(panel)).toBe("media/mark-light.svg"); // a child agent still works: the agent will be back
+      daemon.push({ sessionId: "rpc-1", ...waiting(["terminal-background-sessions"]) });
+      await settle(() => icon(panel) === "media/mark-done-light.svg"); // only a dev server is left running
+    });
+
+    it("the_dot_goes_when_the_agent_starts_again", async () => {
+      const { panel, posted, show } = await openAttached();
+      show(false);
+      await turn(posted);
+      expect(icon(panel)).toBe("media/mark-done-light.svg");
+      daemon.push({ sessionId: "rpc-1", type: "agent_start" });
+      await settle(() => icon(panel) === "media/mark-light.svg");
+    });
   });
 
   describe("a queued message", () => {

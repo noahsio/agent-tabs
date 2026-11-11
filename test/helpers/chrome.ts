@@ -66,7 +66,7 @@ export type Page = {
   drag(from: Point, to: Point): Promise<void>;
   /** The system clipboard's text, read by the page itself. */
   clipboard(): Promise<string>;
-  key(key: string, options?: { shift?: boolean }): Promise<void>;
+  key(key: string, options?: { shift?: boolean; meta?: boolean }): Promise<void>;
   /** A mouse wheel turn at `point`: scrolls whatever the browser finds under it. */
   wheel(point: Point, deltaY: number): Promise<void>;
   screenshot(path: string): Promise<void>;
@@ -171,14 +171,15 @@ export async function openPage(html: string, size = { width: 900, height: 700 })
       await send("Browser.grantPermissions", { permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"] });
       return page.evaluate<string>("navigator.clipboard.readText()", { userGesture: true });
     },
-    async key(key: string, options: { shift?: boolean } = {}): Promise<void> {
+    async key(key: string, options: { shift?: boolean; meta?: boolean } = {}): Promise<void> {
       // A key an editable element acts on needs its real code (and Enter its text), or the browser only reports it.
       const codes: Record<string, number> = { Escape: 27, Enter: 13, Backspace: 8, Tab: 9 };
+      const letter = /^[a-z]$/.test(key) ? key.toUpperCase() : undefined; // a shortcut's letter: ⌘C is KeyC, 67
       const event = {
         key,
-        code: key,
-        windowsVirtualKeyCode: codes[key] ?? 0,
-        modifiers: options.shift === true ? 8 : 0,
+        code: letter !== undefined ? `Key${letter}` : key,
+        windowsVirtualKeyCode: codes[key] ?? letter?.charCodeAt(0) ?? 0,
+        modifiers: (options.shift === true ? 8 : 0) | (options.meta === true ? 4 : 0),
         ...(key === "Enter" ? { text: "\r" } : {}),
       };
       await send("Input.dispatchKeyEvent", { type: "keyDown", ...event });

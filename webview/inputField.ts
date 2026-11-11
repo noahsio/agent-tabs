@@ -213,6 +213,35 @@ export class TextField {
     this.insertNodes(textNodes(text));
   }
 
+  /**
+   * Pasted text at the caret, undoable like typing. VS Code pastes into a webview with `execCommand("paste")`, and the
+   * browser refuses an editing command run from inside another one: written by hand instead, the paste skipped the undo
+   * stack and ⌘Z could not take it back. So a refused one goes in with the editor's own command as soon as VS Code's
+   * command is over (the microtask runs once the script that called it has returned). `done` runs once it is in.
+   * Setting the selection again first closes the typing the browser would merge the paste into, so ⌘Z takes back
+   * the paste alone, as a native paste does.
+   */
+  pasteText(text: string, done: () => void): void {
+    const insert = (): boolean => {
+      const selection = window.getSelection();
+      const range = selection !== null && selection.rangeCount > 0 ? selection.getRangeAt(0) : undefined;
+      if (selection !== null && range !== undefined) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      return this.edit("insertText", text);
+    };
+    if (insert()) return done();
+    if (document.activeElement !== this.element || typeof document.execCommand !== "function") {
+      this.insertNodes(textNodes(text));
+      return done();
+    }
+    queueMicrotask(() => {
+      if (!insert()) this.insertNodes(textNodes(text));
+      done();
+    });
+  }
+
   /** One pill at the caret; the caret ends up just past it, ready for the next word. */
   insertNode(node: Element): void {
     if (this.edit("insertHTML", node.outerHTML)) return;
@@ -258,6 +287,9 @@ export class TextField {
    * of its own, not a class named `empty` — the feed's own hint already owns that class, margins and all.
    */
   refresh(): void {
+    // Erasing everything typed leaves the browser's own `<br>` behind (it holds the line open), which reads as a newline
+    // and kept the placeholder away; a line the person breaks takes two of them, so a lone one is never theirs.
+    if (this.element.childNodes.length === 1 && this.element.firstChild instanceof HTMLBRElement) this.element.replaceChildren();
     this.element.toggleAttribute("data-empty", this.value === "");
   }
 

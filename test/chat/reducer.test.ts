@@ -941,14 +941,27 @@ describe("a goal OmO stopped is not a turn waiting for an answer", () => {
     expect(applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(lifecycle))).toMatchObject({ running: false, activity: "idle" });
   });
 
-  // Measured live (omo 5.1.59, 2026-11-10): a turn that ends on a plain reply asking the person something (no question
-  // tool) leaves waiting_human with a `question` wait whose requestId is `question:<runId>:<n>` — a tool question carries
-  // the tool call id instead. Read as running, every message the person sent was steered into a queue nothing drained.
+  // Measured live (omo 5.1.59, 2026-11-10): the same turn-end question with nothing running in the background.
   it("a_reply_that_ends_with_a_question_is_an_ended_turn_the_tab_is_idle", () => {
     const lifecycle = {
       state: "waiting_human",
       runId: "r1",
       waitingOn: { children: 0, background: [], human: [{ kind: "question", requestId: "question:r1:2", revision: 1 }] },
+    };
+    expect(applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(lifecycle))).toMatchObject({ running: false, activity: "idle" });
+  });
+
+  // Seen live (omo 5.1.64, 2026-11-11): a reply that ends by asking the person something ends the turn, and OmO raises a
+  // `question` wait of its own, keyed `question:<runId>:<n>`, with no `ask-user` background wait and no tool call blocked.
+  it("a_turn_that_ended_with_a_question_is_idle", () => {
+    const lifecycle = {
+      state: "waiting_human",
+      runId: "r1",
+      waitingOn: {
+        children: 0,
+        background: [{ source: "terminal-background-sessions", activeCount: 1 }],
+        human: [{ kind: "question", requestId: "question:r1:1", revision: 1 }],
+      },
     };
     expect(applyFrame({ ...initialState(), running: true, activity: "thinking" }, life(lifecycle))).toMatchObject({ running: false, activity: "idle" });
   });

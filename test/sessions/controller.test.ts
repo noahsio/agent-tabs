@@ -118,6 +118,60 @@ describe("SessionController", () => {
     expect(ofType("steer")).toHaveLength(0);
   });
 
+  describe("a message OmO left in its queue with no turn to drain it", () => {
+    const asked = { state: "waiting_human", runId: "r1", waitingOn: { children: 0, background: [], human: [{ kind: "question", requestId: "question:r1:1", revision: 1 }] } };
+    const strandedState = (isStreaming: boolean, lifecycle: object = { state: "running", runId: "r1", waitingOn: { children: 0, background: [], human: [] } }) => openData("rpc-1", {
+      isStreaming,
+      lifecycle,
+      ordered: [{ queuedId: "q_1", text: "живы ноды?", mode: "steer", revision: 1, clientMessageId: "m-1" }],
+    });
+
+    it("is_taken_out_of_the_queue_and_sent_as_the_next_turn_when_the_tab_opens", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(false) }));
+      daemon.on("dequeue_message", (request) => ({ data: { queuedId: request["queuedId"], status: "removed" } }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      expect(controller.state.running).toBe(false);
+      await settle(() => ofType("prompt").length === 1);
+      expect(types().filter((type) => ["dequeue_message", "prompt", "steer"].includes(type))).toEqual(["dequeue_message", "prompt"]);
+      expect(ofType("dequeue_message")[0]).toMatchObject({ queuedId: "q_1" });
+      expect(ofType("prompt")[0]).toMatchObject({ message: "живы ноды?" });
+    });
+
+    it("is_sent_too_when_the_reply_that_ended_the_turn_asked_something", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(false, asked) }));
+      daemon.on("dequeue_message", (request) => ({ data: { queuedId: request["queuedId"], status: "removed" } }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      expect(controller.state.running).toBe(false);
+      await settle(() => ofType("prompt").length === 1);
+      expect(ofType("prompt")[0]).toMatchObject({ message: "живы ноды?" });
+    });
+
+    it("stays_queued_while_omo_holds_the_session", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(false, { state: "paused", runId: "r1", waitingOn: { children: 0, background: [], human: [] } }) }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await controller.send("more", "followUp"); // a later request: a drain would have been asked for before it
+      expect(ofType("dequeue_message")).toHaveLength(0);
+    });
+
+    it("one_omo_delivered_meanwhile_is_not_sent_again", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(false) }));
+      daemon.on("dequeue_message", () => ({ data: { queuedId: "q_1", status: "already_delivered" } }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      await settle(() => ofType("dequeue_message").length === 1);
+      await controller.send("next", "auto"); // a later request: the drain's own requests are already in by its answer
+      expect(ofType("prompt").map((request) => request["message"])).toEqual(["next"]);
+    });
+
+    it("stays_queued_while_a_turn_really_runs", async () => {
+      daemon.on("open_session", () => ({ data: strandedState(true) }));
+      controller = await SessionController.attach(manager, SESSION_FILE);
+      expect(controller.state.running).toBe(true);
+      await controller.send("more", "followUp"); // a later request: a drain would have been asked for before it
+      expect(ofType("dequeue_message")).toHaveLength(0);
+      expect(ofType("prompt")).toHaveLength(0);
+    });
+  });
+
   it("create_opens_session_without_model", async () => {
     controller = await SessionController.create(manager, "/tmp");
     const open = ofType("open_session")[0] as Frame;
@@ -395,6 +449,43 @@ describe("SessionController", () => {
       await settle(() => !controller?.state.blocks.some((block) => block.kind === "user" && block.delivery?.state === "sending"));
       await controller.send("three", "auto");
       expect(types().filter((type) => type === "prompt" || type === "steer")).toEqual(["prompt", "steer", "prompt"]);
+    });
+
+    it("a_message_after_a_reply_that_ended_with_a_question_goes_as_a_prompt", async () => {
+      controller = await SessionController.create(manager, "/tmp");
+      await controller.send("build it", "auto");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(frame({ type: "agent_settled" }));
+      daemon.push(frame({ type: "session_lifecycle", lifecycle: {
+        state: "waiting_human", runId: "r1",
+        waitingOn: { children: 0, background: [], human: [{ kind: "question", requestId: "question:r1:1", revision: 1 }] },
+      } }));
+      await settle(() => controller?.state.activity === "idle");
+      expect(controller.state.running).toBe(false);
+      await controller.send("answer", "auto", [], "m-2");
+      expect(ofType("prompt").at(-1)).toMatchObject({ message: "answer", clientMessageId: "m-2" });
+      expect(ofType("steer")).toHaveLength(0);
+    });
+
+    it("a_steer_asks_omo_to_start_a_turn_if_none_runs", async () => {
+      daemon.on("get_protocol_info", () => ({ data: { capabilities: ["steer_when_idle"] } }));
+      daemon.on("steer", () => ({ data: { disposition: "started" } }));
+      controller = await SessionController.create(manager, "/tmp");
+      daemon.push(frame({ type: "agent_start" }));
+      await settle(() => controller?.state.running === true);
+      expect(await controller.send("one", "auto")).toBe(true);
+      expect(ofType("steer")[0]).toMatchObject({ message: "one", whenIdle: "start" });
+      expect(ofType("prompt")).toHaveLength(0);
+    });
+
+    it("a_host_without_steer_when_idle_gets_a_plain_steer", async () => {
+      daemon.on("get_protocol_info", () => ({ data: { capabilities: [] } }));
+      controller = await SessionController.create(manager, "/tmp");
+      daemon.push(frame({ type: "agent_start" }));
+      await settle(() => controller?.state.running === true);
+      await controller.send("one", "auto");
+      expect(ofType("steer")[0]).toMatchObject({ message: "one" });
+      expect(ofType("steer")[0]).not.toHaveProperty("whenIdle");
     });
   });
 
