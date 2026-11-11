@@ -374,6 +374,22 @@ describe("SessionController", () => {
       await controller.send("three", "auto");
       expect(types().filter((type) => type === "prompt" || type === "steer")).toEqual(["prompt", "steer", "prompt"]);
     });
+
+    it("a_message_after_a_reply_that_ended_with_a_question_goes_as_a_prompt", async () => {
+      controller = await SessionController.create(manager, "/tmp");
+      await controller.send("build it", "auto");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(frame({ type: "agent_settled" }));
+      daemon.push(frame({ type: "session_lifecycle", lifecycle: {
+        state: "waiting_human", runId: "r1",
+        waitingOn: { children: 0, background: [], human: [{ kind: "question", requestId: "question:r1:1", revision: 1 }] },
+      } }));
+      await settle(() => controller?.state.activity === "idle");
+      expect(controller.state.running).toBe(false);
+      await controller.send("answer", "auto", [], "m-2");
+      expect(ofType("prompt").at(-1)).toMatchObject({ message: "answer", clientMessageId: "m-2" });
+      expect(ofType("steer")).toHaveLength(0);
+    });
   });
 
   describe("a queued message", () => {
