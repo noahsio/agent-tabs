@@ -25,6 +25,22 @@ beforeEach(() => {
 });
 
 describe("DeferredPopover", () => {
+  // Seen live (2026-11-11): a card with two questions, the first scrolled out of sight; answering the visible one gave
+  // «Ответьте на каждый вопрос» and nothing could be sent. One answer is enough; the rest go as «без ответа».
+  it("answering_one_of_two_questions_sends_it_and_marks_the_other_unanswered", () => {
+    const two: DeferredItem = { ...question, decided: undefined, questions: [
+      { header: "Диск", question: "Удалить образы?", options: [{ label: "Удалить" }, { label: "Не трогать" }], multiSelect: false },
+      { header: "Выкладка", question: "Закрыть прошлую?", options: [{ label: "Закрыть" }, { label: "Зайду сам" }], multiSelect: false },
+    ] };
+    popover.update({ type: "deferred", items: [two] });
+    click("Ответить");
+    expect(posted).toEqual([]); // nothing chosen at all: nothing to send
+    expect(popover.element.textContent).toContain("хотя бы на один вопрос");
+    click("Закрыть");
+    click("Ответить");
+    expect(posted).toEqual([{ type: "answerDeferredQuestion", id: "q", answers: ["без ответа — реши сам", "Закрыть"] }]);
+  });
+
   it("shows_this_windows_projects_and_keeps_other_projects_behind_one_line_grouped_by_project", () => {
     const counts: number[] = [];
     popover = new DeferredPopover((message) => posted.push(message), (count) => counts.push(count));

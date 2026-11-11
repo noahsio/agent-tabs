@@ -2,6 +2,8 @@ import type { DeferredAction, DeferredDelivery, DeferredHostMessage, DeferredIte
 import { button, el, type Post } from "./dom";
 import type { PopoverContent } from "./popover";
 
+const UNANSWERED = "без ответа — реши сам";
+
 type Row = { element: HTMLElement; item: DeferredItem; busy: boolean; error: HTMLElement; answer?: () => void; ready?: () => boolean };
 
 /** Existing popover layout: one scrolling list, wrapping controls, no nested command scroller. */
@@ -180,14 +182,17 @@ export class DeferredPopover implements PopoverContent {
       const decided = el("p", { class: "deferred-decided" });
       decided.hidden = true;
       element.append(decided);
-      row.ready = () => values.every((value) => value().length > 0 && value().length <= 2000);
+      // One answer is enough: a question left blank goes to the agent as «без ответа», so it decides that one itself.
+      row.ready = () => values.some((value) => value().length > 0) && values.every((value) => value().length <= 2000);
       row.answer = () => {
         if (!row.ready?.()) {
-          error.textContent = "Ответьте на каждый вопрос, не больше 2000 символов на ответ";
+          error.textContent = values.some((value) => value().length > 2000)
+            ? "Не больше 2000 символов на ответ"
+            : "Выберите ответ хотя бы на один вопрос";
           error.hidden = false;
           return;
         }
-        this.submit(row, { type: "answerDeferredQuestion", id: item.id, answers: values.map((value) => value()) });
+        this.submit(row, { type: "answerDeferredQuestion", id: item.id, answers: values.map((value) => value() || UNANSWERED) });
       };
       element.append(el("div", { class: "deferred-actions" },
         button("Ответить", {}, row.answer), button("Убрать", { class: "secondary" }, () => this.submit(row, { type: "dismissDeferredQuestion", id: item.id }))));
