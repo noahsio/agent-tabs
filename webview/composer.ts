@@ -906,8 +906,7 @@ export class Composer {
     if (text.trim() !== "") {
       if (!inside) return; // somebody else's field: its paste is its own
       event.preventDefault();
-      this.field.insertText(text);
-      this.afterEdit();
+      this.field.pasteText(text, () => this.afterEdit());
       return;
     }
     const files = [...(event.clipboardData?.files ?? [])];
@@ -920,8 +919,7 @@ export class Composer {
     if (files.length > 0) this.flash(ONLY_PICTURES); // files only, none a picture: say why nothing happened
     if (!inside || text === "") return;
     event.preventDefault(); // blank text is still text, and still goes in plain
-    this.field.insertText(text);
-    this.afterEdit();
+    this.field.pasteText(text, () => this.afterEdit());
   }
 
   /** After a change the composer made itself: the editable element fires no input event for those. */
