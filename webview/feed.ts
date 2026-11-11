@@ -243,6 +243,39 @@ function indicatorVerb(activity: FeedActivity | undefined): string {
   }
 }
 
+/**
+ * What the focus view folds away: tool steps (an answered question is the person's own turn and stays; an open one
+ * draws nothing anyway) and thinking that came with no words. An answer's text always shows.
+ */
+function isFolded(block: Block): boolean {
+  if (block.kind === "tool") return block.answer === undefined && block.name !== ASK_TOOL;
+  return block.kind === "assistant" && block.text === "" && block.thinking !== "";
+}
+
+/** The folded row's words: the actions and their failures, else the thinking time, else how many steps. */
+export function foldLabel(blocks: Block[]): string {
+  const tools = blocks.filter((block): block is ToolBlock => block.kind === "tool" && !isTodoStep(block));
+  if (tools.length > 0) {
+    const failed = tools.filter((block) => block.state === "error").length;
+    const actions = `${tools.length} ${plural(tools.length, "действие", "действия", "действий")}`;
+    return failed > 0 ? `${actions} · ${failed} с ошибкой` : actions;
+  }
+  const thoughts = blocks.filter((block): block is AssistantBlock => block.kind === "assistant");
+  if (thoughts.length === blocks.length) {
+    if (thoughts.some((block) => block.thinkingStartedAt !== undefined)) return "Размышляю…";
+    const timed = thoughts.filter((block) => block.thinkingMs !== undefined);
+    if (timed.length === 0) return "Размышления";
+    return `Размышлял ${formatDuration(timed.reduce((sum, block) => sum + (block.thinkingMs as number), 0))}`;
+  }
+  return `${blocks.length} ${plural(blocks.length, "шаг", "шага", "шагов")}`;
+}
+
+/** The folded row's dot: still at work, something failed, or all done. */
+function foldState(blocks: Block[]): "running" | "error" | "ok" {
+  if (blocks.some((block) => (block.kind === "tool" && block.state === "running") || (block.kind === "assistant" && block.thinkingStartedAt !== undefined))) return "running";
+  return blocks.some((block) => block.kind === "tool" && block.state === "error") ? "error" : "ok";
+}
+
 /** A shown `HH:MM` row for each block at least a minute after the previous shown one. */
 function stamps(blocks: Block[]): Map<string, string> {
   const shown = new Map<string, string>();
@@ -368,6 +401,12 @@ export class Feed {
   private readonly guardRows = new Map<string, { after: string | undefined; row: HTMLElement }>();
   /** A block left as it is because the person is selecting in it: it is built again when the selection lets go. */
   private held = false;
+  /** The focus view: each run of steps between the person's messages and the answers folds into one row. */
+  private focus = false;
+  /** Folded runs the person opened, by the id of the run's first block. */
+  private readonly openFolds = new Set<string>();
+  /** Folded rows by the same key, rebuilt only when their words or state change. */
+  private readonly foldRows = new Map<string, { signature: string; element: HTMLElement }>();
 
   constructor(
     private readonly root: HTMLElement,
@@ -430,12 +469,21 @@ export class Feed {
     return this.root.scrollHeight - this.root.scrollTop - this.root.clientHeight < STICK_TO_BOTTOM_PX;
   }
 
+  /** The window's focus view on or off; opened folds start closed again on the next switch. */
+  setFocus(on: boolean): void {
+    if (on === this.focus) return;
+    this.focus = on;
+    this.openFolds.clear();
+    this.renderBlocks();
+  }
+
   update(blocks: Block[], running: boolean, activity?: FeedActivity, stick: boolean = this.stuck()): void {
     this.blocks = blocks;
     this.renderBlocks();
     const waiting = activity?.waiting;
-    // The in-progress thinking step already says «Размышляю…»; the bottom «Думаю…» would only duplicate it, so drop it then.
-    const thinkingStepShown = waiting === undefined && activity?.activity === "thinking" && this.thinkingInProgress();
+    // The in-progress thinking step already says «Размышляю…»; the bottom «Думаю…» would only duplicate it, so drop it then
+    // — unless the focus view folded that step away, and the bottom line is the only one saying it.
+    const thinkingStepShown = waiting === undefined && activity?.activity === "thinking" && this.list.querySelector('[data-role="thinking-live"]') !== null;
     this.indicator.hidden = (!running && waiting === undefined) || thinkingStepShown;
     this.indicator.classList.toggle("waiting", waiting !== undefined);
     this.verb.textContent = waiting ?? indicatorVerb(activity);
@@ -508,7 +556,7 @@ export class Feed {
     // rows from before the first block lead; rows whose block is gone close the list
     const flat = [
       ...after(undefined),
-      ...blocks.flatMap((block) => [{ element: this.blockElement(block, shown.get(block.id), plans.get(block.id)), head: isSent(block) }, ...after(block.id)]),
+      ...this.folded(blocks, (block) => [{ element: this.blockElement(block, shown.get(block.id), plans.get(block.id)), head: isSent(block) }, ...after(block.id)]),
       ...rows.filter((row) => row.after !== undefined && !ids.has(row.after)).map((row) => ({ element: row.row, head: false })),
     ];
     // Each sent message opens a turn — its own containing block. Its bubble is `position: sticky` inside that turn, so
@@ -557,9 +605,62 @@ export class Feed {
     this.syncThinkingTimer();
   }
 
-  /** True while the current turn's thinking step is open and carrying reasoning text — the one «Размышляю…» line on screen. */
-  private thinkingInProgress(): boolean {
-    return this.blocks.some((block) => block.kind === "assistant" && block.thinkingStartedAt !== undefined && block.thinking !== "");
+  /**
+   * The timeline's items in order. In the focus view each run of folded blocks (one with nothing it must show after it,
+   * a guard row included) becomes one row; an opened run shows its row and then its blocks as usual.
+   */
+  private folded(blocks: Block[], items: (block: Block) => { element: HTMLElement; head: boolean }[]): { element: HTMLElement; head: boolean }[] {
+    if (!this.focus) return blocks.flatMap(items);
+    type Item = { element: HTMLElement; head: boolean };
+    const out: Item[] = [];
+    const live = new Set<string>();
+    let run: { block: Block; own: Item[] }[] = [];
+    const close = (): void => {
+      const first = run[0];
+      if (first === undefined) return;
+      live.add(first.block.id);
+      const open = this.openFolds.has(first.block.id);
+      out.push({ element: this.foldRow(first.block.id, run.map((member) => member.block), open), head: false });
+      // closed: only a guard row after the run's last step stays (an approval is never folded away)
+      out.push(...(open ? run.flatMap((member) => member.own) : (run.at(-1)?.own.slice(1) ?? [])));
+      run = [];
+    };
+    for (const block of blocks) {
+      const own = items(block);
+      if (!isFolded(block)) {
+        close();
+        out.push(...own);
+        continue;
+      }
+      run.push({ block, own });
+      if (own.length > 1) close(); // a guard row after it: shown, so the run ends there
+    }
+    close();
+    for (const key of [...this.foldRows.keys()]) if (!live.has(key)) this.foldRows.delete(key);
+    for (const key of [...this.openFolds]) if (!live.has(key)) this.openFolds.delete(key);
+    return out;
+  }
+
+  /** One folded run: a dot as its steps' state, its words, and a click (or Enter) that opens or closes it. */
+  private foldRow(key: string, run: Block[], open: boolean): HTMLElement {
+    const label = foldLabel(run);
+    const state = foldState(run);
+    const signature = `${label}|${state}|${open}`;
+    const cached = this.foldRows.get(key);
+    if (cached !== undefined && cached.signature === signature) return cached.element;
+    const toggle = button(
+      el("span", { class: "fold-label" }, label),
+      { class: "fold-toggle", "data-role": "fold", "aria-expanded": String(open), title: open ? "Свернуть шаги" : "Показать шаги" },
+      () => {
+        if (this.openFolds.has(key)) this.openFolds.delete(key);
+        else this.openFolds.add(key);
+        this.renderBlocks();
+      },
+    );
+    toggle.append(el("span", { class: "fold-chevron", "aria-hidden": "true" }, open ? "▾" : "▸"));
+    const element = el("div", { class: "entry steps fold", "data-fold": key }, el("div", { class: `step fold-row ${state}` }, toggle));
+    this.foldRows.set(key, { signature, element });
+    return element;
   }
 
   /** Runs one interval iff an in-progress thinking step is on screen, starting it once and tearing it down when that step is gone. */
@@ -635,7 +736,12 @@ export class Feed {
    * state) — otherwise a fresh one that keeps disclosure state.
    */
   private blockElement(block: Block, stamp: string | undefined, plan?: TodoPhase[]): HTMLElement {
-    const marks = [this.editing.has(block.id) ? "edit" : "", this.busy.has(block.id) ? "busy" : "", this.handedOver.has(block.id) ? "handed" : ""];
+    const marks = [
+      this.editing.has(block.id) ? "edit" : "",
+      this.busy.has(block.id) ? "busy" : "",
+      this.handedOver.has(block.id) ? "handed" : "",
+      this.focus && block.kind === "assistant" ? "focus" : "", // an answer shows without its thinking then
+    ];
     const shownPlan = isTodoStep(block) && (block.todo.op === "init" || block.todo.op === "view") ? (plan ?? []) : undefined;
     const extras = [stamp ?? "", ...marks, shownPlan !== undefined ? JSON.stringify(shownPlan) : ""].join("|");
     const previous = this.rendered.get(block.id);
@@ -921,7 +1027,8 @@ export class Feed {
 
   private renderAssistant(block: AssistantBlock): HTMLElement[] {
     const steps: HTMLElement[] = [];
-    if (block.thinking !== "") {
+    // The focus view keeps an answer's words and folds its thinking; thinking with no words is folded as a whole.
+    if (block.thinking !== "" && !(this.focus && block.text !== "")) {
       // In progress: a marked summary whose seconds the single thinking interval ticks (see syncThinkingTimer); otherwise static.
       const summary =
         block.thinkingStartedAt !== undefined

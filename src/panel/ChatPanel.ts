@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { tabTitle } from "./tabTitle";
 import * as vscode from "vscode";
-import type { ModelRef } from "../chat/model";
+import { normalizeSessionName, untitledName, type ModelRef } from "../chat/model";
 import { initialState } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import type { DeferredInbox } from "../deferred/inbox";
@@ -11,7 +11,7 @@ import type { ApprovalPanel, GuardApprovals } from "../guard/approvals";
 import type { Checkpointer } from "../rewind/checkpointer";
 import type { ForkDraft } from "../rewind/fork";
 import { claimAutoUnwedge, releaseAutoUnwedge } from "../sessions/autoUnwedge";
-import { SessionController, normalizeSessionName, type CommandRow, type TabState } from "../sessions/controller";
+import { SessionController, type CommandRow, type TabState } from "../sessions/controller";
 import type { ReapOutcome } from "../sessions/reapHost";
 import { heldPause, ReconnectLoop } from "../sessions/reconnect";
 import { classifyOpen, giveUpText, heldByAnotherHostCopy, type Holder } from "../sessions/refusal";
@@ -93,15 +93,21 @@ export type PanelHost = {
   firstRun?: () => Promise<boolean>;
   /** The «/» menu's hidden commands (the same array until they change); absent while the environment is incomplete. */
   hiddenCommands?: () => readonly string[];
+  /** The window's focus view (the `agentTabs.focusView` setting); absent: off. */
+  focusView?: () => boolean;
+  /** Stores the focus view; every tab hears of it through `focusViewChanged`. */
+  setFocusView?: (enabled: boolean) => Promise<void>;
   /** This environment's model ladder, read on demand so an edit in the modal counts from the next failure on. */
   ladder?: () => Ladder;
+  /** A topic title for a session's first message (one cheap model call); absent while the environment is incomplete. */
+  titler?: (message: string) => Promise<string | undefined>;
   /** The window's approval cards (one guard subscription for every tab); absent while the environment is incomplete. */
   guard?: Pick<GuardApprovals, "answer" | "replay" | "panelsChanged">;
   deferred?: Pick<DeferredInbox, "refresh" | "answer">;
   /** Snapshots and the checkpoint log; absent when the environment is incomplete. */
   checkpointer?: Checkpointer;
-  /** Opens a forked session in a new tab whose composer starts with `draft`; the tab names the session `name` once it is open. */
-  openFork(sessionPath: string, draft: ForkDraft, column?: vscode.ViewColumn, name?: string): void;
+  /** Opens a forked session in a new tab whose composer starts with `draft` (if any); the tab names the session `name` once it is open. */
+  openFork(sessionPath: string, draft: ForkDraft | undefined, column?: vscode.ViewColumn, name?: string): void;
   /**
    * Stops a second copy of this environment's own host that holds a session file, when every proof of safety holds —
    * `force` is the person's own say-so, which skips the proofs of idleness and keeps those of attribution. One attempt
@@ -377,6 +383,7 @@ export class ChatPanel implements ApprovalPanel {
     this.controller = controller;
     const ladder = this.host.ladder;
     if (ladder !== undefined) controller.setLadder({ ladder, view: (view) => this.poster.send({ type: "ladder", view: view ?? null }) });
+    if (this.host.titler !== undefined) controller.setTitler(this.host.titler);
     const checkpointer = this.host.checkpointer;
     if (checkpointer !== undefined) {
       const manager = daemon.value;
@@ -558,6 +565,7 @@ export class ChatPanel implements ApprovalPanel {
       message.type === "archive" ||
       message.type === "openSession" ||
       message.type === "newSession" ||
+      message.type === "setFocusView" ||
       message.type === "restartHost" ||
       message.type === "settingsGet" ||
       message.type === "settingsAction" ||
@@ -728,6 +736,14 @@ export class ChatPanel implements ApprovalPanel {
       case "newSession":
         this.host.newSession(this.panel.viewColumn); // in the group of the tab it was asked from
         return;
+      case "setFocusView":
+        try {
+          await this.host.setFocusView?.(message.enabled);
+        } catch (error) {
+          this.warn(`Не удалось переключить режим фокуса: ${errorText(error)}`);
+          this.publish(); // the menu shows the setting as it stayed
+        }
+        return;
       case "restartHost":
         this.host.restartHost();
         return;
@@ -779,6 +795,15 @@ export class ChatPanel implements ApprovalPanel {
           // In the feed as well as a toast: a toast is easy to miss (do-not-disturb), and «nothing happened» is not an answer.
           this.host.log(`Ответвление не удалось: ${result.reason}`);
           this.controller?.note("warn", `Не удалось ответвить разговор: ${result.reason}`);
+          this.warn(result.reason);
+        }
+        return;
+      }
+      case "forkSession": {
+        const result = this.actions ? await this.actions.forkSession() : { ok: false as const, reason: NOT_OPEN };
+        if (!result.ok) {
+          this.host.log(`Ответвление сессии не удалось: ${result.reason}`);
+          this.controller?.note("warn", `Не удалось ответвить сессию: ${result.reason}`);
           this.warn(result.reason);
         }
         return;
@@ -1098,8 +1123,9 @@ export class ChatPanel implements ApprovalPanel {
     const commands = this.commands ?? this.host.catalog.commands;
     const thinkingLevels = this.thinkingLevels ?? this.host.catalog.thinkingLevels;
     const hiddenCommands = this.host.hiddenCommands?.();
+    const focusView = this.host.focusView?.() === true;
     this.track(tab.sessionPath);
-    this.setTitle(state.title ?? tab.title ?? UNTITLED);
+    this.setTitle(state.title ?? tab.title ?? untitledName(state.blocks) ?? UNTITLED);
     // A connection failure the quiet line over the composer already shows (it is handed the controller's own error
     // text) must not be echoed into the red banner too — that duplication is the transient error the person asked to
     // be rid of. The banner keeps a must-act `this.banner`, and a session error the retry line is not already showing.
@@ -1113,8 +1139,14 @@ export class ChatPanel implements ApprovalPanel {
       ...(commands !== undefined ? { commands } : {}),
       ...(thinkingLevels !== undefined ? { thinkingLevels } : {}),
       ...(hiddenCommands !== undefined ? { hiddenCommands } : {}),
+      ...(focusView ? { focusView: true as const } : {}),
     };
     this.poster.push(message);
+  }
+
+  /** The window's focus view changed (menu, command or settings): this tab shows it. */
+  focusViewChanged(): void {
+    if (!this.disposed) this.publish();
   }
 
   /** Keeps the registry key equal to the session's current file. */

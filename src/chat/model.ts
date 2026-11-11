@@ -173,3 +173,23 @@ export type ChatState = {
   cursor?: string;
   error?: string;
 };
+
+const SESSION_NAME_MAX = 60;
+
+/** The one rule for a session's name: whitespace collapsed, trimmed, capped. Empty means "no name". */
+export function normalizeSessionName(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, SESSION_NAME_MAX);
+}
+
+/**
+ * What an untitled session is shown as until OmO titles it after its first turn: the first message's words, as a name.
+ * Only shown, never sent: a session named here would never get OmO's title.
+ */
+export function untitledName(blocks: Block[]): string | undefined {
+  for (const block of blocks) {
+    if (block.kind !== "user" || block.answer !== undefined) continue;
+    const name = normalizeSessionName(block.text);
+    if (name !== "") return name;
+  }
+  return undefined;
+}

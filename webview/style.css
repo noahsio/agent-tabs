@@ -648,6 +648,29 @@ button.thumb-view:hover {
   color: var(--run);
 }
 
+/* The focus view's folded run: a step on the rail like any other, its words quiet, the whole line one toggle. */
+.step.fold-row > button.fold-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  text-align: left;
+}
+
+.step.fold-row > button.fold-toggle:hover,
+.step.fold-row > button.fold-toggle:focus-visible {
+  color: var(--fg);
+}
+
+.fold-chevron {
+  flex: none;
+  font-size: 0.85em;
+}
+
 /* Someone else's words under a notice (a provider's refusal): folded away, never wider than the rail. */
 .notice-details > summary {
   cursor: pointer;

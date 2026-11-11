@@ -68,6 +68,7 @@ describe("«/» button: the actions menu", () => {
     expect(actions().map((row) => row.textContent)).toEqual([
       "Довести до концаАгент сам составит план, выполнит его и проверит результат, прежде чем закончить ulw",
       "Команда агентовЗадача делится на части, которые параллельно делают несколько агентов на подходящих моделях mass ulw",
+      "Режим фокусаТолько ваши сообщения и ответы агента, шаги свёрнуты ctrl+alt+f",
       "Настройки",
     ]);
     // Two lines: the plain title, then the dim explanation with the keyword as a small tag at its end.
@@ -81,7 +82,10 @@ describe("«/» button: the actions menu", () => {
     key(actions()[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(actions()[1]);
     key(actions()[1] as HTMLElement, "ArrowDown");
+    expect(document.activeElement).toBe(role("action-focus"));
+    key(actions()[2] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(role("action-settings"));
+    key(actions()[3] as HTMLElement, "ArrowUp");
     key(actions()[2] as HTMLElement, "ArrowUp");
     key(actions()[1] as HTMLElement, "ArrowUp");
     key(actions()[0] as HTMLElement, "ArrowUp"); // stays on the first
@@ -91,11 +95,28 @@ describe("«/» button: the actions menu", () => {
     expect(document.activeElement).toBe(input());
   });
 
-  it("settings_sits_under_a_separator_line", () => {
+  it("the_focus_switch_and_settings_sit_under_a_separator_line", () => {
     openActions();
     const settings = role("action-settings");
     expect(settings.textContent).toBe("Настройки");
-    expect(settings.previousElementSibling?.getAttribute("role")).toBe("separator");
+    expect(settings.previousElementSibling).toBe(role("action-focus"));
+    expect(role("action-focus").previousElementSibling?.getAttribute("role")).toBe("separator");
+  });
+
+  it("the_focus_switch_asks_the_host_and_shows_the_windows_setting", () => {
+    openActions();
+    expect(role("action-focus").getAttribute("aria-checked")).toBe("false");
+    role("action-focus").click();
+    expect(shown()).toEqual([]);
+    expect(posted).toContainEqual({ type: "setFocusView", enabled: true });
+    expect(root.querySelector('[data-role="action-focus"] .check')).toBeNull(); // nothing changes until the host says so
+
+    view.update({ type: "state", state: initialState(), tab: { modelMode: "auto", sessionPath: "/s/a.jsonl", durableId: "d1" }, reconnectable: true, focusView: true });
+    openActions();
+    expect(role("action-focus").getAttribute("aria-checked")).toBe("true");
+    expect(role("action-focus").querySelector(".check")?.textContent).toBe("✓");
+    role("action-focus").click();
+    expect(posted.at(-1)).toEqual({ type: "setFocusView", enabled: false });
   });
 
   it("hovering_a_row_makes_it_the_active_one", () => {

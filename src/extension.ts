@@ -43,7 +43,7 @@ import { RpcClient } from "./rpc/client";
 import { AccountsService } from "./settings/accounts";
 import { ConnectionsHost } from "./settings/connections";
 import { EnvironmentHost } from "./settings/environment";
-import { keyFileSecrets } from "./settings/gateway";
+import { generateTitle, keyFileSecrets } from "./settings/gateway";
 import { LadderHost, readLadder } from "./settings/ladder";
 import { RolesHost } from "./settings/roles";
 import { SecurityHost } from "./settings/security";
@@ -231,11 +231,17 @@ export function activate(context: vscode.ExtensionContext): void {
   settings?.setMaxListeners(0); // every tab listens for "changed" and "login"
   const catalogListeners = new Set<() => void>();
   const checkpointStore = built.ok ? new CheckpointStore(built.value.agentDir) : undefined;
+  const focusView = (): boolean => vscode.workspace.getConfiguration("agentTabs").get<boolean>("focusView") === true;
+  const setFocusView = async (enabled: boolean): Promise<void> => {
+    await vscode.workspace.getConfiguration("agentTabs").update("focusView", enabled, vscode.ConfigurationTarget.Global);
+  };
   const host: PanelHost = {
     extensionUri: context.extensionUri,
     registry: new PanelRegistry<ChatPanel>(),
     panels,
     catalog,
+    focusView,
+    setFocusView,
     onCatalogChange: (listener) => {
       catalogListeners.add(listener);
       return () => void catalogListeners.delete(listener);
@@ -446,6 +452,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     // Read on demand, never cached: the ladder a failure walks is the one the modal shows right now.
     host.ladder = () => readLadder(paths);
+    host.titler = (message) => generateTitle(paths, message);
     settings.register(new LadderHost({ paths, models: () => roles.modelOptions(), changed: () => settings.emit("changed") }));
     let hiddenCommands: readonly string[] = readHiddenCommands(paths); // one array until it changes: the tabs' deltas compare by reference
     host.hiddenCommands = () => hiddenCommands;
@@ -627,6 +634,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("agentTabs.newSession", () => newSession()),
     vscode.commands.registerCommand("agentTabs.openSession", openSession),
     vscode.commands.registerCommand("agentTabs.restartHost", restartHost),
+    vscode.commands.registerCommand("agentTabs.toggleFocusView", () => setFocusView(!focusView())),
+    // The menu, the command and the settings editor all land here: every open tab follows the one setting.
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("agentTabs.focusView")) for (const panel of panels) panel.focusViewChanged();
+    }),
     vscode.window.registerWebviewPanelSerializer(CHAT_VIEW_TYPE, {
       async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
         const tab = (state as Partial<PersistedState> | undefined)?.tab;

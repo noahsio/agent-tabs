@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { realpathSync } from "node:fs";
-import type { ChatState, ImageRef, ModelRef } from "../chat/model";
+import { normalizeSessionName, type ChatState, type ImageRef, type ModelRef } from "../chat/model";
 import { addOutgoing, applyEntries, applyFrame, applyLifecycle, applyTaskList, dropOutgoing, goalCardNotice, initialState, lifecycleRunning, resolveDialog, reviseQueued, stoppedGoalNotice, taskStatus } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import { redact } from "../env";
@@ -72,7 +72,6 @@ export type CommandRow = {
 type Frame = Record<string, any>;
 
 const ENTRIES_PAGE_LIMIT = 500;
-const SESSION_NAME_MAX = 60;
 /**
  * The agent rows are cosmetic and off the open path, so the list is asked for with a deadline of its own instead of the
  * client's 30-second default: a reopened session's task bridge answers `omo.task.list` never at all (OmO 5.1.59), and
@@ -142,11 +141,6 @@ function isCompactionReject(error: RpcError): boolean {
   return COMPACTION_REJECT.test(error.message);
 }
 
-/** The one rule for a session's name: whitespace collapsed, trimmed, capped. Empty means "no name". */
-export function normalizeSessionName(text: string): string {
-  return text.replace(/\s+/g, " ").trim().slice(0, SESSION_NAME_MAX);
-}
-
 /** The host's context estimate into the state: the window, and the token count (null after a compaction clears it until the next reply). */
 function withContextUsage(state: ChatState, usage: unknown): ChatState {
   if (!isObject(usage)) return state;
@@ -204,6 +198,8 @@ export class SessionController extends EventEmitter {
   private armedFor: ChatState["dialogs"] | undefined;
   private ready: Promise<void> | undefined;
   private nameSent = false;
+  /** A topic title for the first message; absent (or undefined from it): the session is named by the message itself. */
+  private titler: ((message: string) => Promise<string | undefined>) | undefined;
   private durableId: string | undefined;
   private sessionCwd: string | undefined;
   /** The last message's dispatch (not its response): the next message is written after it. */
@@ -489,7 +485,7 @@ export class SessionController extends EventEmitter {
     }
     if (unnamed) {
       this.nameSent = true;
-      await this.nameSession(text);
+      void this.nameSession(text); // the title may take a model call: the message is not held for it
     }
     return true;
   }
@@ -940,6 +936,10 @@ export class SessionController extends EventEmitter {
    * the environment's ladder and model list, aborts (and, if that is not enough, unloads) the turn, switches the
    * model and repeats the message through the same `send` the person's own messages take. `view` is its line.
    */
+  setTitler(titler: (message: string) => Promise<string | undefined>): void {
+    this.titler = titler;
+  }
+
   setLadder(deps: { ladder: () => Ladder; view: (view: LadderView | undefined) => void }): void {
     this.modelLadder?.dispose();
     this.modelLadder = new ModelLadder({
@@ -1456,9 +1456,11 @@ export class SessionController extends EventEmitter {
     }
   }
 
+  /** Names the session by the first message's topic, else by the message itself; a name given meanwhile wins. */
   private async nameSession(text: string): Promise<void> {
-    const name = normalizeSessionName(text);
-    if (name === "") return;
+    const titled = await this.titler?.(text).catch(() => undefined);
+    const name = normalizeSessionName(titled ?? text);
+    if (name === "" || this.released || this.current.title !== undefined) return;
     try {
       await this.request("set_session_name", { name });
     } catch {

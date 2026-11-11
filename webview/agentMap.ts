@@ -1,4 +1,4 @@
-import type { AgentRow } from "../src/chat/model";
+import { untitledName, type AgentRow } from "../src/chat/model";
 import type { AgentDetailsMessage, ModelInfo, StateMessage } from "../src/panel/protocol";
 import { AgentDetailsModal } from "./agentDetails";
 import { modelName } from "./composer";
@@ -105,7 +105,7 @@ export class AgentMap implements PopoverContent {
     const { state, tab } = message;
     this.agents = ordered(state.agents);
     this.models = message.models ?? [];
-    this.rootTitle.textContent = state.title ?? tab.title ?? UNTITLED;
+    this.rootTitle.textContent = state.title ?? tab.title ?? untitledName(state.blocks) ?? UNTITLED;
     const model = modelName(state.model, message.models ?? []);
     this.rootMeta.textContent = [model, state.contextTokens === undefined ? undefined : `${tokensText(state.contextTokens)} в контексте`].filter((part) => part !== undefined).join(" · ");
     this.rootMeta.hidden = this.rootMeta.textContent === "";

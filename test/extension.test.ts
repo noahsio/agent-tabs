@@ -21,6 +21,7 @@ const vscodeMock = vi.hoisted(() => ({
   restored: [] as unknown[],
   activeColumn: 1 as number | undefined,
   updates: [] as unknown[],
+  configListeners: [] as ((event: { affectsConfiguration(section: string): boolean }) => void)[],
 }));
 
 const restartHost = vi.hoisted(() => vi.fn(async () => true));
@@ -62,8 +63,13 @@ vi.mock("vscode", () => ({
       update: async (key: string, value: unknown) => {
         vscodeMock.settings[key] = value;
         vscodeMock.updates.push(value);
+        for (const listener of vscodeMock.configListeners) listener({ affectsConfiguration: (section) => section === `agentTabs.${key}` });
       },
     }),
+    onDidChangeConfiguration: (listener: (event: { affectsConfiguration(section: string): boolean }) => void) => {
+      vscodeMock.configListeners.push(listener);
+      return { dispose: () => undefined };
+    },
     get workspaceFolders() {
       return vscodeMock.folders;
     },
@@ -75,6 +81,7 @@ vi.mock("vscode", () => ({
     },
   },
   Uri: { joinPath: () => ({}) },
+  ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
   env: { appRoot: "/Applications/Fake Code.app/Contents/Resources/app" },
   ExtensionMode: { Production: 1, Development: 2, Test: 3 },
 }));
@@ -147,9 +154,39 @@ beforeEach(() => {
   vscodeMock.activeColumn = 1;
   vscodeMock.updates.length = 0;
   vscodeMock.workspaceSettings = {};
+  vscodeMock.configListeners.length = 0;
 });
 
 afterEach(() => deactivate());
+
+describe("agentTabs.toggleFocusView", () => {
+  it("is_contributed_with_ctrl_alt_f_in_a_chat_tab", () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as {
+      activationEvents: string[];
+      contributes: { keybindings: { command: string; key: string; when: string }[]; configuration: { properties: Record<string, { type: string; default: unknown }> } };
+    };
+    expect(manifest.activationEvents).toContain("onCommand:agentTabs.toggleFocusView");
+    expect(manifest.contributes.keybindings).toContainEqual({ command: "agentTabs.toggleFocusView", key: "ctrl+alt+f", when: "activeWebviewPanelId == 'agentTabs.chat'" });
+    expect(manifest.contributes.configuration.properties["agentTabs.focusView"]).toMatchObject({ type: "boolean", default: false });
+  });
+
+  it("flips_the_window_setting_and_every_tab_hears_of_it", async () => {
+    vscodeMock.folders = [{ uri: { fsPath: mkdtempSync(join(tmpdir(), "agent-tabs-focus-")) } }]; // a tab opens only in a project
+    activateWith(FULL_ENV);
+    await vscodeMock.commands.get("agentTabs.newSession")?.();
+    const host = vscodeMock.host as import("../src/panel/ChatPanel").PanelHost;
+    const heard = vi.fn();
+    for (const panel of host.panels) (panel as unknown as { focusViewChanged: () => void }).focusViewChanged = heard;
+    expect(host.focusView?.()).toBe(false);
+    await vscodeMock.commands.get("agentTabs.toggleFocusView")?.();
+    expect(vscodeMock.settings["focusView"]).toBe(true);
+    expect(host.focusView?.()).toBe(true);
+    expect(heard).toHaveBeenCalledTimes(1);
+    await host.setFocusView?.(false); // the «/» menu's way in
+    expect(host.focusView?.()).toBe(false);
+    expect(heard).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("agentTabs.restartHost", () => {
   it("is_contributed_and_activates_the_extension", () => {

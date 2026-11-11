@@ -695,6 +695,23 @@ describe("ChatPanel", () => {
     expect(newSession).toHaveBeenCalledWith(2);
   });
 
+  it("the_focus_view_is_the_windows_setting_carried_in_every_state", async () => {
+    let on = false;
+    const setFocusView = vi.fn(async (enabled: boolean) => {
+      on = enabled;
+    });
+    const { receive, posted, chat } = await openAttached({ focusView: () => on, setFocusView });
+    expect(posted.at(-1)?.focusView).toBeUndefined();
+    receive({ type: "setFocusView", enabled: true });
+    await settle(() => setFocusView.mock.calls.length === 1);
+    expect(setFocusView).toHaveBeenCalledWith(true);
+    chat.focusViewChanged(); // what the window does once the setting is stored
+    await settle(() => posted.at(-1)?.focusView === true);
+    on = false;
+    chat.focusViewChanged();
+    await settle(() => posted.at(-1)?.focusView === undefined);
+  });
+
   it("open_session_and_new_session_answer_while_this_tabs_own_session_is_still_opening", async () => {
     const fake = fakePanel();
     const openSession = vi.fn(async () => undefined);
@@ -1191,6 +1208,22 @@ describe("ChatPanel", () => {
       await settle(() => daemon.requests.some((request) => request["type"] === "set_session_name"));
       expect(openFork.mock.calls[0]?.[3]).toBe("Починить вход (fork 2)");
       expect(daemon.requests.filter((request) => request["type"] === "set_session_name").map((request) => request["name"])).toEqual(["Починить вход (fork 2)"]);
+    });
+
+    it("fork_session_copies_the_whole_conversation_into_a_new_tab_without_a_draft", async () => {
+      const { sessionFile, checkpointer } = await rewindable();
+      const fake = fakePanel();
+      const openFork = vi.fn();
+      ChatPanel.restore(host({ checkpointer, openFork }), fake.panel, { kind: "attach", sessionPath: sessionFile });
+      await settle(() => daemon.requests.some((request) => request["type"] === "get_available_models"));
+      fake.receive({ type: "forkSession" });
+      await settle(() => openFork.mock.calls.length === 1);
+      const [path, draft, column] = openFork.mock.calls[0] as unknown as [string, unknown, unknown];
+      expect(dirname(path)).toBe(dirname(sessionFile));
+      expect(draft).toBeUndefined();
+      expect(column).toBe(2);
+      const ids = readFileSync(path, "utf8").trimEnd().split("\n").slice(1).map((line) => (JSON.parse(line) as { id: string }).id);
+      expect(ids).toEqual(["u1", "a1", "r1"]);
     });
 
     it("rewind_request_routes_to_the_service_and_answers_rewound", async () => {

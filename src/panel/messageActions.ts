@@ -1,7 +1,7 @@
 import type { Checkpointer } from "../rewind/checkpointer";
 import { agentTouches } from "../rewind/children";
 import { ancestors, findUserEntry, type Entry } from "../rewind/edits";
-import { forkDraft, forkTitle, writeFork, type ForkDraft } from "../rewind/fork";
+import { forkDraft, forkTitle, writeFork, writeSessionFork, type ForkDraft } from "../rewind/fork";
 import { applyRewind, planRewind, type RewindPlan } from "../rewind/plan";
 import { snapshotExists } from "../rewind/snapshot";
 import type { CheckpointLog, CheckpointPoint, SentMode } from "../rewind/store";
@@ -15,6 +15,7 @@ export const HINTS = {
   noSnapshot: "Снимок не сохранился",
   offBranch: "Сообщение не в текущей ветке разговора",
   notFound: "Сообщение не найдено в журнале сессии",
+  empty: "В сессии ещё нет сообщений",
   liveUnknown: "Не удалось проверить, не идёт ли ход в другой сессии этого проекта",
   changed: "Файлы изменились — проверьте список ещё раз",
 } as const;
@@ -65,8 +66,8 @@ export type MessageActionsDeps = {
   controller: ActionsController;
   checkpointer: Checkpointer;
   runningCwds: () => Promise<string[]>;
-  /** `name`: the fork's session name, set once its tab has opened it. */
-  openFork: (sessionPath: string, draft: ForkDraft, name: string) => void;
+  /** `draft`: the fork tab's first composer content, none for a fork of the whole session; `name`: the fork's session name, set once its tab has opened it. */
+  openFork: (sessionPath: string, draft: ForkDraft | undefined, name: string) => void;
   now?: () => Date;
 };
 
@@ -74,7 +75,7 @@ type Prepared = { ok: true; plan: RewindPlan; excerpt: string } | { ok: false; r
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** The ↺ menu of one tab: availability, rewind preview and apply, fork into a new tab. */
+/** The ↺ menu of one tab (availability, rewind preview and apply, fork into a new tab) and the header's fork of the whole session. */
 export class MessageActions {
   constructor(private readonly deps: MessageActionsDeps) {}
 
@@ -129,7 +130,7 @@ export class MessageActions {
   }
 
   async fork(blockId: string): Promise<Availability> {
-    const { controller, checkpointer } = this.deps;
+    const { controller } = this.deps;
     const available = forkAvailability(controller.state.running);
     if (!available.ok) return available;
     const sessionPath = controller.tabState.sessionPath;
@@ -140,15 +141,39 @@ export class MessageActions {
       const entryId = entry?.["id"];
       if (typeof entryId !== "string") return { ok: false, reason: HINTS.notFound };
       const result = await writeFork(sessionPath, entryId, this.deps.now?.() ?? new Date());
-      if (controller.sessionUuid !== undefined) {
-        const copied = new Set(result.chain.flatMap((item) => clientMessageIdOf(item) ?? []));
-        await checkpointer.store.copyForFork(controller.sessionUuid, result.sessionUuid, copied).catch(() => undefined);
-      }
-      this.deps.openFork(result.sessionPath, result.draft, forkTitle(controller.state.title ?? ""));
+      await this.openForked(result.sessionPath, result.sessionUuid, result.chain, result.draft);
       return { ok: true };
     } catch (error) {
       return { ok: false, reason: errorText(error) };
     }
+  }
+
+  /** Forks the whole conversation as it stands (its active branch up to the leaf) into a new tab with an empty composer. */
+  async forkSession(): Promise<Availability> {
+    const { controller } = this.deps;
+    const available = forkAvailability(controller.state.running);
+    if (!available.ok) return available;
+    const sessionPath = controller.tabState.sessionPath;
+    if (sessionPath === undefined) return { ok: false, reason: HINTS.empty };
+    try {
+      const { leafId } = await controller.journal();
+      if (leafId === null) return { ok: false, reason: HINTS.empty };
+      const result = await writeSessionFork(sessionPath, leafId, this.deps.now?.() ?? new Date());
+      await this.openForked(result.sessionPath, result.sessionUuid, result.chain, undefined);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: errorText(error) };
+    }
+  }
+
+  /** Copies the checkpoints of the messages the fork kept, then opens its tab named after the source. */
+  private async openForked(sessionPath: string, sessionUuid: string, chain: Entry[], draft: ForkDraft | undefined): Promise<void> {
+    const { controller, checkpointer } = this.deps;
+    if (controller.sessionUuid !== undefined) {
+      const copied = new Set(chain.flatMap((item) => clientMessageIdOf(item) ?? []));
+      await checkpointer.store.copyForFork(controller.sessionUuid, sessionUuid, copied).catch(() => undefined);
+    }
+    this.deps.openFork(sessionPath, draft, forkTitle(controller.state.title ?? ""));
   }
 
   /** Re-checks availability, then plans the rewind from the active branch of the journal. */

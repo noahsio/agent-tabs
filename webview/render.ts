@@ -1,4 +1,4 @@
-import type { Block } from "../src/chat/model";
+import { untitledName, type Block } from "../src/chat/model";
 import { applyDelta } from "../src/panel/delta";
 import type { PendingView } from "../src/guard/admin";
 import type {
@@ -170,6 +170,9 @@ export class ChatView {
       mode: () => this.composer.mode,
       setMode: (mode) => this.composer.setMode(mode),
       openSettings: () => this.settingsModal.open("connections"),
+      focusView: () => this.last?.focusView === true,
+      // The window's setting: the host stores it and every tab (this one too) gets it back in its state.
+      setFocusView: (enabled) => this.post({ type: "setFocusView", enabled }),
       done: choose,
     });
 
@@ -218,8 +221,8 @@ export class ChatView {
     this.last = message;
     const { state, tab } = message;
 
-    const title = state.title ?? tab.title ?? UNTITLED;
-    this.header.update(title, tab.durableId, tab.pinned === true);
+    const title = state.title ?? tab.title ?? untitledName(state.blocks) ?? UNTITLED;
+    this.header.update(title, tab.durableId, tab.pinned === true, state.running);
     this.sessionsPopover.setDraft(tab.draft === true ? title : undefined);
     this.composer.update(message);
     this.renderBanner();
@@ -229,6 +232,7 @@ export class ChatView {
     this.modelPopover.update(message);
     this.slashMenu.setHidden(message.hiddenCommands);
     this.slashMenu.setCommands(message.commands);
+    this.feed.setFocus(message.focusView === true);
     this.renderFeed(stick);
   }
 

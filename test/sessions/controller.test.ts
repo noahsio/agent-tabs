@@ -615,10 +615,42 @@ describe("SessionController", () => {
     controller = await SessionController.create(manager, "/tmp");
     const long = "x".repeat(100);
     await controller.send(long, "auto");
-    expect(ofType("set_session_name")).toHaveLength(1);
+    await settle(() => ofType("set_session_name").length === 1);
     expect(ofType("set_session_name")[0]).toMatchObject({ name: "x".repeat(60), sessionId: "rpc-1" });
     await controller.send("second", "auto");
     expect(ofType("set_session_name")).toHaveLength(1);
+  });
+
+  it("names_session_by_the_titlers_topic_and_falls_back_to_the_message", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    const asked: string[] = [];
+    controller.setTitler(async (message) => {
+      asked.push(message);
+      return "  Nginx реверс-прокси  ";
+    });
+    await controller.send("как поднять nginx на два сайта?", "auto");
+    await settle(() => ofType("set_session_name").length === 1);
+    expect(asked).toEqual(["как поднять nginx на два сайта?"]);
+    expect(ofType("set_session_name")[0]).toMatchObject({ name: "Nginx реверс-прокси" });
+
+    await controller.release();
+    controller = await SessionController.create(manager, "/tmp");
+    controller.setTitler(() => Promise.reject(new Error("gateway down")));
+    await controller.send("почему так?", "auto");
+    await settle(() => ofType("set_session_name").length === 2);
+    expect(ofType("set_session_name")[1]).toMatchObject({ name: "почему так?" });
+  });
+
+  it("a_name_given_while_the_title_is_made_wins", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    let finish: (title: string) => void = () => undefined;
+    controller.setTitler(() => new Promise((resolve) => (finish = resolve)));
+    await controller.send("first", "auto");
+    await controller.rename("Моё имя");
+    finish("Topic");
+    await settle(() => ofType("set_session_name").length >= 1);
+    await controller.send("next", "auto"); // one more round trip: a late title would have been sent by now
+    expect(ofType("set_session_name").map((request) => request["name"])).toEqual(["Моё имя"]);
   });
 
   it("answers_dialogs_and_lists_models_and_releases", async () => {
@@ -958,6 +990,7 @@ describe("SessionController", () => {
       expect(ofType("prompt")[0]).toMatchObject({ message: "", images: [{ type: "image", data: "QUJD", mimeType: "image/png" }] });
       expect(ofType("set_session_name")).toHaveLength(0);
       await controller.send("почему так?", "followUp");
+      await settle(() => ofType("set_session_name").length === 1);
       expect(ofType("set_session_name")[0]).toMatchObject({ name: "почему так?" });
     });
 

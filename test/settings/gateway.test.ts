@@ -9,6 +9,7 @@ import type { OmoEnv } from "../../src/env";
 import {
   GatewayError,
   fetchModels,
+  generateTitle,
   modelsUrl,
   normaliseModel,
   pickProbeModel,
@@ -301,6 +302,38 @@ describe("probe", () => {
   it("a_rejected_probe_throws", async () => {
     status = 403;
     await expect(probe(anthropic(), KEY, "m", fetch)).rejects.toMatchObject({ kind: "unauthorized" });
+  });
+});
+
+describe("generateTitle", () => {
+  const answering = (reply: (url: string) => Response, sent: Array<{ url: string; body: unknown }> = []): typeof fetch =>
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      sent.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return reply(String(url));
+    }) as typeof fetch;
+  const json = (body: unknown, code = 200): Response => new Response(JSON.stringify(body), { status: code });
+
+  it("asks_the_cheapest_model_with_the_message_tagged_and_cleans_the_reply", async () => {
+    served = [{ id: "claude-opus" }, { id: "claude-haiku" }];
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    const fake = answering(() => json({ content: [{ type: "text", text: "«Nginx реверс-прокси».\nлишнее" }] }), sent);
+    expect(await generateTitle(paths, "как поднять nginx?", fake)).toBe("Nginx реверс-прокси");
+    expect(sent[0]?.url).toBe(`${base}/v1/messages`);
+    expect(sent[0]?.body).toMatchObject({ model: "claude-haiku", max_tokens: 60, messages: [{ role: "user", content: "<message>\nкак поднять nginx?\n</message>" }] });
+  });
+
+  it("falls_through_a_failing_gateway_to_the_next", async () => {
+    await saveGateway(paths, openai(), KEY, fetch);
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    const fake = answering((url) => (url.endsWith("/v1/messages") ? json({}, 500) : json({ choices: [{ message: { content: "Тема" } }] })));
+    expect(await generateTitle(paths, "x", fake)).toBe("Тема");
+  });
+
+  it("is_undefined_without_a_gateway_or_a_text_reply", async () => {
+    expect(await generateTitle(paths, "x", fetch)).toBeUndefined();
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    expect(await generateTitle(paths, "x", fetch)).toBeUndefined(); // the test server's reply carries no text
   });
 });
 
