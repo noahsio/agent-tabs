@@ -84,6 +84,7 @@ function fakePanel(): {
         return true;
       },
     },
+    onDidChangeViewState: () => ({ dispose: () => undefined }),
     onDidDispose: (listener: () => void) => {
       onDispose = listener;
       return { dispose: () => undefined };
