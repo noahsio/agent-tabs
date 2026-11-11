@@ -67,6 +67,8 @@ export type Page = {
   /** The system clipboard's text, read by the page itself. */
   clipboard(): Promise<string>;
   key(key: string, options?: { shift?: boolean; meta?: boolean }): Promise<void>;
+  /** Types `text` key by key into the focused element, as a person does: the browser's own typing, undo steps and all. */
+  type(text: string): Promise<void>;
   /** A mouse wheel turn at `point`: scrolls whatever the browser finds under it. */
   wheel(point: Point, deltaY: number): Promise<void>;
   screenshot(path: string): Promise<void>;
@@ -181,6 +183,20 @@ export async function openPage(html: string, size = { width: 900, height: 700 })
       };
       await send("Input.dispatchKeyEvent", { type: "keyDown", ...event });
       await send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
+    },
+    async type(text: string): Promise<void> {
+      for (const char of text) {
+        const letter = /^[a-z]$/i.test(char) ? char.toUpperCase() : undefined;
+        const event = {
+          key: char,
+          code: char === " " ? "Space" : letter !== undefined ? `Key${letter}` : "",
+          windowsVirtualKeyCode: char === " " ? 32 : (letter?.charCodeAt(0) ?? 0),
+          text: char,
+          unmodifiedText: char,
+        };
+        await send("Input.dispatchKeyEvent", { type: "keyDown", ...event });
+        await send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
+      }
     },
     async wheel(point: Point, deltaY: number): Promise<void> {
       await send("Input.dispatchMouseEvent", { type: "mouseWheel", ...point, deltaX: 0, deltaY });
