@@ -909,7 +909,8 @@ export class SessionController extends EventEmitter {
       this.commit(resolveDialog(this.current, dialogId));
       return "applied";
     } catch (error) {
-      if (error instanceof RpcError && DIALOG_GONE.has(error.code)) {
+      // OmO names it in `errorCode` or, as documented for a late answer, only in `error` itself
+      if (error instanceof RpcError && (DIALOG_GONE.has(error.code) || DIALOG_GONE.has(error.message))) {
         this.dropDialog(dialogId, "Запрос уже закрыт");
         return "closed";
       }

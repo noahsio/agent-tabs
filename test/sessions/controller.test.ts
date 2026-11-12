@@ -802,6 +802,18 @@ describe("SessionController", () => {
     expect(controller.state.blocks.filter((block) => block.kind === "notice").map((block) => (block as { text: string }).text)).toEqual(["Запрос уже закрыт", "Запрос уже закрыт"]);
   });
 
+  // Seen live (2026-11-12): OmO 5.1.59 refuses a late answer with the word in `error` and no `errorCode` (as rpc.md
+  // documents), so the tab showed a red «unknown_extension_ui_request» bar over a question the agent had moved past.
+  it("a_late_answer_refused_by_its_error_word_alone_drops_the_dialog_quietly", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    daemon.on("extension_ui_response", () => ({ error: "unknown_extension_ui_request" }));
+    daemon.push(frame({ type: "extension_ui_request", id: "d1", method: "confirm", title: "Sure?" }));
+    await settle(() => controller?.state.dialogs.length === 1);
+    expect(await controller.answer("d1", { confirmed: true })).toBe("closed");
+    expect(controller.state.dialogs).toEqual([]);
+    expect(controller.state.error).toBeUndefined();
+  });
+
   it("a_failed_answer_keeps_the_dialog_and_reports_failed", async () => {
     controller = await SessionController.create(manager, "/tmp");
     daemon.on("extension_ui_response", () => ({ error: "boom", errorCode: "internal" }));
