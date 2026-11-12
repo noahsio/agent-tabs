@@ -23,6 +23,8 @@ export type ComposerOptions = {
   acceptsDrops?: () => boolean;
   /** Each message as it is posted (a retry too), so the feed shows it at once. */
   onSend?: (message: SendMessage) => void;
+  /** The unsent text whenever it changes (typed, pasted, sent away, come back), pictures left out: kept across a reload. */
+  onDraftChange?: (text: string) => void;
 };
 
 type SendMessage = Extract<WebviewMessage, { type: "send" }>;
@@ -283,6 +285,17 @@ export class Composer {
       this.syncPills();
     });
     this.input.addEventListener("paste", (event) => this.onPaste(event));
+    const onDraftChange = options.onDraftChange;
+    if (onDraftChange !== undefined) {
+      // Watching the field itself catches every way its text changes, the ones that fire no input event included.
+      let last = "";
+      new MutationObserver(() => {
+        const text = this.field.value.replaceAll(PILL, "");
+        if (text === last) return;
+        last = text;
+        onDraftChange(text);
+      }).observe(this.input, { childList: true, characterData: true, subtree: true });
+    }
     this.input.addEventListener("click", (event) => {
       const target = event.target as Element | null;
       const key = target?.closest<HTMLElement>(".att[data-key]")?.dataset["key"];
@@ -637,6 +650,13 @@ export class Composer {
     this.nextMode = mode;
     this.modeChip.hidden = mode === undefined;
     this.modeChip.replaceChildren(el("span", {}, mode === undefined ? "" : MODE_INFO[mode].title), el("span", { class: "w", "aria-hidden": "true" }, "✕"));
+  }
+
+  /** The text the person had typed and not sent before the window reloaded; never over something already in the field. */
+  restoreDraft(text: string): void {
+    if (text === "" || this.field.value !== "") return;
+    this.field.value = text;
+    this.afterEdit();
   }
 
   /** The host's answer to a send: what did not go out comes back, before any new draft. */
