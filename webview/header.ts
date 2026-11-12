@@ -8,12 +8,10 @@ export type HeaderOptions = {
 };
 
 const RENAME_HINT = "Нажми, чтобы переименовать";
-const FORK_HINT = "Ответвить сессию в новую вкладку";
-const FORK_BUSY_HINT = "Дождитесь конца хода";
 /** How long a pin toggled here is shown without the host's confirmation. */
 const PIN_WAIT_MS = 2_000;
 
-/** The tab header: the session title (click to rename) and the pin / fork / sessions / new icons (the settings are in the «/» menu). */
+/** The tab header: the session title (click to rename) and the pin / sessions / new icons (the settings and the fork are in the «/» menu). */
 export class Header {
   private readonly title: HTMLElement;
   private readonly editor: HTMLElement;
@@ -21,7 +19,6 @@ export class Header {
   private readonly pin: HTMLButtonElement;
   private readonly deferredCount = el("span", { class: "deferred-count", "data-role": "deferred-count" });
   private readonly deferred: HTMLButtonElement;
-  private readonly fork: HTMLButtonElement;
   /** The tab's word on whether its session is pinned. */
   private pinned = false;
   /** A pin toggled here, shown until the tab agrees or PIN_WAIT_MS pass. */
@@ -51,7 +48,6 @@ export class Header {
     this.editor.hidden = true;
 
     this.pin = button(icon("pin"), { class: "icon-btn", "data-role": "pin", title: "Закрепить сессию", "aria-pressed": "false" }, () => this.togglePin());
-    this.fork = button(icon("fork"), { class: "icon-btn", "data-role": "fork", title: FORK_HINT, "aria-label": FORK_HINT }, () => this.post({ type: "forkSession" }));
     const sessions = button(icon("sessions"), { class: "icon-btn", "data-role": "sessions", title: "Сессии проекта" }, () => this.options.onOpenSessions?.(sessions));
     this.deferred = button(icon("inbox"), { class: "icon-btn deferred-button", "data-role": "deferred", title: "Отложенные", "aria-label": "Отложенные" }, () => this.options.onOpenDeferred?.(this.deferred));
     this.deferredCount.hidden = true;
@@ -59,7 +55,7 @@ export class Header {
     const create = button(icon("newSession"), { class: "icon-btn", "data-role": "new", title: "Новая сессия" }, () => this.post({ type: "newSession" }));
 
     root.classList.add("header");
-    root.replaceChildren(el("div", { class: "title-wrap" }, this.title, this.editor), el("div", { class: "icons" }, this.pin, this.deferred, this.fork, sessions, create));
+    root.replaceChildren(el("div", { class: "title-wrap" }, this.title, this.editor), el("div", { class: "icons" }, this.pin, this.deferred, sessions, create));
   }
 
   setDeferredCount(count: number): void {
@@ -68,16 +64,14 @@ export class Header {
     this.deferred.setAttribute("aria-label", count > 0 ? `Отложенные: ${count}` : "Отложенные");
   }
 
-  /** `pinned` is the tab's flag from the host, the one source of truth for this session's pin; `running`: a turn is under way (no fork until it ends). */
-  update(title: string, durableId?: string, pinned: boolean = false, running: boolean = false): void {
+  /** `pinned` is the tab's flag from the host, the one source of truth for this session's pin. */
+  update(title: string, durableId?: string, pinned: boolean = false): void {
     this.current = title;
     this.durableId = durableId;
     this.pinned = pinned;
     if (this.optimistic !== undefined && (this.optimistic.durableId !== durableId || this.optimistic.pinned === pinned)) this.dropOptimistic();
     this.renderTitle();
     this.renderPin();
-    this.fork.disabled = durableId === undefined || running;
-    this.fork.title = running ? FORK_BUSY_HINT : FORK_HINT;
   }
 
   /** A pin toggled here shows at once, before the host confirms it. */

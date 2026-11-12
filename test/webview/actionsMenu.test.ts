@@ -68,6 +68,7 @@ describe("«/» button: the actions menu", () => {
     expect(actions().map((row) => row.textContent)).toEqual([
       "Довести до концаАгент сам составит план, выполнит его и проверит результат, прежде чем закончить ulw",
       "Команда агентовЗадача делится на части, которые параллельно делают несколько агентов на подходящих моделях mass ulw",
+      "Ответвить сессиюВесь разговор как есть — в новую вкладку",
       "Режим фокусаТолько ваши сообщения и ответы агента, шаги свёрнуты ctrl+alt+f",
       "Настройки",
     ]);
@@ -82,9 +83,12 @@ describe("«/» button: the actions menu", () => {
     key(actions()[0] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(actions()[1]);
     key(actions()[1] as HTMLElement, "ArrowDown");
-    expect(document.activeElement).toBe(role("action-focus"));
+    expect(document.activeElement).toBe(role("action-fork"));
     key(actions()[2] as HTMLElement, "ArrowDown");
+    expect(document.activeElement).toBe(role("action-focus"));
+    key(actions()[3] as HTMLElement, "ArrowDown");
     expect(document.activeElement).toBe(role("action-settings"));
+    key(actions()[4] as HTMLElement, "ArrowUp");
     key(actions()[3] as HTMLElement, "ArrowUp");
     key(actions()[2] as HTMLElement, "ArrowUp");
     key(actions()[1] as HTMLElement, "ArrowUp");
@@ -95,12 +99,33 @@ describe("«/» button: the actions menu", () => {
     expect(document.activeElement).toBe(input());
   });
 
-  it("the_focus_switch_and_settings_sit_under_a_separator_line", () => {
+  it("the_fork_the_focus_switch_and_settings_sit_under_a_separator_line", () => {
     openActions();
     const settings = role("action-settings");
     expect(settings.textContent).toBe("Настройки");
     expect(settings.previousElementSibling).toBe(role("action-focus"));
-    expect(role("action-focus").previousElementSibling?.getAttribute("role")).toBe("separator");
+    expect(role("action-focus").previousElementSibling).toBe(role("action-fork"));
+    expect(role("action-fork").previousElementSibling?.getAttribute("role")).toBe("separator");
+  });
+
+  it("the_fork_asks_the_host_and_waits_for_the_turn_to_end", () => {
+    openActions();
+    role("action-fork").click();
+    expect(shown()).toEqual([]);
+    expect(posted.at(-1)).toEqual({ type: "forkSession" }); // the host asks for the confirmation
+
+    view.update({ type: "state", state: { ...initialState(), running: true }, tab: { modelMode: "auto", sessionPath: "/s/a.jsonl", durableId: "d1" }, reconnectable: true });
+    openActions();
+    expect((role("action-fork") as HTMLButtonElement).disabled).toBe(true);
+    expect(role("action-fork").querySelector(".desc")?.textContent).toBe("Дождитесь конца хода");
+    key(actions()[0] as HTMLElement, "ArrowDown");
+    key(actions()[1] as HTMLElement, "ArrowDown");
+    expect(document.activeElement).toBe(role("action-focus")); // the keyboard steps over it
+    key(document, "Escape");
+
+    view.update({ type: "state", state: initialState(), tab: { modelMode: "auto" }, reconnectable: true }); // a draft
+    openActions();
+    expect((role("action-fork") as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("the_focus_switch_asks_the_host_and_shows_the_windows_setting", () => {

@@ -172,6 +172,13 @@ export class ChatView {
       mode: () => this.composer.mode,
       setMode: (mode) => this.composer.setMode(mode),
       openSettings: () => this.settingsModal.open("connections"),
+      canFork: () =>
+        this.last?.tab.durableId === undefined
+          ? { ok: false, reason: "Нечего ответвлять: сессия ещё не началась" }
+          : this.last.state.running
+            ? { ok: false, reason: "Дождитесь конца хода" }
+            : { ok: true },
+      fork: () => this.post({ type: "forkSession" }),
       focusView: () => this.last?.focusView === true,
       // The window's setting: the host stores it and every tab (this one too) gets it back in its state.
       setFocusView: (enabled) => this.post({ type: "setFocusView", enabled }),
@@ -224,7 +231,7 @@ export class ChatView {
     const { state, tab } = message;
 
     const title = state.title ?? tab.title ?? untitledName(state.blocks) ?? UNTITLED;
-    this.header.update(title, tab.durableId, tab.pinned === true, state.running);
+    this.header.update(title, tab.durableId, tab.pinned === true);
     this.sessionsPopover.setDraft(tab.draft === true ? title : undefined);
     this.composer.update(message);
     this.renderBanner();
