@@ -101,16 +101,62 @@ function textNodes(text: string): Node[] {
   return nodes;
 }
 
+/** A pause in typing this long ends one ⌘Z step: what comes after it is taken back on its own. */
+const UNDO_PAUSE_MS = 1_000;
+
+/** What an edit did, for telling where one ⌘Z step ends and the next begins. */
+type EditKind = "insert" | "delete" | "other";
+
+function editKind(inputType: string): EditKind {
+  return inputType.startsWith("insert") ? "insert" : inputType.startsWith("delete") ? "delete" : "other";
+}
+
 /**
  * The composer's input: an editable element whose text may carry pills (image attachments standing in the line where
  * they were put). Everything outside works in offsets of `value`, where a pill is one character — the DOM stays in here.
  */
 export class TextField {
   readonly element: HTMLElement;
+  /** The last edit the person made by typing; undefined after a paste or an undo, so the next one starts a step. */
+  private lastEdit: { kind: EditKind; at: number; endedWithSpace: boolean } | undefined;
 
   constructor(attributes: Record<string, string> = {}) {
     this.element = el("div", { ...attributes, contenteditable: "true", role: "textbox", "aria-multiline": "true" });
+    this.element.addEventListener("beforeinput", (event) => this.splitUndo(event));
     this.refresh();
+  }
+
+  /**
+   * Smart undo, as in the editor: the browser keeps everything typed in one go as a single step, so one ⌘Z took back a
+   * whole message. A step now ends where a new word starts, at a line break, at a pause, and where typing turns into
+   * deleting or back; a paste is a step of its own (see `pasteText`).
+   */
+  private splitUndo(event: InputEvent): void {
+    const kind = editKind(event.inputType);
+    const data = event.data ?? "";
+    const now = Date.now();
+    const last = this.lastEdit;
+    const split =
+      last === undefined ||
+      kind !== last.kind ||
+      now - last.at > UNDO_PAUSE_MS ||
+      event.inputType === "insertLineBreak" ||
+      event.inputType === "insertParagraph" ||
+      (event.inputType === "insertText" && last.endedWithSpace && /^\S/.test(data));
+    if (split) this.closeTyping();
+    this.lastEdit = kind === "other" ? undefined : { kind, at: now, endedWithSpace: /\s$/.test(data) };
+  }
+
+  /**
+   * Ends the step the browser is gathering typing into: setting the selection again (to where it already is) closes it,
+   * so whatever comes next is a step of its own.
+   */
+  private closeTyping(): void {
+    const selection = window.getSelection();
+    if (selection === null || selection.rangeCount === 0) return;
+    const range = selection.getRangeAt(0);
+    selection.removeAllRanges();
+    selection.addRange(range);
   }
 
   get value(): string {
@@ -218,18 +264,15 @@ export class TextField {
    * browser refuses an editing command run from inside another one: written by hand instead, the paste skipped the undo
    * stack and ⌘Z could not take it back. So a refused one goes in with the editor's own command as soon as VS Code's
    * command is over (the microtask runs once the script that called it has returned). `done` runs once it is in.
-   * Setting the selection again first closes the typing the browser would merge the paste into, so ⌘Z takes back
-   * the paste alone, as a native paste does.
+   * The typing before it and after it are closed off, so ⌘Z takes back the paste alone, as a native paste does.
    */
   pasteText(text: string, done: () => void): void {
     const insert = (): boolean => {
-      const selection = window.getSelection();
-      const range = selection !== null && selection.rangeCount > 0 ? selection.getRangeAt(0) : undefined;
-      if (selection !== null && range !== undefined) {
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-      return this.edit("insertText", text);
+      this.closeTyping();
+      const inserted = this.edit("insertText", text);
+      if (inserted) this.closeTyping();
+      this.lastEdit = undefined;
+      return inserted;
     };
     if (insert()) return done();
     if (document.activeElement !== this.element || typeof document.execCommand !== "function") {

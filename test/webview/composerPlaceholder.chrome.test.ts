@@ -59,4 +59,83 @@ describe.skipIf(!hasChrome)("the composer's placeholder and undo (headless Chrom
     await page.evaluate(`document.execCommand("undo")`);
     expect(await page.evaluate<string>(`document.querySelector('${INPUT}').textContent`)).toBe("abcx");
   }, 20_000);
+
+  it("lines_sit_as_close_as_claude_codes_and_a_pill_gets_the_looser_line", async () => {
+    const lineHeight = (): Promise<number> => page.evaluate<number>(`(() => {
+      const input = document.querySelector('${INPUT}');
+      return parseFloat(getComputedStyle(input).lineHeight) / parseFloat(getComputedStyle(input).fontSize);
+    })()`);
+    await page.evaluate(`document.querySelector('${INPUT}').focus(); document.execCommand("selectAll"); document.execCommand("insertText", false, "один\\nдва\\nтри")`);
+    expect(await lineHeight()).toBeCloseTo(1.5, 2);
+    await page.evaluate(`document.querySelector('${INPUT}').append(Object.assign(document.createElement("span"), { className: "att" }))`);
+    expect(await lineHeight()).toBeCloseTo(1.9, 2);
+    await page.evaluate(`document.querySelector('${INPUT} .att').remove()`);
+  }, 20_000);
+
+  describe("smart undo: each ⌘Z takes back one step", () => {
+    const text = (): Promise<string> => page.evaluate<string>(`document.querySelector('${INPUT}').textContent`);
+    /** VS Code's ⌘Z in a webview: `execCommand("undo")` in the page. */
+    const undo = (): Promise<unknown> => page.evaluate(`document.execCommand("undo")`);
+    /** An empty field with the caret in it and no step left open, as after sending a message. */
+    const fresh = (): Promise<unknown> =>
+      page.evaluate(`(() => {
+        const input = document.querySelector('${INPUT}');
+        input.focus();
+        document.execCommand("selectAll");
+        document.execCommand("delete");
+        const selection = getSelection();
+        const range = selection.getRangeAt(0);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      })()`);
+    const paste = (pasted: string): Promise<unknown> =>
+      page.evaluate(`(() => {
+        const data = new DataTransfer();
+        data.setData("text/plain", ${JSON.stringify(pasted)});
+        document.querySelector('${INPUT}').dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+      })()`);
+
+    it("typing_after_a_paste_is_taken_back_before_the_paste", async () => {
+      await fresh();
+      await paste("PASTED");
+      await page.type("zz");
+      expect(await text()).toBe("PASTEDzz");
+      await undo();
+      expect(await text()).toBe("PASTED");
+      await undo();
+      expect(await text()).toBe("");
+    }, 20_000);
+
+    it("each_word_is_its_own_step", async () => {
+      await fresh();
+      await page.type("one two");
+      await undo();
+      expect(await text()).toBe("one ");
+      await undo();
+      expect(await text()).toBe("");
+    }, 20_000);
+
+    it("a_pause_ends_a_step", async () => {
+      await fresh();
+      await page.evaluate(`(() => { const real = Date.now; window.__later = 0; Date.now = () => real() + window.__later; })()`);
+      await page.type("ab");
+      await page.evaluate("window.__later = 2000"); // two seconds on the page's clock, without waiting them
+      await page.type("cd");
+      await undo();
+      expect(await text()).toBe("ab");
+      await undo();
+      expect(await text()).toBe("");
+    }, 20_000);
+
+    it("deleting_after_typing_is_its_own_step", async () => {
+      await fresh();
+      await page.type("abc");
+      await page.key("Backspace");
+      expect(await text()).toBe("ab");
+      await undo();
+      expect(await text()).toBe("abc");
+      await undo();
+      expect(await text()).toBe("");
+    }, 20_000);
+  });
 });

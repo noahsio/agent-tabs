@@ -217,8 +217,10 @@ export class ChatPanel implements ApprovalPanel {
   private readonly tab: TabState;
   /** Whether the agent was at work when the tab last looked; undefined until the first look (an opened tab is no news). */
   private working: boolean | undefined;
-  /** The agent finished while the tab was out of sight: the icon carries a dot until the tab is seen. */
+  /** The agent finished while the tab was not the focused one: the icon carries a dot until the tab is focused. */
   private unread = false;
+  /** The icon the tab shows now, so a state change that leaves it alone does not set it again. */
+  private shownIcon: "mark" | "mark-done" | undefined;
 
   static create(host: PanelHost, opening: Opening, column?: vscode.ViewColumn): ChatPanel {
     const panel = vscode.window.createWebviewPanel(CHAT_VIEW_TYPE, UNTITLED, targetColumn(column), {
@@ -251,7 +253,7 @@ export class ChatPanel implements ApprovalPanel {
     panel.webview.onDidReceiveMessage((raw: unknown) => this.onMessage(raw));
     panel.onDidDispose(() => this.dispose());
     panel.onDidChangeViewState(() => {
-      if (panel.visible) this.markUnread(false); // seen
+      if (panel.active) this.markUnread(false); // the person went to this tab
     });
     host.panels.add(this);
     host.settings?.on("changed", this.onSettingsChanged);
@@ -325,25 +327,27 @@ export class ChatPanel implements ApprovalPanel {
   }
 
   /**
-   * Like the Claude Code tab: when the agent has finished all its work while its tab is out of sight, the tab's icon
-   * gets a dot; seeing the tab takes it away, and so does the agent starting again.
+   * Like the Claude Code tab: when the agent has finished all its work while its tab is not the focused one, the tab's
+   * icon gets a dot, and only focusing the tab takes it away — not a hover, not the tab being merely on screen in
+   * another group. While the agent is at work again the dot is hidden, and it is back when the agent stops.
    */
   private noteWork(state: ChatState): void {
     const working = atWork(state);
     const was = this.working;
     this.working = working;
-    if (working) this.markUnread(false);
-    else if (was === true && !this.panel.visible) this.markUnread(true);
+    if (!working && was === true && !this.panel.active) this.unread = true;
+    this.showIcon();
   }
 
   private markUnread(unread: boolean): void {
-    if (this.unread === unread) return;
     this.unread = unread;
     this.showIcon();
   }
 
   private showIcon(): void {
-    const name = this.unread ? "mark-done" : "mark";
+    const name = this.unread && this.working !== true ? "mark-done" : "mark";
+    if (name === this.shownIcon) return;
+    this.shownIcon = name;
     const media = (theme: string): vscode.Uri => vscode.Uri.joinPath(this.host.extensionUri, "media", `${name}-${theme}.svg`);
     this.panel.iconPath = { light: media("light"), dark: media("dark") };
   }
