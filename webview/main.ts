@@ -12,12 +12,22 @@ declare function acquireVsCodeApi(): {
 const vscode = acquireVsCodeApi();
 const saved = vscode.getState();
 let tab: PersistedState["tab"] | undefined = saved?.tab;
+/** The unsent text in the input: kept in the webview's state, so a window reload gives it back. */
+let draft = typeof saved?.draft === "string" ? saved.draft : "";
 
 function persist(): void {
-  if (tab !== undefined) vscode.setState({ tab }); // what the serializer restores after a reload
+  if (tab !== undefined) vscode.setState({ tab, ...(draft !== "" ? { draft } : {}) }); // what the serializer restores after a reload
 }
 
-const view = new ChatView(document.getElementById("app") as HTMLElement, (message) => vscode.postMessage(message));
+const view = new ChatView(
+  document.getElementById("app") as HTMLElement,
+  (message) => vscode.postMessage(message),
+  (text) => {
+    draft = text;
+    persist();
+  },
+);
+view.restoreDraft(draft);
 
 window.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (typeof event.data !== "string") return;

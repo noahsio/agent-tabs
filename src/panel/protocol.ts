@@ -353,7 +353,8 @@ const MAX_BLOCK_ID_CHARS = 200;
 const MAX_FINGERPRINT_CHARS = 128;
 
 /** What the webview persists through `setState`: the tab, restored by the serializer. */
-export type PersistedState = { tab: TabState };
+/** `draft`: the text typed in the input and not sent, given back after a window reload. */
+export type PersistedState = { tab: TabState; draft?: string };
 
 type Json = Record<string, unknown>;
 

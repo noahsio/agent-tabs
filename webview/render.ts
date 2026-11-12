@@ -86,6 +86,8 @@ export class ChatView {
   constructor(
     root: HTMLElement,
     private readonly post: Post,
+    /** The unsent text as it changes, for the webview's own state (it outlives a window reload). */
+    onDraft?: (text: string) => void,
   ) {
     installRefocusGuard(); // the click that brings the window (or the panel) back only focuses it
     installCopyKey(); // ⌘C over the feed copies at once, before VS Code's wrapper can move the focus off the selection
@@ -160,6 +162,7 @@ export class ChatView {
       onOpenImage: (images, index) => this.lightbox.open(images, index),
       acceptsDrops: () => !this.lightbox.isOpen,
       onSend: (message) => this.showOutgoing(message),
+      ...(onDraft !== undefined ? { onDraftChange: onDraft } : {}),
     });
     const slashButton = composerRoot.querySelector('[data-role="slash"]') as HTMLElement;
     this.slashMenu = new SlashMenu({
@@ -345,6 +348,11 @@ export class ChatView {
   /** The host's answer to a confirmed `rewind`. */
   rewound(message: RewoundMessage): void {
     this.rewindConfirm.rewound(message);
+  }
+
+  /** What the person had typed and not sent when the window last reloaded. */
+  restoreDraft(text: string): void {
+    this.composer.restoreDraft(text);
   }
 
   /** A fork tab's first composer content. */
