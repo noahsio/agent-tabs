@@ -10,7 +10,7 @@ import { writeHooksJson } from "./hooks.mjs";
 
 // Pinned commit of https://github.com/yasherisa/superpowers (HEAD on 2026-11-03).
 export const SUPERPOWERS_URL = "https://github.com/yasherisa/superpowers";
-export const SUPERPOWERS_REF = "d592fb71e6a6ffb8325e24005e18f61100d31b94";
+export const SUPERPOWERS_REF = "c449ca3b875cbf69d6d5926fdec7ff32d51f7627";
 /** The ref setup installs and «обновить» checks out: the pinned one, unless OMO_KIT_SUPERPOWERS_REF overrides it. */
 export const pinnedSuperpowersRef = () => process.env.OMO_KIT_SUPERPOWERS_REF || SUPERPOWERS_REF;
 export const CURATED_SKILLS = ["repo-task-proof-loop", "prompt-master", "security-audit", "chainium-agent"];
