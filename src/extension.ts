@@ -6,7 +6,7 @@ import { activeHostSocketPath, DaemonManager, RECONNECT_DELAYS_MS, systemProcess
 import { DeferredInbox } from "./deferred/inbox";
 import { buildOmoEnv, redact, type EnvVar } from "./env";
 import { serviceMayRun } from "../kit/guard/sockets.mjs";
-import { guardFilesDir } from "../kit/guard/lifecycle.mjs";
+import { guardFilesDir, installSkillsExtension } from "../kit/guard/lifecycle.mjs";
 import { DEFAULT_TG_ENV } from "../kit/guard/telegram.mjs";
 import { GuardAdmin } from "./guard/admin";
 import { GuardApprovals } from "./guard/approvals";
@@ -403,6 +403,13 @@ export function activate(context: vscode.ExtensionContext): void {
       return writeDenies.list;
     };
     const guardSource = path.join(kitDir, "guard");
+    // Skills as Claude Code has them (every Claude skill, Claude Code's rule for using them): the extension of this build
+    // goes into OmO's extensions on every activation, so an update reaches the person by itself, at OmO's next start.
+    try {
+      installSkillsExtension({ agentDir, home: paths.home, claudeDir: paths.claudeDir }, guardSource);
+    } catch (error) {
+      log(`Навыки: расширение для OmO не установлено: ${error instanceof Error ? error.message : String(error)}`);
+    }
     /** Why the activation refresh below did not go through, for «Безопасность» to show instead of nothing. */
     let refreshError: string | undefined;
     settings.register(
