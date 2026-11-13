@@ -11,7 +11,7 @@ import { resolveEnv } from "./lib/envs.mjs";
 import { writeIfChanged } from "./lib/files.mjs";
 import { setJsoncPath } from "./lib/jsonc.mjs";
 import { lspDaemonDir } from "./sandbox/profile.mjs";
-import { guardFilesDir, installGuardFiles } from "./guard/install.mjs";
+import { guardFilesDir, installGuardFiles, skillsExtensionLoader } from "./guard/install.mjs";
 import {
   CURATED_SKILLS,
   SUPERPOWERS_URL,
@@ -162,6 +162,7 @@ function main() {
   const guardDir = options.dryRun ? guardFilesDir(options.home) : installGuardFiles(options.home);
   write(path.join(envInfo.agentDir, "extensions/coordinate.ts"),
     `export { default } from ${JSON.stringify(path.join(guardDir, "coordinate-extension.mjs"))};\n`);
+  write(path.join(envInfo.agentDir, "extensions/agent-tabs-skills.ts"), skillsExtensionLoader(guardDir, envInfo.claudeDir));
 
   // settings.json
   const skills = CURATED_SKILLS.map((name) => path.join(envInfo.claudeDir, "skills", name)).filter((dir) => fs.existsSync(dir));

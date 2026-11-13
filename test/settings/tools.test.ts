@@ -109,17 +109,20 @@ describe("ToolsHost · skills", () => {
     fs.writeFileSync(path.join(claudeDir, "settings.json"), JSON.stringify({ enabledPlugins }));
   };
 
-  it("skills_set_writes_the_curated_skills_list", async () => {
+  it("every_claude_skill_is_on_until_switched_off_and_off_is_omos_own_exclusion", async () => {
     const promptMaster = path.join(paths.claudeDir, "skills", "prompt-master");
     expect((await view()).skills).toEqual([
-      { folder: promptMaster, name: "prompt-master", on: false },
-      { folder: path.join(paths.claudeDir, "skills", "security-audit"), name: "security-audit", on: false },
+      { folder: promptMaster, name: "prompt-master", on: true },
+      { folder: path.join(paths.claudeDir, "skills", "security-audit"), name: "security-audit", on: true },
     ]);
+    await perform(parsed({ kind: "skills.set", folder: promptMaster, on: false }));
+    expect(readJson(settingsFile())["skills"]).toEqual([`-${promptMaster}`]);
+    const off = await view();
+    expect(off.skills[0]).toEqual({ folder: promptMaster, name: "prompt-master", on: false });
+    expect(off.otherSkills).toEqual([]); // the exclusion is the switch, not another path
     await perform(parsed({ kind: "skills.set", folder: promptMaster, on: true }));
     expect(readJson(settingsFile())["skills"]).toEqual([promptMaster]);
-    expect((await view()).skills[0]).toEqual({ folder: promptMaster, name: "prompt-master", on: true });
-    await perform(parsed({ kind: "skills.set", folder: promptMaster, on: false }));
-    expect(readJson(settingsFile())["skills"]).toEqual([]);
+    expect((await view()).skills[0]?.on).toBe(true);
   });
 
   it("only_real_skill_folders_are_rows_and_other_skill_paths_are_listed_read_only", async () => {

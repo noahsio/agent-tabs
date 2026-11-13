@@ -35,6 +35,24 @@ export function guardFilesDir(home, source = ownDir()) {
   return path.join(home, ".omo/kit", hash.digest("hex").slice(0, 12), "guard");
 }
 
+/** The loader OmO reads from `<agentDir>/extensions`: the skills extension of the kit copy at `kitGuard`, told the Claude dir. */
+export function skillsExtensionLoader(kitGuard, claudeDir) {
+  const module = JSON.stringify(path.join(kitGuard, "skills-extension.mjs"));
+  return `import skills from ${module};\nexport default (pi) => skills(pi, { claudeDir: ${JSON.stringify(claudeDir)} });\n`;
+}
+
+/**
+ * Puts the skills extension in place for this environment: the kit copy of `source` (kit/guard) and the loader in
+ * `<agentDir>/extensions/agent-tabs-skills.ts`. Writes only what differs; returns the loader file. The plugin runs it on
+ * every activation, so an update of the extension reaches OmO by itself (at its next start).
+ */
+export function installSkillsExtension(paths, source = ownDir()) {
+  const kitGuard = installGuardFiles(paths.home, source);
+  const loader = path.join(paths.agentDir, "extensions", "agent-tabs-skills.ts");
+  writeIfChanged(loader, skillsExtensionLoader(kitGuard, paths.claudeDir), { mode: 0o644, backup: "rolling" });
+  return loader;
+}
+
 /** Our hooks.json group (PreToolUse and SessionStart): no matcher (every tool), timeout 330 s. */
 export function guardHookEntry({ node, kitDir, agentDir }) {
   return { hooks: [{ type: "command", command: `${shq(node)} ${shq(path.join(kitDir, "hook.mjs"))} --agent-dir ${shq(agentDir)}`, timeout: HOOK_TIMEOUT_SECONDS }] };

@@ -234,6 +234,18 @@ export function setSettingsEntry(envInfo, list, entry, on, { backup, now = new D
   return writeIfChanged(file, asJson(settings), { backup, now }) === "unchanged" ? [] : [file];
 }
 
+/**
+ * Switches one Claude skill folder in `<agentDir>/settings.json`: on lists it, off puts OmO's exact-path exclusion
+ * `-<folder>` in its place (the skills extension loads every Claude skill but those). Returns the files written.
+ */
+export function setClaudeSkill(envInfo, folder, on, { backup, now = new Date() } = {}) {
+  const file = path.join(envInfo.agentDir, "settings.json");
+  const settings = loadConfig(file, validateSettings);
+  const rest = (settings.skills ?? []).filter((item) => item !== folder && item !== `-${folder}`);
+  settings.skills = [...rest, on ? folder : `-${folder}`];
+  return writeIfChanged(file, asJson(settings), { backup, now }) === "unchanged" ? [] : [file];
+}
+
 /** The fork's local Claude marketplace and its plugin: the same clone serves OmO (a `packages` entry) and Claude. */
 export const SUPERPOWERS_MARKETPLACE = "yasherisa-superpowers";
 export const SUPERPOWERS_PLUGIN = `superpowers@${SUPERPOWERS_MARKETPLACE}`;
