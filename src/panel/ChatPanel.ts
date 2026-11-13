@@ -1160,7 +1160,10 @@ export class ChatPanel implements ApprovalPanel {
   private postRetry(): void {
     if (this.disposed) return;
     const view = this.retry.view;
-    if (view === undefined) {
+    // Shown from its journal, the session needs no countdown over the composer: the feed's own line says why it cannot
+    // be written to, and the retries go on unseen. A line that has given up (with its button) still shows.
+    const quiet = this.follower?.loaded === true && view?.givenUp !== true;
+    if (view === undefined || quiet) {
       this.poster.send({ type: "reconnecting", active: false });
       return;
     }
@@ -1184,7 +1187,10 @@ export class ChatPanel implements ApprovalPanel {
     this.follower = follower;
     const tick = async (): Promise<void> => {
       try {
-        if ((await follower.update()) && this.follower === follower) this.publish();
+        if ((await follower.update()) && this.follower === follower) {
+          this.publish();
+          this.postRetry();
+        }
       } catch (error) {
         this.host.log(`Журнал сессии не прочитан: ${errorText(error)}`);
       }

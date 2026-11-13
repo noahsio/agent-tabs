@@ -332,6 +332,8 @@ describe("a session whose connection fails", () => {
     const texts = (): string[] => (tab.posted.at(-1)?.state.blocks ?? []).flatMap((block) => ("text" in block && typeof block.text === "string" ? [block.text] : []));
     await settle(() => texts().includes("делай задачу"), 5_000);
     expect(texts().at(-1)).toMatch(/^Сессия работает в другой копии хоста OmO/);
+    // the feed already says why; a countdown over the composer would only read as an error (seen live, 2026-11-14)
+    await settle(() => latest(tab.notices)?.active === false, 5_000);
 
     await appendFile(file, line({ type: "message", id: "a1", message: { role: "assistant", content: [{ type: "text", text: "готово" }], stopReason: "stop", timestamp: 2 } }));
     await settle(() => texts().includes("готово"), 5_000); // followed as it grows
