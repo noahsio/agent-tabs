@@ -452,7 +452,7 @@ export class DaemonManager extends EventEmitter {
       const lock = await bindStartLock(file);
       if (lock !== undefined) {
         try {
-          return (await this.connectExisting(location)) ?? (await this.startHost(location));
+          return (await this.connectExisting(location)) ?? (await this.joinStarting(location)) ?? (await this.startHost(location));
         } finally {
           lock.close();
           await rm(file, { force: true });
@@ -465,6 +465,28 @@ export class DaemonManager extends EventEmitter {
       }
       await sleep(START_LOCK_POLL_MS);
     }
+  }
+
+  /**
+   * A host of ours for this path that is alive but not serving it yet — one a window spawned and did not live to record
+   * (its extension host went down mid-start). Waited for and joined; starting another is what let the second host take
+   * the path and leave the first running sessions no client could reach (measured live, 2026-11-12). Only a copy younger
+   * than the time a host gets to become ready counts: one that holds a bind (an orphan whose path was taken) or that has
+   * been silent longer than any start is not a start in progress.
+   */
+  private async joinStarting(location: HostLocation): Promise<RpcClient | undefined> {
+    let deadline = 0;
+    for (const pid of await this.processes.hostPids(location.socket)) {
+      if (await this.processes.listensOn(pid, location.socket)) continue;
+      const started = Date.parse((await this.processes.startedAt(pid)) ?? "");
+      if (Number.isFinite(started)) deadline = Math.max(deadline, started + this.readyTimeoutMs);
+    }
+    while (Date.now() < deadline) {
+      const joined = await this.connectExisting(location);
+      if (joined !== undefined) return joined;
+      await sleep(READY_POLL_MS);
+    }
+    return undefined;
   }
 
   /**
