@@ -205,6 +205,8 @@ export class ChatPanel implements ApprovalPanel {
   /** The session's journal, followed from disk while another copy of the host holds it and no client can reach that copy. */
   private follower: JournalFollower | undefined;
   private followTimer: NodeJS.Timeout | undefined;
+  /** Messages typed while the session is shown from its journal: shown as queued, sent under their own ids once it opens here. */
+  private heldSends: Extract<WebviewMessage, { type: "send" }>[] = [];
   /** The feed's line about a duplicate host this tab stopped, waiting for the session it unblocked to open. */
   private stopped: string | undefined;
   private key: string | undefined;
@@ -446,6 +448,7 @@ export class ChatPanel implements ApprovalPanel {
     }
     this.controller = controller;
     this.unfollow();
+    void this.sendHeld(controller);
     const ladder = this.host.ladder;
     if (ladder !== undefined) controller.setLadder({ ladder, view: (view) => this.poster.send({ type: "ladder", view: view ?? null }) });
     if (this.host.titler !== undefined) controller.setTitler(this.host.titler);
@@ -658,6 +661,12 @@ export class ChatPanel implements ApprovalPanel {
         }
         return;
       case "send": {
+        if (controller === undefined && this.follower?.loaded === true) {
+          this.heldSends.push(message);
+          this.poster.send({ type: "sent", id: message.id, ok: true });
+          this.publish();
+          return;
+        }
         // The line over the composer already says the connection is being got back: no second word about it up top.
         if (controller === undefined && this.banner === undefined && this.retry.view === undefined) {
           this.banner = "Сессия не открыта — сообщение не отправлено";
@@ -1210,7 +1219,15 @@ export class ChatPanel implements ApprovalPanel {
   private observed(): ChatState | undefined {
     if (this.follower?.loaded !== true) return undefined;
     const state = this.follower.state;
-    return { ...state, blocks: [...state.blocks, FOLLOWED_NOTICE] };
+    const queued = this.heldSends.map((message): Block => ({ kind: "user", id: message.id, text: message.text, delivery: { state: "queued" } }));
+    return { ...state, blocks: [...state.blocks, FOLLOWED_NOTICE, ...queued] };
+  }
+
+  /** What was typed while the session was held goes out now, in order, under the ids it was shown with. */
+  private async sendHeld(controller: SessionController): Promise<void> {
+    for (const message of this.heldSends.splice(0)) {
+      await controller.send(message.text, message.mode, message.images ?? [], message.id);
+    }
   }
 
   private publish(): void {
