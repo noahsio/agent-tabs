@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { tabTitle } from "./tabTitle";
 import * as vscode from "vscode";
-import { normalizeSessionName, untitledName, type ChatState, type ModelRef } from "../chat/model";
+import { normalizeSessionName, untitledName, type Block, type ChatState, type ModelRef } from "../chat/model";
 import { initialState } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import type { DeferredInbox } from "../deferred/inbox";
@@ -14,6 +14,7 @@ import { claimAutoUnwedge, releaseAutoUnwedge } from "../sessions/autoUnwedge";
 import { SessionController, type CommandRow, type TabState } from "../sessions/controller";
 import type { ReapOutcome } from "../sessions/reapHost";
 import { heldPause, ReconnectLoop } from "../sessions/reconnect";
+import { JournalFollower } from "../sessions/journalFollow";
 import { classifyOpen, giveUpText, heldByAnotherHostCopy, type Holder } from "../sessions/refusal";
 import { levelToApply } from "../sessions/rememberedLevels";
 import type { LoginEvent } from "../settings/accounts";
@@ -38,6 +39,16 @@ import {
 import type { PanelRegistry } from "./registry";
 import { runningCwds, withArchived, withPin } from "./sessionsList";
 import { sendAndAck } from "./send";
+
+/** How often a journal followed from disk is read again. */
+const FOLLOW_INTERVAL_MS = 2_000;
+/** Said under a session shown from its journal: one object, so the state delta sees no change while it stands. */
+const FOLLOWED_NOTICE: Extract<Block, { kind: "notice" }> = {
+  kind: "notice",
+  id: "followed-from-journal",
+  level: "info",
+  text: "Сессия работает в другой копии хоста OmO — показываю её работу из журнала. Писать в неё можно будет, когда та копия её отпустит.",
+};
 
 export const CHAT_VIEW_TYPE = "agentTabs.chat";
 const UNTITLED = "Новая сессия";
@@ -191,6 +202,9 @@ export class ChatPanel implements ApprovalPanel {
   private heldAttempt = 0;
   /** Who the host last said holds this session file: what the line names once it stops trying. */
   private heldBy: Holder | undefined;
+  /** The session's journal, followed from disk while another copy of the host holds it and no client can reach that copy. */
+  private follower: JournalFollower | undefined;
+  private followTimer: NodeJS.Timeout | undefined;
   /** The feed's line about a duplicate host this tab stopped, waiting for the session it unblocked to open. */
   private stopped: string | undefined;
   private key: string | undefined;
@@ -431,6 +445,7 @@ export class ChatPanel implements ApprovalPanel {
       return;
     }
     this.controller = controller;
+    this.unfollow();
     const ladder = this.host.ladder;
     if (ladder !== undefined) controller.setLadder({ ladder, view: (view) => this.poster.send({ type: "ladder", view: view ?? null }) });
     if (this.host.titler !== undefined) controller.setTitler(this.host.titler);
@@ -1022,6 +1037,7 @@ export class ChatPanel implements ApprovalPanel {
     }
     this.banner = undefined;
     this.heldBy = failure.holder ?? this.heldBy;
+    if (heldByAnotherHostCopy(this.heldBy, host) && this.opening.kind === "attach") this.follow(this.opening.sessionPath);
     // A budget of its own, not the connection loop's count: a tab that spent attempts on a host that was down still
     // gets the whole fast schedule at a held path, and a path that frees resets it.
     this.heldAttempt += 1;
@@ -1158,11 +1174,44 @@ export class ChatPanel implements ApprovalPanel {
     });
   }
 
+  /**
+   * Shows the session from its journal while another copy of the host holds it: the feed it is writing, read again every
+   * couple of seconds, until the session opens here. Nothing is sent to that copy; the line says why.
+   */
+  private follow(file: string): void {
+    if (this.follower !== undefined || this.disposed) return;
+    const follower = new JournalFollower(file);
+    this.follower = follower;
+    const tick = async (): Promise<void> => {
+      try {
+        if ((await follower.update()) && this.follower === follower) this.publish();
+      } catch (error) {
+        this.host.log(`Журнал сессии не прочитан: ${errorText(error)}`);
+      }
+    };
+    void tick();
+    this.followTimer = setInterval(() => void tick(), FOLLOW_INTERVAL_MS);
+    this.followTimer.unref();
+  }
+
+  private unfollow(): void {
+    if (this.followTimer !== undefined) clearInterval(this.followTimer);
+    this.followTimer = undefined;
+    this.follower = undefined;
+  }
+
+  /** The followed journal's feed, with the one line that says it cannot be written to yet. */
+  private observed(): ChatState | undefined {
+    if (this.follower?.loaded !== true) return undefined;
+    const state = this.follower.state;
+    return { ...state, blocks: [...state.blocks, FOLLOWED_NOTICE] };
+  }
+
   private publish(): void {
     if (this.disposed) return;
     const draft = this.noSession;
     const chosen = draft && this.pending.model !== undefined && this.pending.model !== "auto" ? this.pending.model : undefined;
-    const base = this.controller?.state ?? initialState();
+    const base = this.controller?.state ?? this.observed() ?? initialState();
     this.noteWork(base);
     // Without a choice of its own a draft shows the level its model is remembered at: the level its session will start at.
     const level = this.pending.level ?? (chosen !== undefined ? this.host.rememberedLevel?.(chosen) : undefined);
@@ -1220,6 +1269,7 @@ export class ChatPanel implements ApprovalPanel {
     if (this.commandsTimer !== undefined) clearTimeout(this.commandsTimer);
     if (this.levelsTimer !== undefined) clearTimeout(this.levelsTimer);
     this.retry.dispose(); // the tab is gone: nothing retries for it any more
+    this.unfollow();
     this.poster.dispose();
     this.host.panels.delete(this);
     this.host.guard?.panelsChanged(); // a request this tab was showing goes back to the service, not to the deadline

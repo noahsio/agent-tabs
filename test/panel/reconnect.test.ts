@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdir, symlink } from "node:fs/promises";
+import { appendFile, mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
@@ -313,6 +313,29 @@ describe("a session whose connection fails", () => {
     expect(last?.active === true && last.error).toContain("повторять бесполезно");
     expect(posted.at(-1)?.state.error).toBeUndefined(); // still the quiet line, never the red banner
     expect(opens()).toHaveLength(HELD_RETRY_PAUSES_MS.length + 1); // the open, then every pause of the schedule, and no more
+  }, 20_000);
+
+  /**
+   * Measured live (2026-11-14): a second copy of the host ran a session with long subagents for hours and no client
+   * could reach it; its tab stayed empty. The journal is on disk and grows as the session works, so the tab shows it
+   * from there while it waits, with one line saying why it cannot be written to yet.
+   */
+  it("a_session_held_by_another_copy_of_the_host_is_shown_from_its_journal_while_the_tab_waits", async () => {
+    await symlink(daemon.socketPath, hostSocketPath(daemon.agentDir));
+    daemon.on("open_session", () => heldByCopy());
+    const file = join(daemon.agentDir, "held.jsonl");
+    const line = (entry: unknown): string => JSON.stringify(entry) + "\n";
+    await writeFile(file, line({ type: "session", id: "held", cwd: "/work" }) +
+      line({ type: "message", id: "u1", message: { role: "user", content: [{ type: "text", text: "делай задачу" }], timestamp: 1 } }));
+    const tab = attach(file);
+
+    const texts = (): string[] => (tab.posted.at(-1)?.state.blocks ?? []).flatMap((block) => ("text" in block && typeof block.text === "string" ? [block.text] : []));
+    await settle(() => texts().includes("делай задачу"), 5_000);
+    expect(texts().at(-1)).toMatch(/^Сессия работает в другой копии хоста OmO/);
+
+    await appendFile(file, line({ type: "message", id: "a1", message: { role: "assistant", content: [{ type: "text", text: "готово" }], stopReason: "stop", timestamp: 2 } }));
+    await settle(() => texts().includes("готово"), 5_000); // followed as it grows
+    expect(tab.posted.at(-1)?.state.error).toBeUndefined();
   }, 20_000);
 
   /** The holder's refusal, as the host words it: another copy of our own host on our own socket. */
