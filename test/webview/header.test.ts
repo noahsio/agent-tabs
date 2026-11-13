@@ -108,16 +108,8 @@ describe("Header", () => {
     }
   });
 
-  it("fork_icon_posts_fork_session_and_waits_for_the_turn_to_end", () => {
-    icon("fork").click();
-    expect(posted).toEqual([{ type: "forkSession" }]);
-    header.update("Кэш каталога", "d1", false, true);
-    expect(icon("fork").disabled).toBe(true);
-    expect(icon("fork").title).toBe("Дождитесь конца хода");
-    header.update("Кэш каталога", "d1", false, false);
-    expect(icon("fork").disabled).toBe(false);
-    header.update("Новая сессия", undefined); // a draft has nothing to fork
-    expect(icon("fork").disabled).toBe(true);
+  it("no_fork_icon_in_the_header", () => {
+    expect(icon("fork")).toBeNull(); // the fork lives in the «/» menu
   });
 
   it("sessions_and_new_icons_and_no_settings_gear", () => {

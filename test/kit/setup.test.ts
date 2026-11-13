@@ -80,6 +80,7 @@ describe("setup-omo", () => {
     expect(fs.existsSync(path.join(home, ".omo/agent/mcp.json"))).toBe(false);
     expect(fs.existsSync(path.join(home, ".omo/agent/hooks.json"))).toBe(false);
     expect(fs.statSync(path.join(home, ".local/bin/omo-system")).mode & 0o111).not.toBe(0);
+    expect(fs.readFileSync(path.join(home, ".omo/agent/extensions/agent-tabs-skills.ts"), "utf8")).toMatch(/^import skills from ".*\/skills-extension\.mjs";/);
     expect(JSON.parse(fs.readFileSync(path.join(home, ".omo/omo.jsonc"), "utf8")).memory.reflection.category).toBe("quick");
     expect(result.stdout).toContain("CodeGraph: не найден");
     expect(result.stdout).toContain("Установите CodeGraph и добавьте codegraph в PATH");

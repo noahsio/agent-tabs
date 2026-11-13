@@ -8,9 +8,9 @@ import {
   isSuperpowersSkillsEntry,
   loadConfig,
   pinnedSuperpowersRef,
+  setClaudeSkill,
   setCodegraph,
   setGlobalInstructions,
-  setSettingsEntry,
   setSuperpowers,
   superpowersClaudeDirs,
   superpowersPluginVersion,
@@ -85,7 +85,10 @@ export type SuperpowersView = {
 export type ToolsView = {
   codegraph: { on: boolean };
   superpowers: SuperpowersView;
-  /** The Claude skills of this environment: folders of `<claudeDir>/skills` with a SKILL.md at their top. */
+  /**
+   * The Claude skills of this environment: folders of `<claudeDir>/skills` with a SKILL.md at their top. Each is on unless
+   * switched off (`-<folder>` in settings.json): OmO loads every one, as Claude Code does (the kit's skills extension).
+   */
   skills: SkillFolderView[];
   /** Other entries of OmO's `skills` list (not this environment's Claude skills, not superpowers): shown, not switched. */
   otherSkills: { path: string; exists: boolean }[];
@@ -242,13 +245,14 @@ export class ToolsHost implements SettingsSectionHost<ToolsAction> {
     const env = kitEnv(this.deps.paths);
     const enabledSkills = this.enabledSkills();
     const ownSkills = skillFoldersOf(path.join(this.deps.paths.claudeDir, "skills"));
+    const offSkills = ownSkills.filter((item) => enabledSkills.includes(`-${item}`));
     const instructions = this.guard(() => globalInstructionsState(env));
     return {
       codegraph: this.guard(() => codegraphState(env)),
       superpowers: await this.superpowers(env),
-      skills: ownSkills.map((item) => ({ folder: item, name: path.basename(item), on: enabledSkills.includes(item) })),
+      skills: ownSkills.map((item) => ({ folder: item, name: path.basename(item), on: !offSkills.includes(item) })),
       otherSkills: enabledSkills
-        .filter((item) => !ownSkills.includes(item) && !isSuperpowersSkillsEntry(item, env))
+        .filter((item) => !ownSkills.includes(item) && !offSkills.some((off) => item === `-${off}`) && !isSuperpowersSkillsEntry(item, env))
         .map((item) => ({ path: item, exists: fs.existsSync(item) })),
       mcp: this.servers(),
       hidden: readHiddenCommands(this.deps.paths),
@@ -284,7 +288,7 @@ export class ToolsHost implements SettingsSectionHost<ToolsAction> {
         return;
       case "skills.set":
         if (!skillFoldersOf(path.join(paths.claudeDir, "skills")).includes(action.folder)) throw new FieldErrors("Такой папки навыков нет — откройте настройки заново", []);
-        this.guard(() => setSettingsEntry(env, "skills", action.folder, action.on, ROLLING));
+        this.guard(() => setClaudeSkill(env, action.folder, action.on, ROLLING));
         return;
       case "superpowers.set": {
         const dir = this.guard(() => superpowersState(env)).dir;

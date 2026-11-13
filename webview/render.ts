@@ -86,6 +86,8 @@ export class ChatView {
   constructor(
     root: HTMLElement,
     private readonly post: Post,
+    /** The unsent text as it changes, for the webview's own state (it outlives a window reload). */
+    onDraft?: (text: string) => void,
   ) {
     installRefocusGuard(); // the click that brings the window (or the panel) back only focuses it
     installCopyKey(); // ⌘C over the feed copies at once, before VS Code's wrapper can move the focus off the selection
@@ -160,6 +162,7 @@ export class ChatView {
       onOpenImage: (images, index) => this.lightbox.open(images, index),
       acceptsDrops: () => !this.lightbox.isOpen,
       onSend: (message) => this.showOutgoing(message),
+      ...(onDraft !== undefined ? { onDraftChange: onDraft } : {}),
     });
     const slashButton = composerRoot.querySelector('[data-role="slash"]') as HTMLElement;
     this.slashMenu = new SlashMenu({
@@ -172,6 +175,13 @@ export class ChatView {
       mode: () => this.composer.mode,
       setMode: (mode) => this.composer.setMode(mode),
       openSettings: () => this.settingsModal.open("connections"),
+      canFork: () =>
+        this.last?.tab.durableId === undefined
+          ? { ok: false, reason: "Нечего ответвлять: сессия ещё не началась" }
+          : this.last.state.running
+            ? { ok: false, reason: "Дождитесь конца хода" }
+            : { ok: true },
+      fork: () => this.post({ type: "forkSession" }),
       focusView: () => this.last?.focusView === true,
       // The window's setting: the host stores it and every tab (this one too) gets it back in its state.
       setFocusView: (enabled) => this.post({ type: "setFocusView", enabled }),
@@ -224,7 +234,7 @@ export class ChatView {
     const { state, tab } = message;
 
     const title = state.title ?? tab.title ?? untitledName(state.blocks) ?? UNTITLED;
-    this.header.update(title, tab.durableId, tab.pinned === true, state.running);
+    this.header.update(title, tab.durableId, tab.pinned === true);
     this.sessionsPopover.setDraft(tab.draft === true ? title : undefined);
     this.composer.update(message);
     this.renderBanner();
@@ -338,6 +348,11 @@ export class ChatView {
   /** The host's answer to a confirmed `rewind`. */
   rewound(message: RewoundMessage): void {
     this.rewindConfirm.rewound(message);
+  }
+
+  /** What the person had typed and not sent when the window last reloaded. */
+  restoreDraft(text: string): void {
+    this.composer.restoreDraft(text);
   }
 
   /** A fork tab's first composer content. */

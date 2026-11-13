@@ -7,6 +7,10 @@ export type ActionsMenuHost = {
   setMode: (mode: NextMode | undefined) => void;
   /** Opens the settings modal on its first section. */
   openSettings: () => void;
+  /** Whether the session can be forked now: it exists and no turn is running. */
+  canFork: () => { ok: true } | { ok: false; reason: string };
+  /** Copies the whole conversation into a new tab. */
+  fork: () => void;
   /** The window's focus view, and its switch. */
   focusView: () => boolean;
   setFocusView: (enabled: boolean) => void;
@@ -16,13 +20,17 @@ export type ActionsMenuHost = {
 
 const MODES: NextMode[] = ["ulw", "mass ulw"];
 
+const FORK_TITLE = "Ответвить сессию";
+const FORK_DETAIL = "Весь разговор как есть — в новую вкладку";
+
 const FOCUS_TITLE = "Режим фокуса";
 const FOCUS_DETAIL = "Только ваши сообщения и ответы агента, шаги свёрнуты";
 const FOCUS_KEY = "ctrl+alt+f";
 
 /**
- * The «/» button's menu: the mode toggles and, under a line, the focus view's switch and «Настройки» (the other actions
- * live in the header and the pills). Commands and skills are not here: they are typed after «/» in the input (SlashMenu).
+ * The «/» button's menu: the mode toggles and, under a line, «Ответвить сессию», the focus view's switch and «Настройки»
+ * (the other actions live in the header and the pills). Commands and skills are not here: they are typed after «/» in
+ * the input (SlashMenu).
  */
 export class ActionsMenu implements PopoverContent {
   readonly element: HTMLElement;
@@ -46,6 +54,12 @@ export class ActionsMenu implements PopoverContent {
       if (on) row.append(el("span", { class: "check", "aria-hidden": "true" }, "✓"));
       return row;
     });
+    const forkable = this.host.canFork();
+    const fork = this.row(FORK_TITLE, forkable.ok ? FORK_DETAIL : forkable.reason, undefined, { role: "menuitem", "data-role": "action-fork" }, () => {
+      this.host.done();
+      this.host.fork();
+    });
+    fork.disabled = !forkable.ok;
     const focusOn = this.host.focusView();
     const focus = this.row(FOCUS_TITLE, FOCUS_DETAIL, FOCUS_KEY, { role: "menuitemcheckbox", "aria-checked": String(focusOn), "data-role": "action-focus" }, () => {
       this.host.done();
@@ -58,24 +72,21 @@ export class ActionsMenu implements PopoverContent {
       this.host.openSettings();
     });
     settings.addEventListener("mouseenter", () => settings.focus());
-    this.list.replaceChildren(...toggles, el("div", { class: "menu-sep", role: "separator" }), focus, settings);
+    this.list.replaceChildren(...toggles, el("div", { class: "menu-sep", role: "separator" }), fork, focus, settings);
     this.rows()[0]?.focus();
   }
 
-  /** Two lines: the plain title, then a dimmer explanation ending in the keyword as a small tag. */
-  private row(title: string, detail: string, tag: string, attributes: Record<string, string>, onClick: () => void): HTMLButtonElement {
-    const row = el(
-      "button",
-      { type: "button", class: "mrow", "data-row": "", ...attributes },
-      el("span", { class: "mtext" }, el("span", { class: "name" }, title), el("span", { class: "desc wrap" }, `${detail} `, el("span", { class: "tag" }, tag))),
-    );
+  /** Two lines: the plain title, then a dimmer explanation ending in the keyword (if any) as a small tag. */
+  private row(title: string, detail: string, tag: string | undefined, attributes: Record<string, string>, onClick: () => void): HTMLButtonElement {
+    const desc = tag === undefined ? el("span", { class: "desc wrap" }, detail) : el("span", { class: "desc wrap" }, `${detail} `, el("span", { class: "tag" }, tag));
+    const row = el("button", { type: "button", class: "mrow", "data-row": "", ...attributes }, el("span", { class: "mtext" }, el("span", { class: "name" }, title), desc));
     row.addEventListener("click", onClick);
     row.addEventListener("mouseenter", () => row.focus()); // the pointer and ↑/↓ move one active row
     return row;
   }
 
   private rows(): HTMLButtonElement[] {
-    return [...this.list.querySelectorAll<HTMLButtonElement>("[data-row]")].filter((row) => !row.hidden);
+    return [...this.list.querySelectorAll<HTMLButtonElement>("[data-row]")].filter((row) => !row.hidden && !row.disabled);
   }
 
   /** ↑/↓ move between the rows; Enter and Space are the buttons' own. */

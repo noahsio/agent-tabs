@@ -130,6 +130,8 @@ const NOT_OPEN = "Сессия не открыта";
 const AUTO_UNWEDGE_DONE = "Агент не ответил на «Стоп» — перезапустил сессию";
 const AUTO_UNWEDGE_FAILED = "Не удалось перезапустить сессию";
 const CONNECTION_LOST = "Связь с omo потеряна — переподключаюсь…";
+/** The confirming word of the dialog «Ответвить сессию» opens. */
+const FORK = "Ответвить";
 /** The confirming word of the dialog «Остановить ту копию» opens. */
 const STOP_HOLDER = "Остановить";
 /** What the line says between the duplicate host going away and the session being open again. */
@@ -848,6 +850,12 @@ export class ChatPanel implements ApprovalPanel {
         return;
       }
       case "forkSession": {
+        const answer = await vscode.window.showInformationMessage(
+          "Ответвить сессию?",
+          { modal: true, detail: "Весь разговор как есть скопируется в новую вкладку. Эта сессия останется как была." },
+          FORK,
+        );
+        if (answer !== FORK || this.disposed) return;
         const result = this.actions ? await this.actions.forkSession() : { ok: false as const, reason: NOT_OPEN };
         if (!result.ok) {
           this.host.log(`Ответвление сессии не удалось: ${result.reason}`);

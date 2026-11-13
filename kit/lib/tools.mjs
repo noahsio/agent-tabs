@@ -10,7 +10,7 @@ import { writeHooksJson } from "./hooks.mjs";
 
 // Pinned commit of https://github.com/yasherisa/superpowers (HEAD on 2026-11-03).
 export const SUPERPOWERS_URL = "https://github.com/yasherisa/superpowers";
-export const SUPERPOWERS_REF = "d592fb71e6a6ffb8325e24005e18f61100d31b94";
+export const SUPERPOWERS_REF = "c449ca3b875cbf69d6d5926fdec7ff32d51f7627";
 /** The ref setup installs and «обновить» checks out: the pinned one, unless OMO_KIT_SUPERPOWERS_REF overrides it. */
 export const pinnedSuperpowersRef = () => process.env.OMO_KIT_SUPERPOWERS_REF || SUPERPOWERS_REF;
 export const CURATED_SKILLS = ["repo-task-proof-loop", "prompt-master", "security-audit", "chainium-agent"];
@@ -231,6 +231,18 @@ export function setSettingsEntry(envInfo, list, entry, on, { backup, now = new D
   const settings = loadConfig(file, validateSettings);
   const current = settings[list] ?? [];
   settings[list] = on ? (current.includes(entry) ? current : [...current, entry]) : current.filter((item) => item !== entry);
+  return writeIfChanged(file, asJson(settings), { backup, now }) === "unchanged" ? [] : [file];
+}
+
+/**
+ * Switches one Claude skill folder in `<agentDir>/settings.json`: on lists it, off puts OmO's exact-path exclusion
+ * `-<folder>` in its place (the skills extension loads every Claude skill but those). Returns the files written.
+ */
+export function setClaudeSkill(envInfo, folder, on, { backup, now = new Date() } = {}) {
+  const file = path.join(envInfo.agentDir, "settings.json");
+  const settings = loadConfig(file, validateSettings);
+  const rest = (settings.skills ?? []).filter((item) => item !== folder && item !== `-${folder}`);
+  settings.skills = [...rest, on ? folder : `-${folder}`];
   return writeIfChanged(file, asJson(settings), { backup, now }) === "unchanged" ? [] : [file];
 }
 

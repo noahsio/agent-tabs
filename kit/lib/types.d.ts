@@ -45,6 +45,13 @@ declare module "*/kit/lib/tools.mjs" {
   export function globalInstructionsState(envInfo: KitEnv): { on: boolean; path: string; exists: boolean; always?: true };
   /** Throws an error with `code: "AGENTS_MD_NOT_A_LINK"` when `<agentDir>/AGENTS.md` is the person's own file. */
   export function setGlobalInstructions(envInfo: KitEnv, on: boolean, options?: { dryRun?: boolean }): string[];
+  /** On lists the Claude skill folder in settings.json `skills`, off writes `-<folder>` there instead; returns the files written. */
+  export function setClaudeSkill(
+    envInfo: KitEnv,
+    folder: string,
+    on: boolean,
+    options?: { backup?: "timestamped" | "rolling"; now?: Date },
+  ): string[];
   export function setSettingsEntry(
     envInfo: KitEnv,
     list: "skills" | "packages",
@@ -108,6 +115,8 @@ declare module "*/kit/guard/lifecycle.mjs" {
   export function installGuardFiles(home: string, source: string): string;
   /** Where installGuardFiles puts `source`; writes nothing. */
   export function guardFilesDir(home: string, source: string): string;
+  /** The kit copy of `source` and `<agentDir>/extensions/agent-tabs-skills.ts`, written only where they differ; returns the loader. */
+  export function installSkillsExtension(paths: { agentDir: string; home: string; claudeDir: string }, source: string): string;
   /** Every kit guard handler in hooks.json; throws when hooks.json cannot be used. */
   export function guardHandlers(paths: Paths): { event: string; command: string; timeout?: number }[];
   export function guardHookEntry(spec: { node: string; kitDir: string; agentDir: string }): Group;
@@ -184,4 +193,17 @@ declare module "*/kit/guard/telegram.mjs" {
     token: string,
     fetchFn?: (url: string, init?: RequestInit) => Promise<Response>,
   ): (method: string, params: Record<string, unknown>, timeoutMs?: number) => Promise<Record<string, unknown> | undefined>;
+}
+
+declare module "*/kit/guard/skills-extension.mjs" {
+  type Pi = { on(event: string, handler: (event: Record<string, unknown>) => Promise<unknown>): void };
+  /** OmO's catalog clause against loading a skill, and the Claude Code rule that replaces it. */
+  export const HOLD_BACK: string;
+  export const CLAUDE_RULE: string;
+  export function claudeSkillFolders(claudeDir: string): string[];
+  export function settingsSkills(agentDir: string): string[];
+  /** Every Claude skill folder OmO is to load on top of settings.json: none switched off, none already listed. */
+  export function skillsToAdd(claudeDir: string, agentDir: string, entries?: string[]): string[];
+  export function withClaudeRule(systemPrompt: unknown): string | undefined;
+  export default function skillsExtension(pi: Pi, options?: { agentDir?: string; claudeDir?: string }): void;
 }

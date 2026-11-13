@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { migrateRules } from "./rules.mjs";
 
-export { guardFilesDir, guardHandlers, guardHookEntry, guardHookEvents, installGuardFiles, setGuardHook } from "./install.mjs";
+export { guardFilesDir, guardHandlers, guardHookEntry, guardHookEvents, installGuardFiles, installSkillsExtension, setGuardHook } from "./install.mjs";
 export { servicePaths, socketAlive } from "./sockets.mjs";
 
 const asJson = (value) => JSON.stringify(value, null, 2) + "\n";

@@ -32,6 +32,7 @@ vi.mock("vscode", () => ({
   ViewColumn: { Active: -1, Beside: -2, One: 1 },
   window: {
     showWarningMessage: vi.fn(),
+    showInformationMessage: vi.fn(),
     createWebviewPanel: vi.fn(),
     showTextDocument: vi.fn(),
     tabGroups: { activeTabGroup: { viewColumn: 4 } },
@@ -1295,6 +1296,16 @@ describe("ChatPanel", () => {
       const openFork = vi.fn();
       ChatPanel.restore(host({ checkpointer, openFork }), fake.panel, { kind: "attach", sessionPath: sessionFile });
       await settle(() => daemon.requests.some((request) => request["type"] === "get_available_models"));
+      const confirm = vi.mocked(vscode.window.showInformationMessage);
+      confirm.mockClear();
+      confirm.mockResolvedValueOnce(undefined as never); // «Отмена»: nothing is forked
+      fake.receive({ type: "forkSession" });
+      await settle(() => confirm.mock.calls.length === 1);
+      expect(confirm.mock.calls[0]?.[0]).toBe("Ответвить сессию?");
+      expect(confirm.mock.calls[0]?.[1]).toMatchObject({ modal: true });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(openFork).not.toHaveBeenCalled();
+      confirm.mockResolvedValueOnce("Ответвить" as never);
       fake.receive({ type: "forkSession" });
       await settle(() => openFork.mock.calls.length === 1);
       const [path, draft, column] = openFork.mock.calls[0] as unknown as [string, unknown, unknown];
