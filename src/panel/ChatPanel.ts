@@ -689,6 +689,10 @@ export class ChatPanel implements ApprovalPanel {
         return;
       }
       case "stop": {
+        if (controller !== undefined && controller.state.compacting === true && !controller.state.running) {
+          await controller.stopCompaction();
+          return;
+        }
         if (controller !== undefined && !controller.state.running) {
           if (controller.state.background !== undefined) {
             const answer = await vscode.window.showWarningMessage("Остановить фоновые задачи?", { modal: true }, { title: "Остановить" });

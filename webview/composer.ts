@@ -15,6 +15,8 @@ export type ComposerOptions = {
   /** Popover triggers; each gets the button it was opened from. */
   onAgents?: (anchor: HTMLElement) => void;
   onModel?: (anchor: HTMLElement) => void;
+  /** The context ring was clicked: ask before compacting (the confirmation posts `compact`). */
+  onCompact?: () => void;
   onSlash?: (anchor: HTMLElement) => void;
   /** Sees every key in the input first; true means it handled the key (e.g. the «/» menu took Enter). */
   onInputKey?: (event: KeyboardEvent) => boolean;
@@ -349,7 +351,7 @@ export class Composer {
     svg.append(circle("track"), this.contextArc);
     this.contextTip = el("span", { class: "tip", role: "tooltip", "data-role": "context-tip" });
     this.contextRing = button(svg, { class: "ctx", "data-role": "context-ring" }, () => {
-      if (!this.contextRing.disabled) this.post({ type: "compact" });
+      if (!this.contextRing.disabled) this.options.onCompact?.();
     });
     this.contextRing.append(this.contextTip);
     this.contextRing.hidden = true;
@@ -430,8 +432,9 @@ export class Composer {
     this.updateHistory(state.blocks);
     this.running = state.running;
     const background = !state.running && (state.background?.count ?? 0) > 0;
-    this.stop.hidden = !state.running && !background;
-    this.stop.title = background ? "Остановить фоновые задачи" : "Остановить агента";
+    const compacting = state.compacting === true;
+    this.stop.hidden = !state.running && !background && !compacting;
+    this.stop.title = compacting ? "Остановить сжатие" : background ? "Остановить фоновые задачи" : "Остановить агента";
     this.backgroundLine.hidden = !background;
     this.backgroundLine.textContent = background ? `Ход завершён · фоновых задач: ${state.background?.count}` : "";
 

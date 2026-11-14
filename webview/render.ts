@@ -38,6 +38,7 @@ import { Popovers } from "./popover";
 import { ReconnectDetails, ReconnectLine } from "./reconnectLine";
 import { installCopyKey } from "./copyKey";
 import { installRefocusGuard } from "./refocus";
+import { CompactConfirm } from "./compactConfirm";
 import { RewindConfirm } from "./rewindConfirm";
 import { SessionsPopover } from "./sessionsPopover";
 import { SettingsModal } from "./settings/modal";
@@ -66,6 +67,7 @@ export class ChatView {
   private readonly settingsModal: SettingsModal;
   private readonly messageMenu: MessageMenu;
   private readonly rewindConfirm: RewindConfirm;
+  private readonly compactConfirm: CompactConfirm;
   /** The connection's own line, over the composer, and the modal that carries the whole failure. */
   private readonly reconnectLine: ReconnectLine;
   private readonly reconnectDetails: ReconnectDetails;
@@ -107,6 +109,7 @@ export class ChatView {
     this.agentMap = new AgentMap(post, choose);
     this.modelPopover = new ModelPopover(post, choose);
     this.rewindConfirm = new RewindConfirm(post);
+    this.compactConfirm = new CompactConfirm(post);
     this.messageMenu = new MessageMenu(post, this.rewindConfirm, close);
     this.reconnectDetails = new ReconnectDetails(post, () => ({ notice: this.reconnectLine.current, wait: this.reconnectLine.wait }), choose);
     this.reconnectLine = new ReconnectLine(post, () =>
@@ -157,6 +160,7 @@ export class ChatView {
       dropZone: root,
       onAgents: (anchor) => this.popovers.toggle(this.agentMap, { anchor, side: "center" }), // a modal over the tab
       onModel: (anchor) => this.popovers.toggle(this.modelPopover, { ...above(anchor), stretch: true }),
+      onCompact: () => this.compactConfirm.open(() => this.composer.input.focus()),
       onSlash: (anchor) => this.popovers.toggle(this.actionsMenu, { ...above(anchor), stretch: true }), // the model picker's edges
       onInputKey: (event) => this.slashMenu.onKey(event),
       onOpenImage: (images, index) => this.lightbox.open(images, index),
@@ -220,7 +224,7 @@ export class ChatView {
       event.preventDefault();
       this.dock.focus();
     });
-    root.replaceChildren(headerRoot, this.banner, feedRoot, composerRoot, this.composer.overlay, this.lightbox.element, this.rewindConfirm.element);
+    root.replaceChildren(headerRoot, this.banner, feedRoot, composerRoot, this.composer.overlay, this.lightbox.element, this.rewindConfirm.element, this.compactConfirm.element);
     // The composer floats over the feed's bottom (CSS); the feed keeps room for it as it grows with text and attachments.
     new ResizeObserver(() => this.feed.setBottomInset(composerRoot.offsetHeight)).observe(composerRoot);
     for (const popover of [this.sessionsPopover, this.deferredPopover, this.agentMap, this.modelPopover, this.slashMenu, this.actionsMenu, this.settingsModal, this.messageMenu, this.reconnectDetails])

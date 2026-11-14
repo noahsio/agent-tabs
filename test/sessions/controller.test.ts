@@ -814,6 +814,28 @@ describe("SessionController", () => {
     expect(controller.state.error).toBeUndefined();
   });
 
+  // Measured live (OmO 5.1.59): `abort` during a compaction ends it at once with compaction_end aborted:true, and the
+  // compact request itself answers «Compaction cancelled». A compaction the person stopped is no error.
+  it("stopping_a_compaction_aborts_it_and_says_so_without_an_error", async () => {
+    let finish: ((result: { error: string }) => void) | undefined;
+    daemon.on("compact", () => new Promise((resolve) => (finish = resolve)));
+    daemon.on("abort", () => {
+      finish?.({ error: "Compaction cancelled" });
+      return {};
+    });
+    controller = await SessionController.create(manager, "/tmp");
+    const compacting = controller.compact();
+    daemon.push(frame({ type: "compaction_start", reason: "manual" }));
+    await settle(() => controller?.state.compacting === true);
+    await controller.stopCompaction();
+    daemon.push(frame({ type: "compaction_end", reason: "manual", result: null, aborted: true }));
+    await compacting;
+    await settle(() => controller?.state.compacting === false);
+    expect(ofType("abort")).toHaveLength(1);
+    expect(controller.state.error).toBeUndefined();
+    expect(controller.state.blocks.some((block) => block.kind === "notice" && block.text === "Сжатие контекста остановлено")).toBe(true);
+  });
+
   it("a_failed_answer_keeps_the_dialog_and_reports_failed", async () => {
     controller = await SessionController.create(manager, "/tmp");
     daemon.on("extension_ui_response", () => ({ error: "boom", errorCode: "internal" }));
