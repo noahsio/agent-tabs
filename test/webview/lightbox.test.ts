@@ -23,6 +23,7 @@ function shown(): string | null | undefined {
 }
 
 beforeEach(() => {
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); // a viewer a previous test left open lets go of the page
   document.body.innerHTML = '<div id="app"><textarea></textarea></div>';
   field = document.querySelector("textarea") as HTMLTextAreaElement;
   copied = [];
@@ -77,6 +78,19 @@ describe("Lightbox", () => {
     lightbox.open([{ id: "a", dataUrl: "data:image/png;base64,AAAA" }], 0);
     (document.querySelector('[data-role="lightbox-close"]') as HTMLButtonElement).click();
     expect(lightbox.element.hidden).toBe(true);
+  });
+
+  // Seen live (2026-11-14): «Copy» in the editor's context menu over an open picture copied nothing. The menu runs the
+  // page's own copy command, which reaches the viewer as a `copy` event, not as a key.
+  it("the_context_menu_copy_puts_the_shown_picture_on_the_clipboard", () => {
+    lightbox.open([{ id: "a", dataUrl: "data:image/png;base64,AAAA" }, { id: "b", dataUrl: "data:image/png;base64,BBBB" }], 1);
+    const event = new Event("copy", { bubbles: true, cancelable: true });
+    document.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(copied).toEqual(["data:image/png;base64,BBBB"]);
+    key("Escape");
+    document.dispatchEvent(new Event("copy", { bubbles: true, cancelable: true }));
+    expect(copied).toHaveLength(1); // closed: copying is the page's own again
   });
 
   it("copy_failure_is_silent", async () => {
