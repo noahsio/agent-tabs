@@ -259,6 +259,28 @@ describe("Feed", () => {
     expect(opened).toEqual([{ images: [{ id: "u1:0", dataUrl: "data:image/png;base64,AAAA" }, { id: "u1:1" }], index: 1 }]);
   });
 
+  // Seen live (2026-11-15): «Copy» in the editor's context menu over a picture in a sent message copied nothing. The menu
+  // runs the page's copy command (a `copy` event); right after a right-click on a picture, that event copies the picture.
+  it("the_context_menu_copy_over_a_picture_in_a_message_copies_the_picture", () => {
+    const copied: string[] = [];
+    feed = new Feed(root, (message) => posted.push(message), { copyImage: async (dataUrl) => void copied.push(dataUrl) });
+    const user: Block = { kind: "user", id: "u1", text: "вот [картинка 1] тут", images: [{ id: "u1:0", mimeType: "image/png", name: "screen.png" }] };
+    feed.update([user], false);
+    feed.image("u1:0", "data:image/png;base64,AAAA");
+    const chip = entry("u1").querySelector(".uimg") as HTMLElement;
+    chip.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    const copy = new Event("copy", { bubbles: true, cancelable: true });
+    document.dispatchEvent(copy);
+    expect(copy.defaultPrevented).toBe(true);
+    expect(copied).toEqual(["data:image/png;base64,AAAA"]);
+
+    entry("u1").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }));
+    const text = new Event("copy", { bubbles: true, cancelable: true });
+    document.dispatchEvent(text);
+    expect(text.defaultPrevented).toBe(false); // anywhere else Copy copies the selected text as before
+    expect(copied).toHaveLength(1);
+  });
+
   it("a_picture_the_text_has_no_label_for_keeps_the_row_above_the_message", () => {
     const user: Block = {
       kind: "user",

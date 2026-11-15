@@ -5,6 +5,7 @@ import { button, copyButton, el, type Post } from "./dom";
 import { isNone, splitHandoff, type Handoff } from "./handoff";
 import { icon } from "./icons";
 import { isTodoStep, todoMark, todoPlan, todoStates } from "./todo";
+import { copyToClipboard } from "./lightbox";
 
 type ToolBlock = Extract<Block, { kind: "tool" }>;
 type AssistantBlock = Extract<Block, { kind: "assistant" }>;
@@ -24,6 +25,8 @@ export type FeedOptions = {
   /** «Повторить» / «Убрать» on a message that was not sent. */
   onRetry?: (blockId: string) => void;
   onDiscard?: (blockId: string) => void;
+  /** Puts a picture on the clipboard; injected in tests. */
+  copyImage?: (dataUrl: string) => Promise<void>;
 };
 
 const MESSAGE_ACTIONS = "Ответвить или откатить";
@@ -364,6 +367,8 @@ function selectionInside(element: Node): boolean {
 
 /** The transcript as a Claude-Code-style timeline. Blocks are keyed by id; only changed ones are rebuilt. */
 export class Feed {
+  /** The picture a right-click was on: the context menu's Copy, which comes next, copies it. */
+  private menuImage: string | undefined;
   private readonly list: HTMLElement;
   private readonly indicator: HTMLElement;
   private readonly verb: HTMLElement;
@@ -428,6 +433,10 @@ export class Feed {
     root.replaceChildren(this.list, ...(options.tail ?? []), this.indicator, this.toBottomSlot);
     root.addEventListener("click", (event) => this.onClick(event));
     root.addEventListener("contextmenu", (event) => {
+      // The menu's Copy runs the page's copy command, which a picture has no selection for: remember which was clicked.
+      const tile = (event.target as Element | null)?.closest<HTMLElement>(".uimg");
+      const shown = tile?.dataset["image"] === undefined ? undefined : this.images.get(tile.dataset["image"]);
+      this.menuImage = shown !== undefined && shown !== "" ? shown : undefined;
       const link = (event.target as Element | null)?.closest("a, [data-open-file]");
       const selection = window.getSelection();
       if (link === null || link === undefined || selection === null || !selection.isCollapsed) return;
@@ -435,6 +444,16 @@ export class Feed {
       range.selectNodeContents(link);
       selection.removeAllRanges();
       selection.addRange(range);
+    });
+    document.addEventListener("copy", (event) => {
+      const dataUrl = this.menuImage;
+      this.menuImage = undefined;
+      if (dataUrl === undefined || window.getSelection()?.isCollapsed === false) return;
+      event.preventDefault();
+      (this.options.copyImage ?? copyToClipboard)(dataUrl).catch(() => undefined); // no clipboard access: nothing to tell
+    });
+    root.addEventListener("pointerdown", (event) => {
+      if (event.button !== 2) this.menuImage = undefined; // a later Copy is about whatever is selected then
     });
     // Sticky bubbles ride the scroll natively; the handler flags which sent bubble is pinned and shows the to-bottom control.
     root.addEventListener("scroll", () => {

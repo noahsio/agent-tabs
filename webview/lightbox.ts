@@ -10,7 +10,7 @@ export type LightboxOptions = {
 const HINT = "←/→ листать · Esc закрыть · ⌘C копировать";
 
 /** The clipboard takes only png from a page, so other formats are re-encoded first. */
-async function copyToClipboard(dataUrl: string): Promise<void> {
+export async function copyToClipboard(dataUrl: string): Promise<void> {
   const comma = dataUrl.indexOf(",");
   const mimeType = dataUrl.slice(5, dataUrl.indexOf(";"));
   const binary = atob(dataUrl.slice(comma + 1));
