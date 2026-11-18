@@ -172,6 +172,8 @@ export type ChatState = {
   compacting?: boolean;
   cursor?: string;
   error?: string;
+  /** A guess at the person's next message after a turn that ended cleanly, shown greyed in the empty composer. */
+  suggestion?: string;
 };
 
 const SESSION_NAME_MAX = 60;

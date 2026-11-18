@@ -2017,6 +2017,11 @@ button.qtab.on {
   pointer-events: none;
 }
 
+/* A guess at the next message: the key that takes it, after the greyed words. */
+.input.suggesting[data-empty]::before {
+  content: attr(data-placeholder) "   Tab \2192";
+}
+
 .bar {
   display: flex;
   align-items: center;

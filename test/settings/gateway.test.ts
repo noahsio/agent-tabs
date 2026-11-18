@@ -9,6 +9,7 @@ import type { OmoEnv } from "../../src/env";
 import {
   GatewayError,
   fetchModels,
+  generateSuggestion,
   generateTitle,
   modelsUrl,
   normaliseModel,
@@ -334,6 +335,36 @@ describe("generateTitle", () => {
     expect(await generateTitle(paths, "x", fetch)).toBeUndefined();
     await saveGateway(paths, anthropic(), KEY, fetch);
     expect(await generateTitle(paths, "x", fetch)).toBeUndefined(); // the test server's reply carries no text
+  });
+});
+
+describe("generateSuggestion", () => {
+  const answering = (reply: (url: string) => Response, sent: Array<{ url: string; body: unknown }> = []): typeof fetch =>
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      sent.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return reply(String(url));
+    }) as typeof fetch;
+  const json = (body: unknown, code = 200): Response => new Response(JSON.stringify(body), { status: code });
+  const conversation = "<conversation>\n<user>\nпочини тесты\n</user>\n<assistant>\nГотово, всё зелёное.\n</assistant>\n</conversation>";
+
+  it("asks_the_cheapest_model_with_the_conversation_and_gives_the_persons_next_message", async () => {
+    served = [{ id: "claude-opus" }, { id: "claude-haiku" }];
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    const fake = answering(() => json({ content: [{ type: "text", text: "«Закоммить и запушь»\nлишнее" }] }), sent);
+    expect(await generateSuggestion(paths, conversation, fake)).toBe("Закоммить и запушь");
+    expect(sent[0]?.url).toBe(`${base}/v1/messages`);
+    expect(sent[0]?.body).toMatchObject({ model: "claude-haiku", max_tokens: 60, messages: [{ role: "user", content: conversation }] });
+    expect(String((sent[0]?.body as { system: string }).system)).toMatch(/NONE/);
+  });
+
+  it("is_undefined_when_the_model_sees_no_next_step_and_asks_no_other_gateway", async () => {
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    await saveGateway(paths, openai(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    const fake = answering((url) => (url.endsWith("/v1/messages") ? json({ content: [{ type: "text", text: "NONE" }] }) : json({ choices: [{ message: { content: "ещё" } }] })), sent);
+    expect(await generateSuggestion(paths, conversation, fake)).toBeUndefined();
+    expect(sent).toHaveLength(1);
   });
 });
 

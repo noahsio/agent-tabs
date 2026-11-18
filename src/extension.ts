@@ -43,7 +43,7 @@ import { RpcClient } from "./rpc/client";
 import { AccountsService } from "./settings/accounts";
 import { ConnectionsHost } from "./settings/connections";
 import { EnvironmentHost } from "./settings/environment";
-import { generateTitle, keyFileSecrets } from "./settings/gateway";
+import { generateSuggestion, generateTitle, keyFileSecrets } from "./settings/gateway";
 import { LadderHost, readLadder } from "./settings/ladder";
 import { RolesHost } from "./settings/roles";
 import { SecurityHost } from "./settings/security";
@@ -460,6 +460,9 @@ export function activate(context: vscode.ExtensionContext): void {
     // Read on demand, never cached: the ladder a failure walks is the one the modal shows right now.
     host.ladder = () => readLadder(paths);
     host.titler = (message) => generateTitle(paths, message);
+    // Read on each turn: switching the setting off takes effect from the next reply.
+    host.suggester = (conversation) =>
+      vscode.workspace.getConfiguration("agentTabs").get<boolean>("promptSuggestions") === false ? Promise.resolve(undefined) : generateSuggestion(paths, conversation);
     settings.register(new LadderHost({ paths, models: () => roles.modelOptions(), changed: () => settings.emit("changed") }));
     let hiddenCommands: readonly string[] = readHiddenCommands(paths); // one array until it changes: the tabs' deltas compare by reference
     host.hiddenCommands = () => hiddenCommands;

@@ -54,6 +54,13 @@ const TITLE_SYSTEM =
   "Reply with the title only: 2-6 words, in the language of the message, no quotes, no trailing period. Never answer the message itself.";
 const TITLE_MESSAGE_MAX = 2_000;
 const TITLE_MAX_TOKENS = 60;
+const SUGGESTION_SYSTEM =
+  "You see the latest part of a conversation between a person and their coding agent inside <conversation> tags. " +
+  "Predict the next message the person will most likely send to the agent: usually a short instruction or an answer, 2-10 words, " +
+  "in the person's language, written as the person, no quotes. If the agent asked the person something, give the person's most likely answer. " +
+  "If no next step is clear, reply NONE. Never write as the agent, never ask what the agent would ask, never explain.";
+const SUGGESTION_MAX_TOKENS = 60;
+const SUGGESTION_MAX = 200;
 const PROTOCOL_ORDER: readonly GatewayProtocol[] = ["anthropic-messages", "openai-completions", "openai-responses"];
 const MIN_SECRET_LENGTH = 4;
 
@@ -283,11 +290,10 @@ function cleanTitle(raw: string): string {
 }
 
 /**
- * A short topic title for a conversation's first message, from the cheapest model of the first gateway that answers
- * (Anthropic ones first). Undefined when no gateway gives one: the caller falls back to the message itself.
+ * The reply of the cheapest model of the first gateway that gives one (Anthropic ones first) to `input` under `system`,
+ * cleaned; a gateway that fails or answers with no text passes the turn to the next. Undefined when none answers.
  */
-export async function generateTitle(paths: EnvPaths, message: string, fetchFn: FetchFn = fetch): Promise<string | undefined> {
-  const input = `<message>\n${message.slice(0, TITLE_MESSAGE_MAX)}\n</message>`;
+async function askCheapest(paths: EnvPaths, system: string, input: string, maxTokens: number, clean: (raw: string) => string | undefined, fetchFn: FetchFn): Promise<string | undefined> {
   const gateways = knownGateways(paths).sort((a, b) => PROTOCOL_ORDER.indexOf(a.spec.protocol) - PROTOCOL_ORDER.indexOf(b.spec.protocol));
   for (const { spec, provider, cached, keyFile } of gateways) {
     const key = readKey(keyFile);
@@ -296,19 +302,40 @@ export async function generateTitle(paths: EnvPaths, message: string, fetchFn: F
     const model = pickProbeModel(ids);
     const [endpoint, body]: [string, Record<string, unknown>] =
       spec.protocol === "anthropic-messages"
-        ? ["/v1/messages", { model, max_tokens: TITLE_MAX_TOKENS, system: TITLE_SYSTEM, messages: [{ role: "user", content: input }] }]
+        ? ["/v1/messages", { model, max_tokens: maxTokens, system, messages: [{ role: "user", content: input }] }]
         : spec.protocol === "openai-responses"
-          ? ["/responses", { model, max_output_tokens: TITLE_MAX_TOKENS, instructions: TITLE_SYSTEM, input }]
-          : ["/chat/completions", { model, max_tokens: TITLE_MAX_TOKENS, messages: [{ role: "system", content: TITLE_SYSTEM }, { role: "user", content: input }] }];
+          ? ["/responses", { model, max_output_tokens: maxTokens, instructions: system, input }]
+          : ["/chat/completions", { model, max_tokens: maxTokens, messages: [{ role: "system", content: system }, { role: "user", content: input }] }];
     try {
       const reply = await request(spec, key, `${trimBase(spec.baseUrl)}${endpoint}`, { method: "POST", headers: headers(spec, key, true), body: JSON.stringify(body) }, fetchFn);
-      const title = cleanTitle(replyText(spec.protocol, reply));
-      if (title !== "") return title;
+      const raw = replyText(spec.protocol, reply);
+      if (raw.trim() !== "") return clean(raw);
     } catch {
-      // the next gateway, or the message itself
+      // the next gateway
     }
   }
   return undefined;
+}
+
+/**
+ * A short topic title for a conversation's first message, from the cheapest model of the first gateway that answers
+ * (Anthropic ones first). Undefined when no gateway gives one: the caller falls back to the message itself.
+ */
+export async function generateTitle(paths: EnvPaths, message: string, fetchFn: FetchFn = fetch): Promise<string | undefined> {
+  const input = `<message>\n${message.slice(0, TITLE_MESSAGE_MAX)}\n</message>`;
+  return askCheapest(paths, TITLE_SYSTEM, input, TITLE_MAX_TOKENS, (raw) => cleanTitle(raw) || undefined, fetchFn);
+}
+
+/**
+ * A guess at the person's next short message after `conversation` (recentConversation's tagged text), from the cheapest
+ * model of the first gateway that answers, as Claude Code's prompt suggestions: undefined when no gateway answers or the
+ * model sees no clear next step (NONE).
+ */
+export async function generateSuggestion(paths: EnvPaths, conversation: string, fetchFn: FetchFn = fetch): Promise<string | undefined> {
+  return askCheapest(paths, SUGGESTION_SYSTEM, conversation, SUGGESTION_MAX_TOKENS, (raw) => {
+    const line = cleanTitle(raw);
+    return line === "" || /^none\b/i.test(line) ? undefined : line.slice(0, SUGGESTION_MAX);
+  }, fetchFn);
 }
 
 /** `!cat <path>` runs through a shell: the path is single-quoted so a space or metacharacter stays data. */
