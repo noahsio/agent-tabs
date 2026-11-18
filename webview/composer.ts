@@ -271,6 +271,10 @@ export class Composer {
   private draft: Recalled = { text: "", images: [] };
   /** Pictures of a recalled message the host is still fetching: its ref id to the key of the pill waiting for it. */
   private readonly awaiting = new Map<string, string>();
+  /** The guess at the next message shown greyed in the empty field; Tab or → puts it in. */
+  private suggestion: string | undefined;
+  /** The guess the person already typed over or took: it does not come back on the next state. */
+  private spentSuggestion: string | undefined;
 
   constructor(
     root: HTMLElement,
@@ -284,6 +288,7 @@ export class Composer {
     this.input.addEventListener("keydown", (event) => this.onKeyDown(event));
     this.input.addEventListener("input", () => {
       this.recalled = undefined; // an edited recall is the draft now
+      if (this.field.value !== "") this.spendSuggestion();
       this.syncPills();
     });
     this.input.addEventListener("paste", (event) => this.onPaste(event));
@@ -428,7 +433,8 @@ export class Composer {
 
   update(message: StateMessage): void {
     const { state, tab } = message;
-    this.field.placeholder = state.running ? RUNNING_PLACEHOLDER : IDLE_PLACEHOLDER;
+    this.suggestion = state.running || state.suggestion === this.spentSuggestion ? undefined : state.suggestion;
+    this.showSuggestion(state.running);
     this.updateHistory(state.blocks);
     this.running = state.running;
     const background = !state.running && (state.background?.count ?? 0) > 0;
@@ -1041,6 +1047,7 @@ export class Composer {
 
   private onKeyDown(event: KeyboardEvent): void {
     if (this.options.onInputKey?.(event) === true) return;
+    if ((event.key === "Tab" || event.key === "ArrowRight") && this.takeSuggestion(event)) return;
     if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.isComposing && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
       if (this.recall(event.key === "ArrowUp" ? 1 : -1)) event.preventDefault();
       return;
@@ -1052,6 +1059,29 @@ export class Composer {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
     this.submit(event.altKey);
+  }
+
+  private showSuggestion(running = this.running): void {
+    this.field.placeholder = running ? RUNNING_PLACEHOLDER : (this.suggestion ?? IDLE_PLACEHOLDER);
+    this.input.classList.toggle("suggesting", this.suggestion !== undefined);
+  }
+
+  private spendSuggestion(): void {
+    if (this.suggestion === undefined) return;
+    this.spentSuggestion = this.suggestion;
+    this.suggestion = undefined;
+    this.showSuggestion();
+  }
+
+  /** Tab or → in the empty field puts the greyed guess in as the person's own text (Enter still sends). True when it did. */
+  private takeSuggestion(event: KeyboardEvent): boolean {
+    const suggestion = this.suggestion;
+    if (suggestion === undefined || event.isComposing || event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || this.field.value !== "") return false;
+    event.preventDefault();
+    this.spendSuggestion();
+    this.field.value = suggestion;
+    this.field.setSelectionRange(suggestion.length);
+    return true;
   }
 
   /**

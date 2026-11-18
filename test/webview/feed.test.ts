@@ -800,6 +800,27 @@ describe("selecting text in the feed", () => {
     expect(posted).toEqual([{ type: "openLink", url: "https://example.com/a" }]);
   });
 
+  it("a_link_opens_once_through_the_host_and_never_reaches_vscodes_own_link_opener", () => {
+    // VS Code's webview script: a window click listener that opens any clicked link (`did-click-link`) and ignores
+    // defaultPrevented. It is what asked «open the external website?» and opened a second tab next to ours.
+    const vscodeOpened: string[] = [];
+    const vscodeOpener = (event: MouseEvent): void => {
+      const link = event.composedPath().find((node): node is HTMLAnchorElement => node instanceof HTMLAnchorElement);
+      if (link !== undefined) vscodeOpened.push(link.href);
+    };
+    window.addEventListener("click", vscodeOpener);
+    try {
+      feed.update([{ kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false }], false);
+      const link = entry("a1").querySelector("a") as HTMLAnchorElement;
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }));
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      expect(posted).toEqual([{ type: "openLink", url: "https://example.com/a" }, { type: "openLink", url: "https://example.com/a" }]);
+      expect(vscodeOpened).toEqual([]);
+    } finally {
+      window.removeEventListener("click", vscodeOpener);
+    }
+  });
+
   it("a_link_click_is_not_blocked_by_a_selection_somewhere_else", () => {
     feed.update(
       [

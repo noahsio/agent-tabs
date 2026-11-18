@@ -2,7 +2,7 @@
   "name": "agent-tabs",
   "displayName": "Agent Tabs",
   "description": "Сессии агента в виде вкладок редактора",
-  "version": "0.4.98",
+  "version": "0.4.99",
   "publisher": "local",
   "icon": "media/icon.png",
   "private": true,
@@ -85,6 +85,12 @@
           "scope": "application",
           "default": false,
           "description": "Режим фокуса: в ленте видны только ваши сообщения и ответы агента, шаги работы свёрнуты в одну строку и раскрываются по клику. Переключается в меню «/», командой «Agent Tabs: Режим фокуса» или ctrl+alt+f."
+        },
+        "agentTabs.promptSuggestions": {
+          "type": "boolean",
+          "scope": "application",
+          "default": true,
+          "description": "Подсказка следующего сообщения: после ответа агента в пустом поле ввода серым видно, что вы, скорее всего, напишете дальше; Tab или → вставляет её. Её угадывает Sonnet шлюза (без неё — самая дешёвая модель) по последним сообщениям беседы и вашим коротким ответам в других сессиях проекта, около 1 цента за подсказку."
         },
         "agentTabs.omoPath": {
           "type": "string",

@@ -732,6 +732,66 @@ describe("SessionController", () => {
     expect(ofType("set_session_name")[1]).toMatchObject({ name: "почему так?" });
   });
 
+  it("guesses_the_next_message_after_a_clean_turn_and_drops_it_when_the_person_writes", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    const asked: string[] = [];
+    const sessions: Array<string | undefined> = [];
+    controller.setSuggester(async (conversation, sessionPath) => {
+      asked.push(conversation);
+      sessions.push(sessionPath);
+      return "Закоммить";
+    });
+    const turn = async (text: string): Promise<void> => {
+      await controller?.send(text, "auto");
+      daemon.push(frame({ type: "agent_start" }));
+      const id = ofType("prompt").at(-1)?.["clientMessageId"];
+      daemon.push(frame({ type: "message_start", message: { role: "user", content: [{ type: "text", text }], clientMessageId: id } }));
+      daemon.push(frame({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Готово." }], stopReason: "endTurn" } }));
+      daemon.push(frame({ type: "agent_end", messages: [] }));
+      daemon.push(frame({ type: "agent_settled" }));
+    };
+    await turn("почини тесты");
+    await settle(() => controller?.state.suggestion !== undefined);
+    expect(controller.state.suggestion).toBe("закоммить"); // written as the person starts theirs: «почини тесты»
+    expect(sessions[0]).toBe(controller.tabState.sessionPath); // where the host finds the project's other sessions
+    expect(asked[0]).toMatch(/<user>\nпочини тесты\n<\/user>\n<assistant>\nГотово\.\n<\/assistant>/);
+
+    await controller.send("а линтер?", "auto");
+    expect(controller.state.suggestion).toBeUndefined();
+  });
+
+  it("makes_no_guess_after_stop_or_an_error", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    let asked = 0;
+    controller.setSuggester(async () => {
+      asked++;
+      return "дальше";
+    });
+    const start = async (text: string, reply: Frame["message"]): Promise<void> => {
+      await controller?.send(text, "auto");
+      daemon.push(frame({ type: "agent_start" }));
+      daemon.push(frame({ type: "message_start", message: { role: "user", content: [{ type: "text", text }], clientMessageId: ofType("prompt").at(-1)?.["clientMessageId"] } }));
+      daemon.push(frame({ type: "message_end", message: reply }));
+      await settle(() => controller?.state.blocks.some((block) => block.kind === "user" && block.text === text && block.delivery?.state !== "sending") === true);
+    };
+    const settled = async (): Promise<void> => {
+      daemon.push(frame({ type: "agent_settled" }));
+      await settle(() => controller?.state.running === false);
+    };
+    await start("долгая задача", { role: "assistant", content: [{ type: "text", text: "Начинаю." }], stopReason: "endTurn" });
+    await controller.stop();
+    daemon.push(frame({ type: "agent_end", messages: [], aborted: true }));
+    await settled();
+    await start("ещё раз", { role: "assistant", content: [{ type: "text", text: "Упало." }], stopReason: "error", errorMessage: "provider down" });
+    await settled();
+    expect(controller.state.error).toBeDefined();
+    expect(asked).toBe(0);
+
+    await start("теперь нормально", { role: "assistant", content: [{ type: "text", text: "Готово." }], stopReason: "endTurn" });
+    await settled();
+    await settle(() => asked === 1); // the same tab guesses after a clean turn: the two above were skipped, not unreachable
+  });
+
   it("a_name_given_while_the_title_is_made_wins", async () => {
     controller = await SessionController.create(manager, "/tmp");
     let finish: (title: string) => void = () => undefined;

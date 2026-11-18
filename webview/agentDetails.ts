@@ -284,6 +284,7 @@ export class AgentDetailsModal {
     const link = (event.target as Element | null)?.closest("a");
     if (link === null || link === undefined) return;
     event.preventDefault();
+    event.stopPropagation(); // past VS Code's own link opener on the window (see the feed)
     const url = link.getAttribute("href");
     if (url !== null && url !== "") this.post({ type: "openLink", url });
   }

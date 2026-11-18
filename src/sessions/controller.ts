@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { realpathSync } from "node:fs";
-import { normalizeSessionName, type ChatState, type ImageRef, type ModelRef } from "../chat/model";
+import { normalizeSessionName, type Block, type ChatState, type ImageRef, type ModelRef } from "../chat/model";
+import { inPersonsCase, recentConversation } from "../chat/suggestion";
 import { addOutgoing, applyEntries, applyFrame, applyLifecycle, applyTaskList, dropOutgoing, goalCardNotice, initialState, lifecycleRunning, resolveDialog, reviseQueued, stoppedGoalNotice, taskStatus } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import { redact } from "../env";
@@ -232,6 +233,10 @@ export class SessionController extends EventEmitter {
   private nameSent = false;
   /** A topic title for the first message; absent (or undefined from it): the session is named by the message itself. */
   private titler: ((message: string) => Promise<string | undefined>) | undefined;
+  /** A guess at the person's next message from the conversation's latest part (one cheap model call). */
+  private suggester: ((conversation: string, sessionPath: string | undefined) => Promise<string | undefined>) | undefined;
+  /** The person ended the current turn with «Стоп»: no guess follows it. */
+  private stopped = false;
   private durableId: string | undefined;
   private sessionCwd: string | undefined;
   /** The last message's dispatch (not its response): the next message is written after it. */
@@ -442,6 +447,8 @@ export class SessionController extends EventEmitter {
     const imageParts =
       images.length > 0 ? { images: images.map(({ data, mimeType }) => ({ type: "image", data, mimeType })) } : {};
     // an image-only first message has no words to name the session by; the first text does it
+    this.stopped = false;
+    if (this.current.suggestion !== undefined) this.commit({ ...this.current, suggestion: undefined });
     const unnamed =
       !this.nameSent && normalizeSessionName(text) !== "" && this.current.title === undefined && !this.current.blocks.some((block) => block.kind === "user" && block.text.trim() !== "");
     // What the next turn is answering, for a liveness abort to put back; a recovery's own resend inherits the attempt.
@@ -568,6 +575,7 @@ export class SessionController extends EventEmitter {
 
   /** Cancels every pending dialog (abort is ignored while one is open), then aborts the turn. */
   async stop(): Promise<void> {
+    this.stopped = true;
     this.noteInterrupt("Прерываю ход: «Стоп» — попросил человек");
     this.modelLadder?.noteStop(); // the person's own end to the turn: the ladder stops watching, never steps on it
     for (const dialog of this.current.dialogs) {
@@ -983,6 +991,10 @@ export class SessionController extends EventEmitter {
    */
   setTitler(titler: (message: string) => Promise<string | undefined>): void {
     this.titler = titler;
+  }
+
+  setSuggester(suggester: (conversation: string, sessionPath: string | undefined) => Promise<string | undefined>): void {
+    this.suggester = suggester;
   }
 
   setLadder(deps: { ladder: () => Ladder; view: (view: LadderView | undefined) => void }): void {
@@ -1531,9 +1543,28 @@ export class SessionController extends EventEmitter {
     if (next.error !== undefined && next.error !== this.current.error) {
       next = { ...next, error: redact(next.error, this.dm.secrets) };
     }
+    if (next.running && next.suggestion !== undefined) next = { ...next, suggestion: undefined };
     if (next === this.current) return;
+    const ended = this.current.running && !next.running;
     this.current = next;
     this.sync();
+    if (ended) void this.suggestNext();
+  }
+
+  /**
+   * After a turn that ended cleanly (no error, no «Стоп», no question open, no background work), a guess at the
+   * person's next message; it is dropped if the person wrote, a turn started or a question came up meanwhile.
+   */
+  private async suggestNext(): Promise<void> {
+    const at = this.current;
+    if (this.suggester === undefined || this.stopped || at.error !== undefined || at.dialogs.length > 0 || (at.background?.count ?? 0) > 0) return;
+    const conversation = recentConversation(at.blocks);
+    if (conversation === undefined) return;
+    const messages = userMessages(at.blocks);
+    const suggestion = await this.suggester(conversation, this.tab.sessionPath).catch(() => undefined);
+    const now = this.current;
+    if (suggestion === undefined || this.released || now.running || now.dialogs.length > 0 || userMessages(now.blocks) !== messages) return;
+    this.commit({ ...now, suggestion: inPersonsCase(suggestion, now.blocks) });
   }
 
   private sync(): void {
@@ -1548,4 +1579,8 @@ export class SessionController extends EventEmitter {
   private fail(error: unknown): void {
     this.commit({ ...this.current, error: errorText(error) });
   }
+}
+
+function userMessages(blocks: readonly Block[]): number {
+  return blocks.filter((block) => block.kind === "user").length;
 }

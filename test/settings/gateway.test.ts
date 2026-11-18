@@ -9,6 +9,8 @@ import type { OmoEnv } from "../../src/env";
 import {
   GatewayError,
   fetchModels,
+  generateSuggestion,
+  pickSuggestionModel,
   generateTitle,
   modelsUrl,
   normaliseModel,
@@ -334,6 +336,67 @@ describe("generateTitle", () => {
     expect(await generateTitle(paths, "x", fetch)).toBeUndefined();
     await saveGateway(paths, anthropic(), KEY, fetch);
     expect(await generateTitle(paths, "x", fetch)).toBeUndefined(); // the test server's reply carries no text
+  });
+});
+
+describe("generateSuggestion", () => {
+  const answering = (reply: (url: string) => Response, sent: Array<{ url: string; body: unknown }> = []): typeof fetch =>
+    (async (url: string | URL | Request, init?: RequestInit) => {
+      sent.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return reply(String(url));
+    }) as typeof fetch;
+  const json = (body: unknown, code = 200): Response => new Response(JSON.stringify(body), { status: code });
+  const conversation = "<conversation>\n<user>\nпочини тесты\n</user>\n<assistant>\nГотово, всё зелёное.\n</assistant>\n</conversation>";
+
+  it("asks_the_cheapest_model_with_the_conversation_and_gives_the_persons_next_message", async () => {
+    served = [{ id: "claude-opus" }, { id: "claude-haiku" }];
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    const fake = answering(() => json({ content: [{ type: "text", text: "«Закоммить и запушь».\nлишнее" }] }), sent);
+    expect(await generateSuggestion(paths, conversation, fake)).toBe("Закоммить и запушь");
+    expect(sent[0]?.url).toBe(`${base}/v1/messages`);
+    expect(sent[0]?.body).toMatchObject({ model: "claude-haiku", max_tokens: 60, messages: [{ role: "user", content: conversation }] });
+    expect(String((sent[0]?.body as { system: string }).system)).toMatch(/NONE/);
+  });
+
+  it("asks_the_newest_sonnet_when_the_gateway_serves_one", async () => {
+    served = [{ id: "claude-opus-5-5" }, { id: "claude-sonnet-4-5" }, { id: "claude-sonnet-5-5" }, { id: "claude-haiku-5-5" }];
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    expect(await generateSuggestion(paths, conversation, answering(() => json({ content: [{ type: "text", text: "запушь" }] }), sent))).toBe("запушь");
+    expect(sent[0]?.body).toMatchObject({ model: "claude-sonnet-5-5" });
+    expect(String((sent[0]?.body as { system: string }).system)).toContain("<style_examples>");
+  });
+
+  it("picks_sonnet_by_name_and_falls_back_to_the_cheapest", () => {
+    expect(pickSuggestionModel(["claude-3-7-sonnet", "claude-sonnet-5-5", "claude-sonnet-4-5-20250929"])).toBe("claude-sonnet-5-5");
+    expect(pickSuggestionModel(["gpt-6", "gpt-6-mini"])).toBe("gpt-6-mini");
+  });
+
+  it("is_undefined_when_the_model_sees_no_next_step_and_asks_no_other_gateway", async () => {
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    await saveGateway(paths, openai(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    const fake = answering((url) => (url.endsWith("/v1/messages") ? json({ content: [{ type: "text", text: "NONE" }] }) : json({ choices: [{ message: { content: "ещё" } }] })), sent);
+    expect(await generateSuggestion(paths, conversation, fake)).toBeUndefined();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("an_empty_reply_is_silence_and_asks_no_other_gateway", async () => {
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    await saveGateway(paths, openai(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    const fake = answering((url) => (url.endsWith("/v1/messages") ? json({ content: [{ type: "text", text: "" }] }) : json({ choices: [{ message: { content: "ещё" } }] })), sent);
+    expect(await generateSuggestion(paths, conversation, fake)).toBeUndefined();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("drops_a_question_or_a_long_line_as_claude_code_never_suggests_them", async () => {
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    const replying = (text: string): typeof fetch => answering(() => json({ content: [{ type: "text", text }] }));
+    expect(await generateSuggestion(paths, conversation, replying("Спасибо, а что дальше с вебмастером?"))).toBeUndefined();
+    expect(await generateSuggestion(paths, conversation, replying("ок теперь проверь что файл открывается на сайте и потом нажми подтвердить в консоли"))).toBeUndefined();
+    expect(await generateSuggestion(paths, conversation, replying("запушь"))).toBe("запушь");
   });
 });
 

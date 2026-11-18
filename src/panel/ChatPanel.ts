@@ -112,6 +112,8 @@ export type PanelHost = {
   ladder?: () => Ladder;
   /** A topic title for a session's first message (one cheap model call); absent while the environment is incomplete. */
   titler?: (message: string) => Promise<string | undefined>;
+  /** A guess at the person's next message (one cheap model call); absent while the environment is incomplete. */
+  suggester?: (conversation: string, sessionPath: string | undefined) => Promise<string | undefined>;
   /** The window's approval cards (one guard subscription for every tab); absent while the environment is incomplete. */
   guard?: Pick<GuardApprovals, "answer" | "replay" | "panelsChanged">;
   deferred?: Pick<DeferredInbox, "refresh" | "answer">;
@@ -452,6 +454,7 @@ export class ChatPanel implements ApprovalPanel {
     const ladder = this.host.ladder;
     if (ladder !== undefined) controller.setLadder({ ladder, view: (view) => this.poster.send({ type: "ladder", view: view ?? null }) });
     if (this.host.titler !== undefined) controller.setTitler(this.host.titler);
+    if (this.host.suggester !== undefined) controller.setSuggester(this.host.suggester);
     const checkpointer = this.host.checkpointer;
     if (checkpointer !== undefined) {
       const manager = daemon.value;
