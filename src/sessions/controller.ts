@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { realpathSync } from "node:fs";
 import { normalizeSessionName, type Block, type ChatState, type ImageRef, type ModelRef } from "../chat/model";
-import { recentConversation } from "../chat/suggestion";
+import { inPersonsCase, recentConversation } from "../chat/suggestion";
 import { addOutgoing, applyEntries, applyFrame, applyLifecycle, applyTaskList, dropOutgoing, goalCardNotice, initialState, lifecycleRunning, resolveDialog, reviseQueued, stoppedGoalNotice, taskStatus } from "../chat/reducer";
 import type { DaemonManager } from "../daemon";
 import { redact } from "../env";
@@ -1551,7 +1551,7 @@ export class SessionController extends EventEmitter {
     const suggestion = await this.suggester(conversation).catch(() => undefined);
     const now = this.current;
     if (suggestion === undefined || this.released || now.running || now.dialogs.length > 0 || userMessages(now.blocks) !== messages) return;
-    this.commit({ ...now, suggestion });
+    this.commit({ ...now, suggestion: inPersonsCase(suggestion, now.blocks) });
   }
 
   private sync(): void {

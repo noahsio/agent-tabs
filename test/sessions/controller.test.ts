@@ -750,7 +750,7 @@ describe("SessionController", () => {
     };
     await turn("почини тесты");
     await settle(() => controller?.state.suggestion !== undefined);
-    expect(controller.state.suggestion).toBe("Закоммить");
+    expect(controller.state.suggestion).toBe("закоммить"); // written as the person starts theirs: «почини тесты»
     expect(asked[0]).toMatch(/<user>\nпочини тесты\n<\/user>\n<assistant>\nГотово\.\n<\/assistant>/);
 
     await controller.send("а линтер?", "auto");

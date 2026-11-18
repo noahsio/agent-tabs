@@ -54,13 +54,41 @@ const TITLE_SYSTEM =
   "Reply with the title only: 2-6 words, in the language of the message, no quotes, no trailing period. Never answer the message itself.";
 const TITLE_MESSAGE_MAX = 2_000;
 const TITLE_MAX_TOKENS = 60;
-const SUGGESTION_SYSTEM =
-  "You see the latest part of a conversation between a person and their coding agent inside <conversation> tags. " +
-  "Predict the next message the person will most likely send to the agent: usually a short instruction or an answer, 2-10 words, " +
-  "in the person's language, written as the person, no quotes. If the agent asked the person something, give the person's most likely answer. " +
-  "If no next step is clear, reply NONE. Never write as the agent, never ask what the agent would ask, never explain.";
+/** Claude Code's own prompt-suggestion instruction (2.1.326), worded for any coding agent and with NONE for its silence. */
+const SUGGESTION_SYSTEM = `[SUGGESTION MODE: Suggest what the user might naturally type next to their coding agent.]
+
+FIRST: Look at the user's recent messages and original request.
+
+Your job is to predict what THEY would type - not what you think they should do.
+
+THE TEST: Would they think "I was just about to type that"?
+
+EXAMPLES:
+User asked "fix the bug and run tests", bug is fixed → "run the tests"
+After code written → "try it out"
+The agent offers options → suggest the one the user would likely pick, based on conversation
+The agent asks to continue → "yes" or "go ahead"
+Task complete, obvious follow-up → "commit this" or "push it"
+After error or misunderstanding → silence (let them assess/correct)
+
+Be specific: "run the tests" beats "continue".
+
+NEVER SUGGEST:
+- Evaluative ("looks good", "thanks")
+- Questions ("what about...?")
+- Agent-voice ("Let me...", "I'll...", "Here's...")
+- New ideas they didn't ask about
+- Multiple sentences
+
+Stay silent if the next step isn't obvious from what the user said.
+
+Stay silent if a suggestion could be unsafe or inappropriate — including any sensitive topic (security incidents, credentials, harm, private data).
+
+Format: 2-12 words, match the user's style. Or nothing.
+
+Reply with ONLY the suggestion, no quotes or explanation. To stay silent, reply NONE.`;
 const SUGGESTION_MAX_TOKENS = 60;
-const SUGGESTION_MAX = 200;
+const SUGGESTION_MAX_WORDS = 12;
 const PROTOCOL_ORDER: readonly GatewayProtocol[] = ["anthropic-messages", "openai-completions", "openai-responses"];
 const MIN_SECRET_LENGTH = 4;
 
@@ -329,12 +357,14 @@ export async function generateTitle(paths: EnvPaths, message: string, fetchFn: F
 /**
  * A guess at the person's next short message after `conversation` (recentConversation's tagged text), from the cheapest
  * model of the first gateway that answers, as Claude Code's prompt suggestions: undefined when no gateway answers or the
- * model sees no clear next step (NONE).
+ * model stays silent (NONE) or breaks the format (a question, more than 12 words).
  */
 export async function generateSuggestion(paths: EnvPaths, conversation: string, fetchFn: FetchFn = fetch): Promise<string | undefined> {
   return askCheapest(paths, SUGGESTION_SYSTEM, conversation, SUGGESTION_MAX_TOKENS, (raw) => {
     const line = cleanTitle(raw);
-    return line === "" || /^none\b/i.test(line) ? undefined : line.slice(0, SUGGESTION_MAX);
+    // Claude Code's format rules, held even when a small model drifts: no question, at most 12 words.
+    if (line === "" || /^none\b/i.test(line) || line.includes("?") || line.split(/\s+/).length > SUGGESTION_MAX_WORDS) return undefined;
+    return line;
   }, fetchFn);
 }
 
