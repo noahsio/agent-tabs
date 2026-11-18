@@ -760,6 +760,20 @@ describe("SessionController", () => {
     expect(controller.state.suggestion).toBeUndefined();
   });
 
+  it("guesses_even_while_monitors_run_in_the_background", async () => {
+    controller = await SessionController.create(manager, "/tmp");
+    controller.setSuggester(async () => "проверь логи");
+    await controller.send("подними панель", "auto");
+    daemon.push(frame({ type: "agent_start" }));
+    daemon.push(frame({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "подними панель" }], clientMessageId: ofType("prompt").at(-1)?.["clientMessageId"] } }));
+    daemon.push(frame({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Поднял, слежу за логами." }], stopReason: "endTurn" } }));
+    daemon.push(frame({ type: "session_lifecycle", lifecycle: { state: "waiting_background", seq: 9, runId: "r", waitingOn: { children: 0, background: [{ source: "terminal-monitors", activeCount: 4 }], human: [] } } }));
+    daemon.push(frame({ type: "agent_settled" }));
+    await settle(() => controller?.state.suggestion !== undefined);
+    expect(controller.state.background?.count).toBe(4); // the monitors still run: the guess does not wait for them
+    expect(controller.state.suggestion).toBe("проверь логи");
+  });
+
   it("makes_no_guess_after_stop_or_an_error", async () => {
     controller = await SessionController.create(manager, "/tmp");
     let asked = 0;
