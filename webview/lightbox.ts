@@ -10,7 +10,7 @@ export type LightboxOptions = {
 const HINT = "←/→ листать · Esc закрыть · ⌘C копировать";
 
 /** The clipboard takes only png from a page, so other formats are re-encoded first. */
-async function copyToClipboard(dataUrl: string): Promise<void> {
+export async function copyToClipboard(dataUrl: string): Promise<void> {
   const comma = dataUrl.indexOf(",");
   const mimeType = dataUrl.slice(5, dataUrl.indexOf(";"));
   const binary = atob(dataUrl.slice(comma + 1));
@@ -37,6 +37,11 @@ export class Lightbox {
   private readonly close: HTMLButtonElement;
   private readonly copyImage: (dataUrl: string) => Promise<void>;
   private readonly onKey = (event: KeyboardEvent): void => this.onKeyDown(event);
+  /** The editor's context-menu «Copy» runs the page's copy command: it arrives as this event, never as ⌘C. */
+  private readonly onCopy = (event: Event): void => {
+    event.preventDefault();
+    this.copyShown();
+  };
   private images: LightboxImage[] = [];
   private index = 0;
   private returnFocus: HTMLElement | null = null;
@@ -65,6 +70,7 @@ export class Lightbox {
     if (this.element.hidden) {
       this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       document.addEventListener("keydown", this.onKey, true);
+      document.addEventListener("copy", this.onCopy, true);
       this.element.hidden = false;
     }
     this.show(index);
@@ -92,6 +98,7 @@ export class Lightbox {
     if (this.element.hidden) return;
     this.element.hidden = true;
     document.removeEventListener("keydown", this.onKey, true);
+    document.removeEventListener("copy", this.onCopy, true);
     this.stage.replaceChildren();
     this.returnFocus?.focus();
     this.returnFocus = null;
@@ -105,9 +112,11 @@ export class Lightbox {
     if (event.key === "Escape") this.hide();
     else if (event.key === "ArrowLeft") this.show(this.index - 1);
     else if (event.key === "ArrowRight") this.show(this.index + 1);
-    else {
-      const dataUrl = this.images[this.index]?.dataUrl;
-      if (dataUrl !== undefined) this.copyImage(dataUrl).catch(() => undefined); // no clipboard access: nothing to tell
-    }
+    else this.copyShown();
+  }
+
+  private copyShown(): void {
+    const dataUrl = this.images[this.index]?.dataUrl;
+    if (dataUrl !== undefined) this.copyImage(dataUrl).catch(() => undefined); // no clipboard access: nothing to tell
   }
 }

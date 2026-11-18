@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdir, symlink } from "node:fs/promises";
+import { appendFile, mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
@@ -57,12 +57,14 @@ function fakePanel(): {
   panel: vscode.WebviewPanel;
   posted: StateMessage[];
   notices: ReconnectingMessage[];
+  other: Record<string, unknown>[];
   receive(raw: unknown): void;
   destroy(): void;
 } {
   const listeners: ((raw: unknown) => void)[] = [];
   const posted: StateMessage[] = [];
   const notices: ReconnectingMessage[] = [];
+  const other: Record<string, unknown>[] = [];
   let onDispose: () => void = () => undefined;
   const panel = {
     title: "",
@@ -81,6 +83,7 @@ function fakePanel(): {
         if (message.type === "state") posted.push(message);
         else if (message.type === "delta") posted.push(applyDelta(posted.at(-1) as StateMessage, message));
         else if (message.type === "reconnecting") notices.push(message);
+        else other.push(message as unknown as Record<string, unknown>);
         return true;
       },
     },
@@ -96,6 +99,7 @@ function fakePanel(): {
     panel: panel as unknown as vscode.WebviewPanel,
     posted,
     notices,
+    other,
     receive: (raw) => listeners.forEach((listener) => listener(raw)),
     destroy: () => onDispose(),
   };
@@ -314,6 +318,58 @@ describe("a session whose connection fails", () => {
     expect(posted.at(-1)?.state.error).toBeUndefined(); // still the quiet line, never the red banner
     expect(opens()).toHaveLength(HELD_RETRY_PAUSES_MS.length + 1); // the open, then every pause of the schedule, and no more
   }, 20_000);
+
+  /**
+   * Measured live (2026-11-14): a second copy of the host ran a session with long subagents for hours and no client
+   * could reach it; its tab stayed empty. The journal is on disk and grows as the session works, so the tab shows it
+   * from there while it waits, with one line saying why it cannot be written to yet.
+   */
+  it("a_session_held_by_another_copy_of_the_host_is_shown_from_its_journal_while_the_tab_waits", async () => {
+    await symlink(daemon.socketPath, hostSocketPath(daemon.agentDir));
+    daemon.on("open_session", () => heldByCopy());
+    const file = join(daemon.agentDir, "held.jsonl");
+    const line = (entry: unknown): string => JSON.stringify(entry) + "\n";
+    await writeFile(file, line({ type: "session", id: "held", cwd: "/work" }) +
+      line({ type: "message", id: "u1", message: { role: "user", content: [{ type: "text", text: "делай задачу" }], timestamp: 1 } }));
+    const tab = attach(file);
+
+    const texts = (): string[] => (tab.posted.at(-1)?.state.blocks ?? []).flatMap((block) => ("text" in block && typeof block.text === "string" ? [block.text] : []));
+    await settle(() => texts().includes("делай задачу"), 5_000);
+    expect(texts().at(-1)).toMatch(/^Сессия работает в другой копии хоста OmO/);
+    // the feed already says why; a countdown over the composer would only read as an error (seen live, 2026-11-14)
+    await settle(() => latest(tab.notices)?.active === false, 5_000);
+
+    await appendFile(file, line({ type: "message", id: "a1", message: { role: "assistant", content: [{ type: "text", text: "готово" }], stopReason: "stop", timestamp: 2 } }));
+    await settle(() => texts().includes("готово"), 5_000); // followed as it grows
+    expect(tab.posted.at(-1)?.state.error).toBeUndefined();
+  }, 20_000);
+
+  // Seen live (2026-11-14): a message typed into a session shown from its journal came back «Не отправлено». It waits in the
+  // tab instead, shown as queued, and goes out under its own id the moment the session opens here.
+  it("a_message_to_a_session_shown_from_its_journal_waits_and_goes_out_when_it_opens", async () => {
+    await symlink(daemon.socketPath, hostSocketPath(daemon.agentDir));
+    let held = true;
+    daemon.on("open_session", () => (held ? heldByCopy() : { data: openData("rpc-1") }));
+    const prompts: Frame[] = [];
+    daemon.on("prompt", (request) => {
+      prompts.push(request);
+      return { data: { disposition: "started" } };
+    });
+    const file = join(daemon.agentDir, "held.jsonl");
+    await writeFile(file, JSON.stringify({ type: "session", id: "held", cwd: "/work" }) + "\n");
+    const tab = attach(file);
+    await settle(() => (tab.posted.at(-1)?.state.blocks ?? []).some((block) => block.kind === "notice"), 5_000);
+
+    tab.receive({ type: "send", id: "m-later", text: "на гпт запускай субагентов", mode: "auto" });
+    await settle(() => tab.other.some((reply) => reply["type"] === "sent" && reply["id"] === "m-later"));
+    expect(tab.other).toContainEqual({ type: "sent", id: "m-later", ok: true });
+    await settle(() => (tab.posted.at(-1)?.state.blocks ?? []).some((block) => block.kind === "user" && block.id === "m-later" && block.delivery?.state === "queued"));
+    expect(prompts).toEqual([]);
+
+    held = false; // that copy let the session go
+    await settle(() => prompts.length === 1, 15_000);
+    expect(prompts[0]).toMatchObject({ message: "на гпт запускай субагентов", clientMessageId: "m-later" });
+  }, 30_000);
 
   /** The holder's refusal, as the host words it: another copy of our own host on our own socket. */
   function heldByCopy(): { errorCode: string; error: string; errorData: Record<string, unknown> } {

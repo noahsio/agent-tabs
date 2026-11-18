@@ -131,6 +131,13 @@ function fakeProcesses(
   };
 }
 
+/** A process table with no host in it: the start path looks at it, and a real `ps` is too slow under fake timers. */
+function noProcesses(): ProcessOps {
+  const table = fakeProcesses(activeHostSocketPath(daemon.agentDir));
+  table.die();
+  return table;
+}
+
 /** The path leads to this test's fake daemon (our host), not to a foreign listener. */
 function ownsPath(file: string): boolean {
   try {
@@ -259,7 +266,7 @@ describe("DaemonManager", () => {
   it("gives_up_after_5_attempts", async () => {
     await linkSocket();
     const spawnFn = noSpawn();
-    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn });
+    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn, processes: noProcesses() });
     await manager.client();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const reasons: string[] = [];
@@ -283,7 +290,7 @@ describe("DaemonManager", () => {
 
   it("reconnect_now_during_an_attempt_keeps_one_retry_timer", async () => {
     const spawnFn = noSpawn();
-    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn });
+    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn, processes: noProcesses() });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const reasons: string[] = [];
     manager.on("gave_up", (reason: string) => reasons.push(reason));
@@ -414,6 +421,26 @@ describe("DaemonManager", () => {
     expect(client.instanceId).toBe(daemon.instanceId);
     expect(ownsPath(sock)).toBe(true); // never unbound from under it
     expect(await readFile(protectedHostPidPath(daemon.agentDir), "utf8")).toBe(String(FAKE_PID)); // and recorded again
+  });
+
+  /**
+   * Measured live (2026-11-12, 15:36): a window spawned the protected host and its extension host went down (a reload)
+   * before that host bound its socket or was recorded. The next window found no pid file and nothing listening, started
+   * a second host 11 s later, and the second took the path: the first kept running sessions no client could reach. A
+   * host of ours that is alive but not yet serving is a start in progress, to be joined — never a reason to start another.
+   */
+  it("a_host_of_ours_still_starting_with_no_record_is_waited_for_and_joined", async () => {
+    await protect(daemon.agentDir);
+    const sock = protectedHostSocketPath(daemon.agentDir);
+    await mkdir(join(sock, ".."), { recursive: true });
+    const spawnFn = fakeSpawn();
+    const starting = { ...fakeProcesses(sock), startedAt: async () => new Date().toString() }; // spawned just now
+    manager = new DaemonManager(envFor(daemon.agentDir), { spawn: spawnFn, processes: starting, readyTimeoutMs: 3_000 });
+    setTimeout(() => void symlink(daemon.socketPath, sock), 300); // the starting host binds a moment later
+    const client = await manager.client();
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(client.instanceId).toBe(daemon.instanceId);
+    expect(await readFile(protectedHostPidPath(daemon.agentDir), "utf8")).toBe(String(FAKE_PID));
   });
 
   /** A host that died before it answered must not be what the pid file names, or a restart signals the wrong process. */

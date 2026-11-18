@@ -78,6 +78,7 @@ beforeEach(() => {
     onAgents: () => calls.push("agents"),
     onModel: () => calls.push("model"),
     onSlash: () => calls.push("slash"),
+    onCompact: () => calls.push("compact"),
     onOpenImage: (images, index) => opened.push({ images, index }),
   });
   app.append(composer.overlay);
@@ -868,18 +869,24 @@ describe("Composer", () => {
       expect(tip()).not.toContain("до автосжатия");
     });
 
-    it("click_posts_compact_and_shows_busy_until_the_host_reports_it_done", () => {
+    // The person asked: a click must not start a compaction by itself; it asks first, and a running one can be stopped.
+    it("click_asks_first_and_a_running_compaction_shows_busy_with_a_stop", () => {
       show({ contextWindow: WINDOW, contextTokens: 50_000 });
       ring().click();
-      expect(posted).toEqual([{ type: "compact" }]);
+      expect(posted).toEqual([]);
+      expect(calls).toEqual(["compact"]);
       show({ contextWindow: WINDOW, contextTokens: 50_000, compacting: true });
       expect(ring().dataset["level"]).toBe("busy");
       expect(ring().disabled).toBe(true);
       expect(tip()).toContain("Сжимаю контекст");
-      ring().click();
-      expect(posted).toHaveLength(1);
+      const stop = role("stop") as HTMLButtonElement;
+      expect(stop.hidden).toBe(false);
+      expect(stop.title).toBe("Остановить сжатие");
+      stop.click();
+      expect(posted).toEqual([{ type: "stop" }]);
       show({ contextWindow: WINDOW });
       expect(ring().disabled).toBe(false);
+      expect(stop.hidden).toBe(true);
     });
 
     it("no_compact_while_the_agent_is_running", () => {

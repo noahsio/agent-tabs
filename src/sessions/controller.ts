@@ -25,6 +25,8 @@ import type { ModelLevel } from "./rememberedLevels";
  * «Не отправлено». A lost connection still fails at once (the client rejects every pending request on close).
  */
 const ADMISSION_TIMEOUT_MS = 30 * 60_000;
+/** OmO's answer to a compact request that an `abort` stopped. */
+const COMPACTION_CANCELLED = "Compaction cancelled";
 
 /** A mode keyword that prefixes every prose message while it is on (the actions menu's toggles). */
 export type NextMode = "ulw" | "mass ulw";
@@ -901,6 +903,17 @@ export class SessionController extends EventEmitter {
       await this.request("compact");
     } catch (error) {
       this.ownCompact = false;
+      // the person's own «Стоп» (measured live, 5.1.59: OmO answers the compact request with this)
+      if (error instanceof RpcError && error.message === COMPACTION_CANCELLED) this.note("info", "Сжатие контекста остановлено");
+      else this.fail(error);
+    }
+  }
+
+  /** «Стоп» while a compaction runs: OmO's plain `abort` ends it at once (compaction_end with `aborted: true`). */
+  async stopCompaction(): Promise<void> {
+    try {
+      await this.request("abort");
+    } catch (error) {
       this.fail(error);
     }
   }
