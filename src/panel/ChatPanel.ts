@@ -102,7 +102,7 @@ export type PanelHost = {
   /** A topic title for a session's first message (one cheap model call); absent while the environment is incomplete. */
   titler?: (message: string) => Promise<string | undefined>;
   /** A guess at the person's next message (one cheap model call); absent while the environment is incomplete. */
-  suggester?: (conversation: string) => Promise<string | undefined>;
+  suggester?: (conversation: string, sessionPath: string | undefined) => Promise<string | undefined>;
   /** The window's approval cards (one guard subscription for every tab); absent while the environment is incomplete. */
   guard?: Pick<GuardApprovals, "answer" | "replay" | "panelsChanged">;
   deferred?: Pick<DeferredInbox, "refresh" | "answer">;

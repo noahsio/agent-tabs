@@ -735,8 +735,10 @@ describe("SessionController", () => {
   it("guesses_the_next_message_after_a_clean_turn_and_drops_it_when_the_person_writes", async () => {
     controller = await SessionController.create(manager, "/tmp");
     const asked: string[] = [];
-    controller.setSuggester(async (conversation) => {
+    const sessions: Array<string | undefined> = [];
+    controller.setSuggester(async (conversation, sessionPath) => {
       asked.push(conversation);
+      sessions.push(sessionPath);
       return "Закоммить";
     });
     const turn = async (text: string): Promise<void> => {
@@ -751,6 +753,7 @@ describe("SessionController", () => {
     await turn("почини тесты");
     await settle(() => controller?.state.suggestion !== undefined);
     expect(controller.state.suggestion).toBe("закоммить"); // written as the person starts theirs: «почини тесты»
+    expect(sessions[0]).toBe(controller.tabState.sessionPath); // where the host finds the project's other sessions
     expect(asked[0]).toMatch(/<user>\nпочини тесты\n<\/user>\n<assistant>\nГотово\.\n<\/assistant>/);
 
     await controller.send("а линтер?", "auto");

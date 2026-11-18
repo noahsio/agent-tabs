@@ -10,6 +10,7 @@ import {
   GatewayError,
   fetchModels,
   generateSuggestion,
+  pickSuggestionModel,
   generateTitle,
   modelsUrl,
   normaliseModel,
@@ -356,6 +357,20 @@ describe("generateSuggestion", () => {
     expect(sent[0]?.url).toBe(`${base}/v1/messages`);
     expect(sent[0]?.body).toMatchObject({ model: "claude-haiku", max_tokens: 60, messages: [{ role: "user", content: conversation }] });
     expect(String((sent[0]?.body as { system: string }).system)).toMatch(/NONE/);
+  });
+
+  it("asks_the_newest_sonnet_when_the_gateway_serves_one", async () => {
+    served = [{ id: "claude-opus-5-5" }, { id: "claude-sonnet-4-5" }, { id: "claude-sonnet-5-5" }, { id: "claude-haiku-5-5" }];
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    expect(await generateSuggestion(paths, conversation, answering(() => json({ content: [{ type: "text", text: "запушь" }] }), sent))).toBe("запушь");
+    expect(sent[0]?.body).toMatchObject({ model: "claude-sonnet-5-5" });
+    expect(String((sent[0]?.body as { system: string }).system)).toContain("<style_examples>");
+  });
+
+  it("picks_sonnet_by_name_and_falls_back_to_the_cheapest", () => {
+    expect(pickSuggestionModel(["claude-3-7-sonnet", "claude-sonnet-5-5", "claude-sonnet-4-5-20250929"])).toBe("claude-sonnet-5-5");
+    expect(pickSuggestionModel(["gpt-6", "gpt-6-mini"])).toBe("gpt-6-mini");
   });
 
   it("is_undefined_when_the_model_sees_no_next_step_and_asks_no_other_gateway", async () => {
