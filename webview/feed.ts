@@ -1169,7 +1169,12 @@ export class Feed {
     const copy = target?.closest('[data-role="copy"]');
     if (copy !== null && copy !== undefined) return; // a copy control acts for itself: it never opens its box
     const link = target?.closest("a");
-    if (link !== null && link !== undefined) event.preventDefault(); // a link never navigates the tab itself
+    if (link !== null && link !== undefined) {
+      event.preventDefault(); // a link never navigates the tab itself
+      // VS Code's own webview script opens every clicked link too (`did-click-link`, on the window, deaf to
+      // preventDefault): with ours that was a «open the external website?» prompt and a second tab. Ours is the one.
+      event.stopPropagation();
+    }
     const file = target?.closest<HTMLElement>("[data-open-file]");
     if (file !== null && file !== undefined) {
       if (selectionInside(file)) return; // the click only ended a selection in the link
