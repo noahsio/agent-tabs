@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Block } from "../../src/chat/model";
-import { recentConversation } from "../../src/chat/suggestion";
+import { inPersonsCase, recentConversation } from "../../src/chat/suggestion";
 
 const user = (id: string, text: string): Block => ({ kind: "user", id, text });
 const reply = (id: string, text: string): Block => ({ kind: "assistant", id, text, thinking: "", streaming: false });
@@ -28,5 +28,15 @@ describe("recentConversation", () => {
     expect(text).toContain(`<user>\nвопрос 11 ${"x".repeat(1_190)}…\n</user>`);
     expect(text).not.toContain("вопрос 0 ");
     expect(text.length).toBeLessThan(12_000 + 1_000);
+  });
+});
+
+describe("inPersonsCase", () => {
+  it("starts_lower_case_when_the_person_mostly_does_and_keeps_it_otherwise", () => {
+    const casual = [user("u1", "почини тесты"), user("u2", "[картинка 1] а че нет"), user("u3", "Глянь лог")];
+    expect(inPersonsCase("Да, сделай", casual)).toBe("да, сделай");
+    const formal = [user("u1", "Почини тесты"), user("u2", "Глянь лог"), user("u3", "ок")];
+    expect(inPersonsCase("Да, сделай", formal)).toBe("Да, сделай");
+    expect(inPersonsCase("Да", [])).toBe("Да");
   });
 });

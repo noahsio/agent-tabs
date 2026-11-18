@@ -351,7 +351,7 @@ describe("generateSuggestion", () => {
     served = [{ id: "claude-opus" }, { id: "claude-haiku" }];
     await saveGateway(paths, anthropic(), KEY, fetch);
     const sent: Array<{ url: string; body: unknown }> = [];
-    const fake = answering(() => json({ content: [{ type: "text", text: "«Закоммить и запушь»\nлишнее" }] }), sent);
+    const fake = answering(() => json({ content: [{ type: "text", text: "«Закоммить и запушь».\nлишнее" }] }), sent);
     expect(await generateSuggestion(paths, conversation, fake)).toBe("Закоммить и запушь");
     expect(sent[0]?.url).toBe(`${base}/v1/messages`);
     expect(sent[0]?.body).toMatchObject({ model: "claude-haiku", max_tokens: 60, messages: [{ role: "user", content: conversation }] });
@@ -365,6 +365,14 @@ describe("generateSuggestion", () => {
     const fake = answering((url) => (url.endsWith("/v1/messages") ? json({ content: [{ type: "text", text: "NONE" }] }) : json({ choices: [{ message: { content: "ещё" } }] })), sent);
     expect(await generateSuggestion(paths, conversation, fake)).toBeUndefined();
     expect(sent).toHaveLength(1);
+  });
+
+  it("drops_a_question_or_a_long_line_as_claude_code_never_suggests_them", async () => {
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    const replying = (text: string): typeof fetch => answering(() => json({ content: [{ type: "text", text }] }));
+    expect(await generateSuggestion(paths, conversation, replying("Спасибо, а что дальше с вебмастером?"))).toBeUndefined();
+    expect(await generateSuggestion(paths, conversation, replying("ок теперь проверь что файл открывается на сайте и потом нажми подтвердить в консоли"))).toBeUndefined();
+    expect(await generateSuggestion(paths, conversation, replying("запушь"))).toBe("запушь");
   });
 });
 

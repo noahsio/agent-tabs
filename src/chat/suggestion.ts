@@ -38,3 +38,10 @@ export function recentConversation(blocks: readonly Block[]): string | undefined
   }
   return `<conversation>\n${taken.join("\n")}\n</conversation>`;
 }
+
+/** A guess written the way the person starts their messages: lower case first when most of their recent ones do. */
+export function inPersonsCase(suggestion: string, blocks: readonly Block[]): string {
+  const starts = blocks.flatMap((block) => (block.kind === "user" ? [...block.text.trim()].filter((character) => /\p{L}/u.test(character)).slice(0, 1) : [])).slice(-10);
+  const lower = starts.filter((character) => character === character.toLowerCase() && character !== character.toUpperCase()).length;
+  return lower * 2 > starts.length ? suggestion.charAt(0).toLowerCase() + suggestion.slice(1) : suggestion;
+}
