@@ -45,3 +45,8 @@ export function inPersonsCase(suggestion: string, blocks: readonly Block[]): str
   const lower = starts.filter((character) => character === character.toLowerCase() && character !== character.toUpperCase()).length;
   return lower * 2 > starts.length ? suggestion.charAt(0).toLowerCase() + suggestion.slice(1) : suggestion;
 }
+
+/** The conversation as the guess reads it, after the person's style examples from their other sessions when there are some. */
+export function withStyleExamples(conversation: string, examples: string | undefined): string {
+  return examples === undefined ? conversation : `${examples}\n${conversation}`;
+}

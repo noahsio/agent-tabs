@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Block } from "../../src/chat/model";
-import { inPersonsCase, recentConversation } from "../../src/chat/suggestion";
+import { inPersonsCase, recentConversation, withStyleExamples } from "../../src/chat/suggestion";
 
 const user = (id: string, text: string): Block => ({ kind: "user", id, text });
 const reply = (id: string, text: string): Block => ({ kind: "assistant", id, text, thinking: "", streaming: false });
@@ -38,5 +38,12 @@ describe("inPersonsCase", () => {
     const formal = [user("u1", "Почини тесты"), user("u2", "Глянь лог"), user("u3", "ок")];
     expect(inPersonsCase("Да, сделай", formal)).toBe("Да, сделай");
     expect(inPersonsCase("Да", [])).toBe("Да");
+  });
+});
+
+describe("withStyleExamples", () => {
+  it("puts_the_examples_before_the_conversation_and_leaves_it_alone_without_them", () => {
+    expect(withStyleExamples("<conversation>…</conversation>", "<style_examples>…</style_examples>")).toBe("<style_examples>…</style_examples>\n<conversation>…</conversation>");
+    expect(withStyleExamples("<conversation>…</conversation>", undefined)).toBe("<conversation>…</conversation>");
   });
 });

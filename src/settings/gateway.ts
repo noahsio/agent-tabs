@@ -56,11 +56,14 @@ const TITLE_MESSAGE_MAX = 2_000;
 const TITLE_MAX_TOKENS = 60;
 /**
  * Claude Code's own prompt-suggestion instruction (2.1.326), worded for any coding agent and with NONE for its silence.
- * Its silence rule is looser: haiku kept quiet at 13 of 16 real turns under the original, at 11-12 under this one.
+ * Its silence rule is looser: haiku kept quiet at 13 of 16 real turns under the original, at 11-12 under this one. With
+ * the person's style examples, sonnet guessed at 11 of 16, 4 words on average, all lower case like them.
  */
 const SUGGESTION_SYSTEM = `[SUGGESTION MODE: Suggest what the user might naturally type next to their coding agent.]
 
 FIRST: Look at the user's recent messages and original request.
+
+If <style_examples> is given, it shows how this user replied in their other conversations: write the way they write there (length, case, slang, punctuation), but never suggest anything from those conversations.
 
 Your job is to predict what THEY would type - not what you think they should do.
 
@@ -279,6 +282,12 @@ export async function fetchModels(spec: GatewaySpec, key: string, fetchFn: Fetch
   return models;
 }
 
+/** The newest Sonnet a gateway serves, else its cheapest (pickProbeModel): Sonnet guesses closer to the person's words. */
+export function pickSuggestionModel(ids: readonly string[]): string {
+  const sonnets = ids.filter((id) => id.toLowerCase().includes("sonnet")).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  return sonnets[0] ?? pickProbeModel(ids);
+}
+
 /** The cheapest by name: haiku, else mini, else flash, else the first. */
 export function pickProbeModel(ids: readonly string[]): string {
   for (const hint of PROBE_HINTS) {
@@ -321,16 +330,16 @@ function cleanTitle(raw: string): string {
 }
 
 /**
- * The reply of the cheapest model of the first gateway that answers (Anthropic ones first) to `input` under `system`,
+ * The reply of the model `pick` chooses from the first gateway that answers (Anthropic ones first) to `input` under `system`,
  * cleaned; only a gateway that fails passes the turn to the next. Undefined when none answers or the reply cleans to nothing.
  */
-async function askCheapest(paths: EnvPaths, system: string, input: string, maxTokens: number, clean: (raw: string) => string | undefined, fetchFn: FetchFn): Promise<string | undefined> {
+async function askGateway(paths: EnvPaths, pick: (ids: readonly string[]) => string, system: string, input: string, maxTokens: number, clean: (raw: string) => string | undefined, fetchFn: FetchFn): Promise<string | undefined> {
   const gateways = knownGateways(paths).sort((a, b) => PROTOCOL_ORDER.indexOf(a.spec.protocol) - PROTOCOL_ORDER.indexOf(b.spec.protocol));
   for (const { spec, provider, cached, keyFile } of gateways) {
     const key = readKey(keyFile);
     const ids = (cached.models ?? servedFromProvider(provider)).map((model) => model.id);
     if (key === undefined || ids.length === 0) continue;
-    const model = pickProbeModel(ids);
+    const model = pick(ids);
     const [endpoint, body]: [string, Record<string, unknown>] =
       spec.protocol === "anthropic-messages"
         ? ["/v1/messages", { model, max_tokens: maxTokens, system, messages: [{ role: "user", content: input }] }]
@@ -353,16 +362,16 @@ async function askCheapest(paths: EnvPaths, system: string, input: string, maxTo
  */
 export async function generateTitle(paths: EnvPaths, message: string, fetchFn: FetchFn = fetch): Promise<string | undefined> {
   const input = `<message>\n${message.slice(0, TITLE_MESSAGE_MAX)}\n</message>`;
-  return askCheapest(paths, TITLE_SYSTEM, input, TITLE_MAX_TOKENS, (raw) => cleanTitle(raw) || undefined, fetchFn);
+  return askGateway(paths, pickProbeModel, TITLE_SYSTEM, input, TITLE_MAX_TOKENS, (raw) => cleanTitle(raw) || undefined, fetchFn);
 }
 
 /**
- * A guess at the person's next short message after `conversation` (recentConversation's tagged text), from the cheapest
- * model of the first gateway that answers, as Claude Code's prompt suggestions: undefined when no gateway answers or the
+ * A guess at the person's next short message after `conversation` (recentConversation's tagged text, perhaps after the
+ * person's style examples), from the newest Sonnet of the first gateway that answers (its cheapest model without one), as Claude Code's prompt suggestions: undefined when no gateway answers or the
  * model stays silent (NONE) or breaks the format (a question, more than 12 words).
  */
 export async function generateSuggestion(paths: EnvPaths, conversation: string, fetchFn: FetchFn = fetch): Promise<string | undefined> {
-  return askCheapest(paths, SUGGESTION_SYSTEM, conversation, SUGGESTION_MAX_TOKENS, (raw) => {
+  return askGateway(paths, pickSuggestionModel, SUGGESTION_SYSTEM, conversation, SUGGESTION_MAX_TOKENS, (raw) => {
     const line = cleanTitle(raw);
     // Claude Code's format rules, held even when a small model drifts: no question, at most 12 words.
     if (line === "" || /^none\b/i.test(line) || line.includes("?") || line.split(/\s+/).length > SUGGESTION_MAX_WORDS) return undefined;

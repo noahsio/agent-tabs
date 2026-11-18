@@ -232,7 +232,7 @@ export class SessionController extends EventEmitter {
   /** A topic title for the first message; absent (or undefined from it): the session is named by the message itself. */
   private titler: ((message: string) => Promise<string | undefined>) | undefined;
   /** A guess at the person's next message from the conversation's latest part (one cheap model call). */
-  private suggester: ((conversation: string) => Promise<string | undefined>) | undefined;
+  private suggester: ((conversation: string, sessionPath: string | undefined) => Promise<string | undefined>) | undefined;
   /** The person ended the current turn with «Стоп»: no guess follows it. */
   private stopped = false;
   private durableId: string | undefined;
@@ -980,7 +980,7 @@ export class SessionController extends EventEmitter {
     this.titler = titler;
   }
 
-  setSuggester(suggester: (conversation: string) => Promise<string | undefined>): void {
+  setSuggester(suggester: (conversation: string, sessionPath: string | undefined) => Promise<string | undefined>): void {
     this.suggester = suggester;
   }
 
@@ -1548,7 +1548,7 @@ export class SessionController extends EventEmitter {
     const conversation = recentConversation(at.blocks);
     if (conversation === undefined) return;
     const messages = userMessages(at.blocks);
-    const suggestion = await this.suggester(conversation).catch(() => undefined);
+    const suggestion = await this.suggester(conversation, this.tab.sessionPath).catch(() => undefined);
     const now = this.current;
     if (suggestion === undefined || this.released || now.running || now.dialogs.length > 0 || userMessages(now.blocks) !== messages) return;
     this.commit({ ...now, suggestion: inPersonsCase(suggestion, now.blocks) });
