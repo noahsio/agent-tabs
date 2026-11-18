@@ -318,8 +318,8 @@ function cleanTitle(raw: string): string {
 }
 
 /**
- * The reply of the cheapest model of the first gateway that gives one (Anthropic ones first) to `input` under `system`,
- * cleaned; a gateway that fails or answers with no text passes the turn to the next. Undefined when none answers.
+ * The reply of the cheapest model of the first gateway that answers (Anthropic ones first) to `input` under `system`,
+ * cleaned; only a gateway that fails passes the turn to the next. Undefined when none answers or the reply cleans to nothing.
  */
 async function askCheapest(paths: EnvPaths, system: string, input: string, maxTokens: number, clean: (raw: string) => string | undefined, fetchFn: FetchFn): Promise<string | undefined> {
   const gateways = knownGateways(paths).sort((a, b) => PROTOCOL_ORDER.indexOf(a.spec.protocol) - PROTOCOL_ORDER.indexOf(b.spec.protocol));
@@ -336,8 +336,7 @@ async function askCheapest(paths: EnvPaths, system: string, input: string, maxTo
           : ["/chat/completions", { model, max_tokens: maxTokens, messages: [{ role: "system", content: system }, { role: "user", content: input }] }];
     try {
       const reply = await request(spec, key, `${trimBase(spec.baseUrl)}${endpoint}`, { method: "POST", headers: headers(spec, key, true), body: JSON.stringify(body) }, fetchFn);
-      const raw = replyText(spec.protocol, reply);
-      if (raw.trim() !== "") return clean(raw);
+      return clean(replyText(spec.protocol, reply)); // an empty reply is the model's silence, not a failure
     } catch {
       // the next gateway
     }

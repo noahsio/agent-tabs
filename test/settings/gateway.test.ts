@@ -367,6 +367,15 @@ describe("generateSuggestion", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("an_empty_reply_is_silence_and_asks_no_other_gateway", async () => {
+    await saveGateway(paths, anthropic(), KEY, fetch);
+    await saveGateway(paths, openai(), KEY, fetch);
+    const sent: Array<{ url: string; body: unknown }> = [];
+    const fake = answering((url) => (url.endsWith("/v1/messages") ? json({ content: [{ type: "text", text: "" }] }) : json({ choices: [{ message: { content: "ещё" } }] })), sent);
+    expect(await generateSuggestion(paths, conversation, fake)).toBeUndefined();
+    expect(sent).toHaveLength(1);
+  });
+
   it("drops_a_question_or_a_long_line_as_claude_code_never_suggests_them", async () => {
     await saveGateway(paths, anthropic(), KEY, fetch);
     const replying = (text: string): typeof fetch => answering(() => json({ content: [{ type: "text", text }] }));
