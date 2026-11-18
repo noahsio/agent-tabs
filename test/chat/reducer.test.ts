@@ -1032,6 +1032,21 @@ describe("a goal OmO stopped is not a turn waiting for an answer", () => {
 
   // Seen live (2026-11-10): OmO says this on every reopen of a session whose goal ran many continuations; the idle sweep
   // parks and the tab reopens it every 30 minutes, so the feed filled with the same English line.
+  // Seen live (2026-11-18): every message was answered by OmO compacting first, the summarization running past its
+  // 120 s budget, and the turn ending aborted with no reply — the tab showed nothing at all. The failure now shows.
+  it("a_compaction_that_failed_says_why_in_the_feed", () => {
+    const failed = applyFrame({ ...initialState(), compacting: true }, {
+      type: "compaction_end", reason: "threshold", result: null, aborted: true,
+      errorMessage: "Compaction rejected: compaction generator failed: Summarization stream exceeded its 120000ms wall-clock budget",
+    });
+    expect(failed.compacting).toBe(false);
+    const notice = failed.blocks.at(-1);
+    expect(notice).toMatchObject({ kind: "notice", level: "warn" });
+    expect(notice?.kind === "notice" && notice.text).toMatch(/^Не удалось сжать контекст: .*120000ms/);
+    const stopped = applyFrame({ ...initialState(), compacting: true }, { type: "compaction_end", reason: "manual", result: null, aborted: true });
+    expect(stopped.blocks).toEqual([]); // stopped without an error: nothing to explain
+  });
+
   it("omo_s_suppressed_goal_continuation_shows_once_in_russian_at_the_end", () => {
     const SUPPRESSED = "Goal auto-continuation suppressed for this resumed session (18 historical continuations). Send a message to resume.";
     const notify = (state: ReturnType<typeof initialState>, id: string, message: string) =>

@@ -1141,7 +1141,11 @@ export function applyFrame(s: ChatState, frame: any, sink?: ImageSink, now: Cloc
     case "compaction_end": {
       // A finished compaction leaves the old count meaningless until the next reply reports fresh usage.
       const { contextTokens: _stale, ...rest } = s;
-      return { ...(frame["aborted"] === true ? s : rest), compacting: false };
+      const next = { ...(frame["aborted"] === true ? s : rest), compacting: false };
+      // A failed compaction ends the turn it began by aborting: without this line the person sees no reply and no why.
+      const failure = asString(frame["errorMessage"]);
+      if (failure === undefined || failure.trim() === "") return next;
+      return { ...next, blocks: appendNotice(next.blocks, notice(`compaction-failed:${next.blocks.length}`, "warn", `Не удалось сжать контекст: ${failure}`)) };
     }
     case "session_lifecycle":
       return applyLifecycle(s, frame["lifecycle"]);
