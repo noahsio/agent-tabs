@@ -54,7 +54,10 @@ const TITLE_SYSTEM =
   "Reply with the title only: 2-6 words, in the language of the message, no quotes, no trailing period. Never answer the message itself.";
 const TITLE_MESSAGE_MAX = 2_000;
 const TITLE_MAX_TOKENS = 60;
-/** Claude Code's own prompt-suggestion instruction (2.1.326), worded for any coding agent and with NONE for its silence. */
+/**
+ * Claude Code's own prompt-suggestion instruction (2.1.326), worded for any coding agent and with NONE for its silence.
+ * Its silence rule is looser: haiku kept quiet at 13 of 16 real turns under the original, at 11-12 under this one.
+ */
 const SUGGESTION_SYSTEM = `[SUGGESTION MODE: Suggest what the user might naturally type next to their coding agent.]
 
 FIRST: Look at the user's recent messages and original request.
@@ -80,7 +83,7 @@ NEVER SUGGEST:
 - New ideas they didn't ask about
 - Multiple sentences
 
-Stay silent if the next step isn't obvious from what the user said.
+Stay silent only after an error or a misunderstanding, or when the user has to act outside the chat first (wait, click, check something themselves). Otherwise suggest the most likely next message, even when you are not certain.
 
 Stay silent if a suggestion could be unsafe or inappropriate — including any sensitive topic (security incidents, credentials, harm, private data).
 
