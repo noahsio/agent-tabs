@@ -467,7 +467,18 @@ export function activate(context: vscode.ExtensionContext): void {
       if (vscode.workspace.getConfiguration("agentTabs").get<boolean>("promptSuggestions") === false) return undefined;
       // How the person replies in this project's other sessions: Sonnet writes the guess the way they would.
       const examples = sessionPath === undefined ? undefined : await projectStyleExamples(sessionPath).catch(() => undefined);
-      return generateSuggestion(paths, withStyleExamples(conversation, examples));
+      // The gateway's own failures pass silently to the next one; the log keeps them for the person.
+      const watched: typeof fetch = async (input, init) => {
+        try {
+          const response = await fetch(input, init);
+          if (!response.ok) log(`Подсказка: шлюз ответил ${response.status}`);
+          return response;
+        } catch (error) {
+          log(`Подсказка: шлюз недоступен: ${error instanceof Error ? error.message : String(error)}`);
+          throw error;
+        }
+      };
+      return generateSuggestion(paths, withStyleExamples(conversation, examples), watched);
     };
     settings.register(new LadderHost({ paths, models: () => roles.modelOptions(), changed: () => settings.emit("changed") }));
     let hiddenCommands: readonly string[] = readHiddenCommands(paths); // one array until it changes: the tabs' deltas compare by reference

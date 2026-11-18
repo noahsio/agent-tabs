@@ -1539,20 +1539,35 @@ export class SessionController extends EventEmitter {
   }
 
   /**
-   * After a turn that ended cleanly (no error, no «Стоп», no question open, no background work), a guess at the
-   * person's next message; it is dropped if the person wrote, a turn started or a question came up meanwhile.
+   * After a turn that ended cleanly (no error, no «Стоп», no question open), a guess at the person's next message; it is
+   * dropped if the person wrote, a turn started or a question came up meanwhile. Background work (monitors, tasks) does
+   * not hold it back, as in Claude Code. Each turn end leaves one line in the log saying what came of it.
    */
   private async suggestNext(): Promise<void> {
     const at = this.current;
-    if (this.suggester === undefined || this.stopped || at.error !== undefined || at.dialogs.length > 0 || (at.background?.count ?? 0) > 0) return;
-    const conversation = recentConversation(at.blocks);
-    if (conversation === undefined) return;
+    if (this.suggester === undefined) return;
+    const skipped = this.stopped ? "ход остановлен «Стоп»" : at.error !== undefined ? "ход кончился ошибкой" : at.dialogs.length > 0 ? "открыт вопрос" : undefined;
+    const conversation = skipped === undefined ? recentConversation(at.blocks) : undefined;
+    if (conversation === undefined) {
+      this.log?.(`Подсказка: пропущена — ${skipped ?? "в ленте нет ответа на сообщение"}`);
+      return;
+    }
     const messages = userMessages(at.blocks);
-    const suggestion = await this.suggester(conversation, this.tab.sessionPath).catch(() => undefined);
+    const started = Date.now();
+    let suggestion: string | undefined;
+    try {
+      suggestion = await this.suggester(conversation, this.tab.sessionPath);
+    } catch (error) {
+      this.log?.(`Подсказка: не получена: ${redact(errorText(error), this.dm.secrets)}`);
+      return;
+    }
     const now = this.current;
-    if (suggestion === undefined || this.released || now.running || now.dialogs.length > 0 || userMessages(now.blocks) !== messages) return;
+    const stale = this.released || now.running || now.dialogs.length > 0 || userMessages(now.blocks) !== messages;
+    this.log?.(`Подсказка за ${Date.now() - started} мс: ${suggestion === undefined ? "нет (модель промолчала или выключено)" : stale ? "опоздала, разговор ушёл дальше" : `«${suggestion}»`}`);
+    if (suggestion === undefined || stale) return;
     this.commit({ ...now, suggestion: inPersonsCase(suggestion, now.blocks) });
   }
+
 
   private sync(): void {
     if (this.current.title !== undefined) this.tab.title = this.current.title;
