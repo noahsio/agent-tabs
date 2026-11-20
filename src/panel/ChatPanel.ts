@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { onTabClosed, type TabCloseDeps } from "./tabClose";
 import path from "node:path";
 import { tabTitle } from "./tabTitle";
 import * as vscode from "vscode";
@@ -114,6 +115,8 @@ export type PanelHost = {
   titler?: (message: string) => Promise<string | undefined>;
   /** A guess at the person's next message (one cheap model call); absent while the environment is incomplete. */
   suggester?: (conversation: string, sessionPath: string | undefined) => Promise<string | undefined>;
+  /** What a closed tab does with its session (onTabClosed); absent: it only lets go, the session keeps running. */
+  tabClose?: TabCloseDeps;
   /** The window's approval cards (one guard subscription for every tab); absent while the environment is incomplete. */
   guard?: Pick<GuardApprovals, "answer" | "replay" | "panelsChanged">;
   deferred?: Pick<DeferredInbox, "refresh" | "answer">;
@@ -1308,7 +1311,11 @@ export class ChatPanel implements ApprovalPanel {
     this.host.settings?.off("models", this.onModelsChanged);
     this.unsubscribeCatalog();
     if (this.key !== undefined) this.host.registry.remove(this.key, this);
-    void this.controller?.release();
+    const controller = this.controller;
+    if (controller === undefined) return;
+    const title = controller.state.title ?? controller.tabState.title ?? UNTITLED;
+    if (this.host.tabClose === undefined) void controller.release();
+    else void onTabClosed(controller, title, this.host.tabClose);
   }
 
   private html(): string {

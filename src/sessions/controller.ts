@@ -1185,7 +1185,21 @@ export class SessionController extends EventEmitter {
 
   /** Detaches this tab only; the session stays retained in the daemon. */
   async release(): Promise<void> {
-    if (this.released) return;
+    await this.detach("release_attachment");
+  }
+
+  /**
+   * Ends the session in OmO, not just this tab's hold on it: a running turn is aborted, and its background shells,
+   * monitors and kernels end with it. OmO keeps a session another client (a terminal, another window) still holds.
+   * True when OmO reports it closed.
+   */
+  async close(): Promise<boolean> {
+    const data = await this.detach("close_session");
+    return isObject(data) && data["closed"] !== false;
+  }
+
+  private async detach(command: "release_attachment" | "close_session"): Promise<unknown> {
+    if (this.released) return undefined;
     this.released = true;
     clearTimeout(this.deadlineTimer);
     this.modelLadder?.dispose();
@@ -1193,13 +1207,14 @@ export class SessionController extends EventEmitter {
     this.dm.off("connected", this.onConnected);
     this.client.off("frame", this.onFrame);
     await this.reconnecting; // an in-flight re-attach must finish so its fresh hold is released too
-    if (this.handle === "") return;
+    if (this.handle === "") return undefined;
     try {
-      await this.client.request("release_attachment", { sessionId: this.handle });
+      return await this.client.request(command, { sessionId: this.handle });
     } catch {
-      // the connection may already be gone; the daemon retains the session either way
+      return undefined; // the connection may already be gone; the daemon retains the session either way
     }
   }
+
 
   // ---------- internals ----------
 
