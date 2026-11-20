@@ -125,6 +125,10 @@ function workspaceFolder(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
+/** A closed tab waits this long before it closes its session: a window reload or quit ends the extension first. */
+const TAB_CLOSE_DELAY_MS = 3_000;
+let shuttingDown = false;
+
 export function activate(context: vscode.ExtensionContext): void {
   const channel = vscode.window.createOutputChannel("Agent Tabs");
   // Read once: this window's environment is fixed for the life of the extension host, never another one's.
@@ -480,6 +484,12 @@ export function activate(context: vscode.ExtensionContext): void {
       };
       return generateSuggestion(paths, withStyleExamples(conversation, examples), watched);
     };
+    host.tabClose = {
+      delayMs: TAB_CLOSE_DELAY_MS,
+      shuttingDown: () => shuttingDown,
+      ask: async (question) => (await vscode.window.showWarningMessage(question, "Завершить", "Оставить")) === "Завершить",
+      log,
+    };
     settings.register(new LadderHost({ paths, models: () => roles.modelOptions(), changed: () => settings.emit("changed") }));
     let hiddenCommands: readonly string[] = readHiddenCommands(paths); // one array until it changes: the tabs' deltas compare by reference
     host.hiddenCommands = () => hiddenCommands;
@@ -694,6 +704,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 /** Closes the socket only; the daemon and its sessions keep running. */
 export function deactivate(): void {
+  shuttingDown = true; // a tab closed from here on (a reload, a quit) lets its session go, never closes it
   void connections?.dispose();
   connections = undefined;
   daemon?.dispose();
