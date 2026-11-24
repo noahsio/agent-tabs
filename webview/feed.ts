@@ -209,6 +209,17 @@ export function toolLabel(name: string): string {
   return /^[a-z]+$/.test(name) ? name.charAt(0).toUpperCase() + name.slice(1) : name;
 }
 
+/**
+ * A read of a skill's SKILL.md is the agent loading that skill, what Claude Code shows as «Skill(name)»: its folder's name
+ * and, for a known pack, the pack. Undefined for any other step.
+ */
+export function skillOf(block: Block): { name: string; pack?: string } | undefined {
+  if (block.kind !== "tool" || block.name !== READ_TOOL || block.file === undefined) return undefined;
+  const match = /[\\/]([^\\/]+)[\\/]SKILL\.md$/.exec(block.file);
+  if (match === null) return undefined;
+  return /[\\/]superpowers[\\/]/.test(block.file) ? { name: match[1] as string, pack: "superpowers" } : { name: match[1] as string };
+}
+
 /** An assistant block that has produced nothing yet stays out of the timeline. */
 function isPending(block: Block): boolean {
   return block.kind === "assistant" && block.text === "" && block.thinking === "";
@@ -251,7 +262,7 @@ function indicatorVerb(activity: FeedActivity | undefined): string {
  * draws nothing anyway) and thinking that came with no words. An answer's text always shows.
  */
 function isFolded(block: Block): boolean {
-  if (block.kind === "tool") return block.answer === undefined && block.name !== ASK_TOOL;
+  if (block.kind === "tool") return block.answer === undefined && block.name !== ASK_TOOL && skillOf(block) === undefined;
   return block.kind === "assistant" && block.text === "" && block.thinking !== "";
 }
 
@@ -1111,6 +1122,12 @@ export class Feed {
       if (block.model !== undefined) line.append(el("span", { class: "agent-tag" }, block.model));
       return line;
     }
+    const skill = skillOf(block);
+    if (skill !== undefined) {
+      line.append(el("span", { class: "tool-name" }, "Скилл"), this.fileLink(block.file as string, undefined, skill.name));
+      if (skill.pack !== undefined) line.append(el("span", { class: "agent-tag" }, skill.pack));
+      return line;
+    }
     line.append(el("span", { class: "tool-name" }, verb ?? toolLabel(block.name)));
     const named = (block.name === READ_TOOL || verb !== undefined) && block.file !== undefined;
     if (named) line.append(this.fileLink(block.file as string, block.fromLine));
@@ -1122,10 +1139,10 @@ export class Feed {
   }
 
   /** Opens the file in the editor through the host (see onClick); the header does not toggle. */
-  private fileLink(path: string, line: number | undefined): HTMLElement {
+  private fileLink(path: string, line: number | undefined, label: string = fileName(path)): HTMLElement {
     const attributes: Record<string, string> = { href: "#", class: "file-link", "data-open-file": path, title: path };
     if (line !== undefined) attributes["data-line"] = String(line);
-    return el("a", attributes, fileName(path));
+    return el("a", attributes, label);
   }
 
   /**
@@ -1187,12 +1204,16 @@ export class Feed {
     const target = event.target as Element | null;
     const copy = target?.closest('[data-role="copy"]');
     if (copy !== null && copy !== undefined) return; // a copy control acts for itself: it never opens its box
-    const link = target?.closest("a");
-    if (link !== null && link !== undefined) {
+    const link = target?.closest("a") ?? undefined;
+    const href = link?.getAttribute("href") ?? "";
+    // A web link belongs to VS Code's own webview opener (`did-click-link`, on the window): it opens it once and, in a
+    // trusted workspace, without a prompt. Ours went through `openExternal`, which cannot say a person clicked, so it
+    // always asked «Do you want Code to open the external website?». Everything else — a file row's «#», a mailto:, a
+    // click that only ended a selection — is ours, and VS Code's opener must not see it.
+    const vscodeOpens = link !== undefined && /^https?:\/\//i.test(href) && !selectionInside(link);
+    if (link !== undefined && !vscodeOpens) {
       event.preventDefault(); // a link never navigates the tab itself
-      // VS Code's own webview script opens every clicked link too (`did-click-link`, on the window, deaf to
-      // preventDefault): with ours that was a «open the external website?» prompt and a second tab. Ours is the one.
-      event.stopPropagation();
+      event.stopPropagation(); // VS Code's opener is deaf to preventDefault
     }
     const file = target?.closest<HTMLElement>("[data-open-file]");
     if (file !== null && file !== undefined) {
@@ -1211,9 +1232,8 @@ export class Feed {
       this.openImage(tile);
       return;
     }
-    if (link === null || link === undefined || selectionInside(link)) return;
-    const url = link.getAttribute("href");
-    if (url !== null && url !== "") this.post({ type: "openLink", url });
+    if (link === undefined || vscodeOpens || selectionInside(link) || href === "") return;
+    this.post({ type: "openLink", url: href });
   }
 
   private openImage(tile: HTMLElement): void {
