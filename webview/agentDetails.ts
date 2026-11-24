@@ -283,10 +283,11 @@ export class AgentDetailsModal {
   private onLink(event: MouseEvent): void {
     const link = (event.target as Element | null)?.closest("a");
     if (link === null || link === undefined) return;
+    const url = link.getAttribute("href") ?? "";
+    if (/^https?:\/\//i.test(url)) return; // a web link is VS Code's own to open, as in the feed
     event.preventDefault();
-    event.stopPropagation(); // past VS Code's own link opener on the window (see the feed)
-    const url = link.getAttribute("href");
-    if (url !== null && url !== "") this.post({ type: "openLink", url });
+    event.stopPropagation(); // past VS Code's own link opener on the window
+    if (url !== "") this.post({ type: "openLink", url });
   }
 
   private onKeyDown(event: KeyboardEvent): void {

@@ -788,50 +788,77 @@ describe("selecting text in the feed", () => {
     expect(posted).toEqual([]);
   });
 
-  it("a_click_that_ends_a_selection_in_a_link_does_not_open_it", () => {
-    feed.update([{ kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false }], false);
-    const link = entry("a1").querySelector("a") as HTMLAnchorElement;
-    select(link, "example.com");
-    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    expect(posted).toEqual([]);
-
-    clear(); // a plain click still opens it
-    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    expect(posted).toEqual([{ type: "openLink", url: "https://example.com/a" }]);
-  });
-
-  it("a_link_opens_once_through_the_host_and_never_reaches_vscodes_own_link_opener", () => {
-    // VS Code's webview script: a window click listener that opens any clicked link (`did-click-link`) and ignores
-    // defaultPrevented. It is what asked «open the external website?» and opened a second tab next to ours.
-    const vscodeOpened: string[] = [];
-    const vscodeOpener = (event: MouseEvent): void => {
+  /** VS Code's own webview script: a window click listener that opens any clicked link it sees (`did-click-link`). */
+  function vscodeOpener(): { opened: string[]; stop: () => void } {
+    const opened: string[] = [];
+    const listener = (event: MouseEvent): void => {
       const link = event.composedPath().find((node): node is HTMLAnchorElement => node instanceof HTMLAnchorElement);
-      if (link !== undefined) vscodeOpened.push(link.href);
+      if (link !== undefined) opened.push(link.href); // the real one ignores defaultPrevented, so this one does too
     };
-    window.addEventListener("click", vscodeOpener);
+    window.addEventListener("click", listener);
+    return { opened, stop: () => window.removeEventListener("click", listener) };
+  }
+
+  it("a_web_link_is_opened_by_vscode_itself_so_nothing_asks_first", () => {
+    const vscode = vscodeOpener();
     try {
       feed.update([{ kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false }], false);
       const link = entry("a1").querySelector("a") as HTMLAnchorElement;
-      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }));
-      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      expect(posted).toEqual([{ type: "openLink", url: "https://example.com/a" }, { type: "openLink", url: "https://example.com/a" }]);
-      expect(vscodeOpened).toEqual([]);
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      link.dispatchEvent(event);
+      // Ours went through openExternal, which always asked «Do you want Code to open the external website?».
+      expect({ vscode: vscode.opened, host: posted, prevented: event.defaultPrevented }).toEqual({ vscode: ["https://example.com/a"], host: [], prevented: false });
     } finally {
-      window.removeEventListener("click", vscodeOpener);
+      vscode.stop();
+    }
+  });
+
+  it("a_file_link_stays_the_hosts_own_and_never_reaches_vscodes_opener", () => {
+    const vscode = vscodeOpener();
+    try {
+      feed.update([{ kind: "tool", id: "t1", name: "read", file: "/repo/src/feed.ts", summary: "feed.ts", args: {}, output: "", truncated: false, state: "ok" }], false);
+      const link = root.querySelector("[data-open-file]") as HTMLAnchorElement;
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+      link.dispatchEvent(event);
+      expect({ host: posted, prevented: event.defaultPrevented, vscode: vscode.opened }).toEqual({ host: [{ type: "openFile", path: "/repo/src/feed.ts" }], prevented: true, vscode: [] });
+    } finally {
+      vscode.stop();
+    }
+  });
+
+  it("a_click_that_ends_a_selection_in_a_link_opens_it_nowhere", () => {
+    const vscode = vscodeOpener();
+    try {
+      feed.update([{ kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false }], false);
+      const link = entry("a1").querySelector("a") as HTMLAnchorElement;
+      select(link, "example.com");
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      expect({ vscode: vscode.opened, host: posted }).toEqual({ vscode: [], host: [] });
+
+      clear(); // a plain click still opens it, through VS Code
+      link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      expect(vscode.opened).toEqual(["https://example.com/a"]);
+    } finally {
+      vscode.stop();
     }
   });
 
   it("a_link_click_is_not_blocked_by_a_selection_somewhere_else", () => {
-    feed.update(
-      [
-        { kind: "assistant", id: "a0", text: "раньше", thinking: "", streaming: false },
-        { kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false },
-      ],
-      false,
-    );
-    select(entry("a0"), "раньше"); // Chrome keeps such a selection across a click on a link
-    (entry("a1").querySelector("a") as HTMLAnchorElement).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    expect(posted).toEqual([{ type: "openLink", url: "https://example.com/a" }]);
+    const vscode = vscodeOpener();
+    try {
+      feed.update(
+        [
+          { kind: "assistant", id: "a0", text: "раньше", thinking: "", streaming: false },
+          { kind: "assistant", id: "a1", text: "Смотри https://example.com/a", thinking: "", streaming: false },
+        ],
+        false,
+      );
+      select(entry("a0"), "раньше"); // Chrome keeps such a selection across a click on a link
+      (entry("a1").querySelector("a") as HTMLAnchorElement).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      expect(vscode.opened).toEqual(["https://example.com/a"]);
+    } finally {
+      vscode.stop();
+    }
   });
 
   it("a_box_opens_on_a_click_unless_the_selection_is_in_it", () => {
@@ -1119,6 +1146,21 @@ describe("focus view", () => {
     expect(order()).toContain("t1");
     fold("a1").click();
     expect(order()).toEqual(["u1", "fold:a1", "a2", "u2", "fold:t3"]);
+  });
+
+  it("a_skill_load_is_its_own_row_named_by_the_skill_and_stays_in_the_focus_view", () => {
+    const skill = (id: string, file: string): Block => ({ kind: "tool", id, name: "read", file, summary: file, args: {}, output: "", truncated: false, state: "ok" });
+    feed.setFocus(true);
+    feed.update([
+      { kind: "user", id: "u1", text: "давай сделаем todo на react" },
+      skill("s1", "/Users/me/.local/share/agent-tabs/superpowers/skills/brainstorming/SKILL.md"),
+      tool("t1", "ok"),
+      skill("s2", "/Users/me/.claude/skills/my-writing-style/SKILL.md"),
+    ], false);
+    expect(order()).toEqual(["u1", "s1", "fold:t1", "s2"]);
+    expect(entry("s1").querySelector("summary")?.textContent).toBe("Скиллbrainstormingsuperpowers");
+    expect(entry("s2").querySelector("summary")?.textContent).toBe("Скиллmy-writing-style");
+    expect(entry("s1").querySelector<HTMLElement>("[data-open-file]")?.dataset["openFile"]).toBe("/Users/me/.local/share/agent-tabs/superpowers/skills/brainstorming/SKILL.md");
   });
 
   it("switching_off_shows_every_step_again", () => {

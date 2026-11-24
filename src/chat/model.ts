@@ -134,8 +134,17 @@ export type AgentRow = {
   status: AgentStatus;
   startedAt?: number;
   endedAt?: number;
-  /** Tokens the task spent, when OmO reports its run stats. */
+  /**
+   * OmO's `total_tokens`: every model call's whole prompt summed, so a long run's re-read context counts again on each
+   * call (59.6 M for a 205-call run whose context never passed 1 M). Shown only in the card's tooltip.
+   */
   tokens?: number;
+  /** The context of an average model call, (input + cache read + cache write) / turns: the card's figure. */
+  contextTokens?: number;
+  /** Tokens the task's model wrote. */
+  outputTokens?: number;
+  /** Model calls the task made. */
+  turns?: number;
   /** The durable id of the session the task runs in (OmO's `child_session_id`): its guarded calls belong to this tab. */
   childSession?: string;
 };

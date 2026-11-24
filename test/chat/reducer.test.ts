@@ -690,6 +690,13 @@ describe("chat reducer: redesigned-UI model", () => {
     expect(rowModel({ resolved_model: { name: "astra" } })).toBe("astra");
   });
 
+  it("an_agents_context_is_its_average_call_not_omos_sum_of_every_call", () => {
+    // order10-kassa-allow, 2026-11-24: 205 calls, OmO's total 59.6 M, nearly all of it the context re-read each call.
+    const run_stats = { turns: 205, input_tokens: 589, cache_read_tokens: 58_728_930, cache_write_tokens: 649_996, output_tokens: 185_795, total_tokens: 59_565_310 };
+    const state = applyFrame(initialState(), { type: "extension_event", name: "omo.task.updated", data: { tasks: [{ task_id: "a", status: "completed", run_stats }] } });
+    expect(state.agents[0]).toMatchObject({ tokens: 59_565_310, contextTokens: 289_656, outputTokens: 185_795, turns: 205 });
+  });
+
   it("agent_tokens_come_from_run_stats_and_context_tokens_from_assistant_usage", () => {
     let state = applyFrame(initialState(), {
       type: "extension_event",

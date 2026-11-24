@@ -16,10 +16,32 @@ function plural(count: number, one: string, few: string, many: string): string {
   return many;
 }
 
-/** «850 токенов», «58,1 тыс. токенов». */
+/** «850 токенов», «58,1 тыс. токенов», «59,6 млн токенов». */
 export function tokensText(tokens: number): string {
   if (tokens < 1000) return `${tokens} ${plural(tokens, "токен", "токена", "токенов")}`;
-  return `${(tokens / 1000).toFixed(1).replace(".", ",")} тыс. токенов`;
+  if (tokens < 1_000_000) return `${(tokens / 1000).toFixed(1).replace(".", ",")} тыс. токенов`;
+  return `${(tokens / 1_000_000).toFixed(1).replace(".", ",")} млн токенов`;
+}
+
+/**
+ * The card's token figure: the context of an average model call, comparable with the session's own «… в контексте».
+ * OmO's total sums every call's whole prompt, so it is shown only when the run reports nothing else.
+ */
+function agentTokens(agent: AgentRow): string | undefined {
+  if (agent.contextTokens !== undefined) return `≈${tokensText(agent.contextTokens)} в контексте`;
+  return agent.tokens === undefined ? undefined : `${tokensText(agent.tokens)} всего`;
+}
+
+/** The card's tooltip: where OmO's total comes from. */
+export function tokensTooltip(agent: AgentRow): string | undefined {
+  if (agent.tokens === undefined || agent.turns === undefined) return undefined;
+  const parts = [
+    `${agent.turns} ${plural(agent.turns, "вызов", "вызова", "вызовов")} модели`,
+    ...(agent.contextTokens !== undefined ? [`в среднем ${tokensText(agent.contextTokens)} в контексте на вызов`] : []),
+    ...(agent.outputTokens !== undefined ? [`написано ${tokensText(agent.outputTokens)}`] : []),
+    `всего прочитано ${tokensText(agent.tokens)}: каждый вызов заново читает весь контекст`,
+  ];
+  return parts.join("; ");
 }
 
 /** «41 с», «2 мин 5 с», «1 ч 2 мин» from start to end, or to now while the agent runs; undefined before it starts. */
@@ -43,7 +65,7 @@ function agentModel(qualified: string | undefined, models: ModelInfo[]): string 
 
 /** «GPT 6 Astra · 18 с · 31,0 тыс. токенов». */
 function cardMeta(agent: AgentRow, now: number, models: ModelInfo[]): string {
-  return [agentModel(agent.model, models), elapsedText(agent, now), agent.tokens === undefined ? undefined : tokensText(agent.tokens)]
+  return [agentModel(agent.model, models), elapsedText(agent, now), agentTokens(agent)]
     .filter((part) => part !== undefined)
     .join(" · ");
 }
@@ -150,7 +172,7 @@ export class AgentMap implements PopoverContent {
     const meta = cardMeta(agent, now, this.models);
     const parts = [
       el("span", { class: "d", "aria-hidden": "true" }),
-      el("span", { class: "main" }, el("b", { "data-role": "agent-label" }, agent.label), ...(meta !== "" ? [el("span", { class: "s", "data-role": "agent-meta" }, meta)] : [])),
+      el("span", { class: "main" }, el("b", { "data-role": "agent-label" }, agent.label), ...(meta !== "" ? [el("span", { class: "s", "data-role": "agent-meta", ...(tokensTooltip(agent) !== undefined ? { title: tokensTooltip(agent) as string } : {}) }, meta)] : [])),
     ];
     const taskId = agent.taskId;
     const title = taskId === undefined ? "Клик — подробности" : "Клик — подробности, ⌥ клик — остановить";

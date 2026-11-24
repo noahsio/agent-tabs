@@ -180,13 +180,13 @@ describe("ChatView", () => {
     expect(stopButton().hidden).toBe(true);
   });
 
-  it("links_go_through_the_host", () => {
+  it("web_links_are_left_to_vscodes_own_opener", () => {
     show({ blocks: [{ kind: "assistant", id: "a1", text: "see [docs](https://example.com/x)", thinking: "", streaming: false }] });
     const link = root.querySelector('[data-block="a1"] a') as HTMLAnchorElement;
     const event = new MouseEvent("click", { bubbles: true, cancelable: true });
     link.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(true);
-    expect(posted).toEqual([{ type: "openLink", url: "https://example.com/x" }]);
+    expect(event.defaultPrevented).toBe(false); // VS Code opens it once; ours asked first
+    expect(posted).toEqual([]);
   });
 
   it("error_banner_offers_reconnect", () => {
