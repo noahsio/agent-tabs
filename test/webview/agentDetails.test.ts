@@ -101,7 +101,7 @@ describe("agent details modal", () => {
     expect(details().contains(document.activeElement)).toBe(true);
     expect(role("agent-details-title", details()).textContent).toBe("Поиск");
     expect(role("agent-details-panel", details()).dataset["status"]).toBe("done");
-    expect(role("agent-details-meta", details()).textContent).toBe("Opus 5.5 · 2 мин 5 с · 58,1 тыс. токенов · explore");
+    expect(role("agent-details-meta", details()).textContent).toBe("Opus 5.5 · 2 мин 5 с · 58,1 тыс. токенов всего · explore");
 
     reply({ taskId: "t-1", ok: true, prompt: "Найти, где читается кэш", result: "**готово** <img src=x onerror=alert(1)>", transcript: "assistant: ищу\ntool: grep", status: "done" });
     expect(role("agent-details-task", details()).textContent).toBe("Найти, где читается кэш");

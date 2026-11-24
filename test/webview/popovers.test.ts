@@ -390,10 +390,10 @@ describe("popovers", () => {
     // Running first, then the newest.
     expect(cards().map((card) => role("agent-label", card).textContent)).toEqual(["Правка CatalogService.swift", "Ревью", "Поиск", "Прогон тестов"]);
     expect(cards().map((card) => card.dataset["status"])).toEqual(["running", "error", "done", "waiting"]);
-    expect(cards().map(meta)).toEqual(["1 мин 42 с · 200,8 тыс. токенов", "41 с · 850 токенов", "2 мин 5 с · 58,1 тыс. токенов", undefined]);
+    expect(cards().map(meta)).toEqual(["1 мин 42 с · 200,8 тыс. токенов всего", "41 с · 850 токенов всего", "2 мин 5 с · 58,1 тыс. токенов всего", undefined]);
 
     vi.advanceTimersByTime(1000);
-    expect(meta(cards()[0] as HTMLElement)).toBe("1 мин 43 с · 200,8 тыс. токенов");
+    expect(meta(cards()[0] as HTMLElement)).toBe("1 мин 43 с · 200,8 тыс. токенов всего");
 
     (cards()[0] as HTMLElement).dispatchEvent(new MouseEvent("click", { bubbles: true, altKey: true }));
     expect(posted.at(-1)).toEqual({ type: "agentCancel", taskId: "t-2" });
@@ -423,8 +423,8 @@ describe("popovers", () => {
     role("agents-pill").click();
     const meta = rows("agents").map((card) => [role("agent-label", card).textContent, role("agent-meta", card)?.textContent]);
     expect(meta).toEqual([
-      ["test-quick", "GPT 6 Astra · 39 с · 68,7 тыс. токенов"],
-      ["test-explore", "claude-opus-5-5 · 29 с · 55,2 тыс. токенов"],
+      ["test-quick", "GPT 6 Astra · 39 с · ≈22,8 тыс. токенов в контексте"],
+      ["test-explore", "claude-opus-5-5 · 29 с · ≈17,5 тыс. токенов в контексте"],
     ]);
   });
 

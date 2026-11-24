@@ -1043,8 +1043,21 @@ function taskRow(task: Json): AgentRow | undefined {
   if (startedAt !== undefined) row.startedAt = startedAt;
   const endedAt = row.status === "done" || row.status === "error" ? parseTime(task["updated_at"]) : undefined;
   if (endedAt !== undefined) row.endedAt = endedAt;
-  const tokens = isObject(task["run_stats"]) ? task["run_stats"]["total_tokens"] : undefined;
-  if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0) row.tokens = tokens;
+  const stats = isObject(task["run_stats"]) ? task["run_stats"] : undefined;
+  const count = (key: string): number | undefined => {
+    const value = stats?.[key];
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  };
+  const tokens = count("total_tokens");
+  if (tokens !== undefined) row.tokens = tokens;
+  const turns = count("turns");
+  const prompt = (count("input_tokens") ?? 0) + (count("cache_read_tokens") ?? 0) + (count("cache_write_tokens") ?? 0);
+  if (turns !== undefined && turns > 0) {
+    row.turns = turns;
+    if (prompt > 0) row.contextTokens = Math.round(prompt / turns);
+  }
+  const output = count("output_tokens");
+  if (output !== undefined) row.outputTokens = output;
   const childSession = asString(task["child_session_id"]);
   if (childSession) row.childSession = childSession;
   return row;
